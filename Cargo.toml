@@ -1,0 +1,27 @@
+[package]
+name = "claude-usage"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server + TUI for real-time Claude Code usage stats"
+
+[[bin]]
+name = "claude-usage"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+dirs = "5"
+notify = "6"
+ratatui = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "time"] }
+ureq = { version = "2", features = ["json"] }
+walkdir = "2"
+
+[profile.release]
+lto = "thin"
+strip = true
