@@ -1,13 +1,15 @@
 # claude-usage
 
 A Rust tool for tracking, visualising, and exposing Claude Code usage stats.
-One binary, five subcommands:
+One binary, seven subcommands:
 
 | Subcommand | What it does |
 |------------|--------------|
 | `claude-usage tui`    | Interactive full-screen dashboard that updates as session files change. |
 | `claude-usage status` | One-line ANSI-coloured summary for Claude Code's `statusLine`. |
 | `claude-usage watch`  | Background daemon that keeps the `status` output cached and hot. |
+| `claude-usage setup`  | Wire `statusLine` into `~/.claude/settings.json` and (optionally) install a watcher service. |
+| `claude-usage stop`   | Stop the watcher service (systemd on Linux, launchd on macOS); `--disable` also removes it from autostart. |
 | `claude-usage dump`   | Dump the full aggregate as JSON (for scripts / debugging). |
 | `claude-usage mcp`    | Expose usage stats as an MCP server over stdio. |
 
@@ -121,20 +123,69 @@ Drop this into your Claude Code `statusLine` hook. Claude Code writes a
 JSON payload to stdin containing `transcript_path` and `model.id`; we
 use both to render:
 
-- The 5h window (live if available, local estimate otherwise).
-- The 7d window (live only; omitted if not available).
-- An `extra` segment when subscription credits are being actively
-  burned — this promotes itself to leading position and hides the 5h
-  percentage (but keeps the reset time).
+- The 5h window (live if available, local estimate otherwise) with its
+  reset time.
+- An `extra` segment that promotes itself to the leading position
+  (and hides the 5h percentage, keeping only the reset time) **once
+  the current 5h window is at its cap**. Below the cap, `extra` is
+  not shown in the statusLine even when credits have been spent
+  earlier in the billing period — the TUI still surfaces that
+  information on its own gauge.
 - A `ctx` segment showing the current session's context utilisation
   against its cap. Cap is detected in order: `model.id` contains `[1m]`
   → 1 M; any message in the session had >200 K context → 1 M;
   `~/.claude/settings.json` model is `…[1m]` → 1 M; otherwise 200 K.
 
-To avoid re-parsing every session file on every keypress, run a
-background watcher (see next section).
+The 7d window is shown in the TUI but omitted from the statusLine to
+keep the line short.
+
+`claude-usage status` is fast enough to invoke per keypress — the
+per-file JSONL cache (`files.json`) skips untouched files and the
+live endpoint is served from `live.json` for 60 s between refreshes.
+For heavier setups the optional `watch` daemon can pre-render the
+line to disk (see below).
 
 ---
+
+## `setup` — one-shot install
+
+```sh
+claude-usage setup              # wire statusLine + seed the cache
+claude-usage setup --service    # also install a user service unit for `watch`
+claude-usage setup --force      # overwrite an existing statusLine entry
+```
+
+Does the wiring described above for you:
+
+1. Writes (or merges) a `statusLine` block into `~/.claude/settings.json`
+   that runs `<binary> status` (so the stdin payload reaches the renderer
+   and `ctx` can be shown). Idempotent: if the block already matches we
+   leave it alone; if it points somewhere else we refuse to overwrite
+   without `--force`. Other keys in `settings.json` are preserved.
+2. Seeds the status cache with one render so the optional `watch`
+   daemon has something on disk from the start.
+3. With `--service`: installs a user-scope service unit and starts it.
+   - **Linux:** `~/.config/systemd/user/claude-usage-watch.service`,
+     enabled via `systemctl --user enable --now`.
+   - **macOS:** `~/Library/LaunchAgents/com.claude-usage.watch.plist`,
+     loaded via `launchctl load -w`.
+
+The service unit captures the absolute path of the `claude-usage`
+binary you ran `setup` from — if you move the binary later, re-run
+`claude-usage setup --service` so the unit points at the new location.
+
+## `stop` — stop the watcher
+
+```sh
+claude-usage stop              # stop the running service (will restart on login)
+claude-usage stop --disable    # stop and prevent it from starting on login
+```
+
+Counterpart to `setup --service`. Maps to `systemctl --user stop` (Linux)
+or `launchctl unload` (macOS). With `--disable`, also `systemctl --user
+disable` / `launchctl unload -w` so the service does not come back on the
+next login. Does nothing if no unit is installed — the unit file itself
+is left on disk either way, so `setup --service` can bring it back.
 
 ## `watch` — background daemon
 

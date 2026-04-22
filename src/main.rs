@@ -19,6 +19,7 @@ use clap::{Parser, Subcommand};
 mod auth;
 mod live_usage;
 mod mcp;
+mod setup;
 mod stats;
 mod tui;
 mod watch;
@@ -47,6 +48,21 @@ enum Cmd {
     Status,
     /// Run a background watcher that keeps the status cache hot as session files change.
     Watch,
+    /// Wire Claude Code's statusLine to this binary and (optionally) install a watcher service.
+    Setup {
+        /// Also install a user-scope service (systemd on Linux, launchd on macOS) to run the watcher at login.
+        #[arg(long)]
+        service: bool,
+        /// Overwrite an existing statusLine entry in ~/.claude/settings.json.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Stop the watcher service (systemd user unit on Linux, launchd agent on macOS).
+    Stop {
+        /// Also disable the service so it does not start again on login.
+        #[arg(long)]
+        disable: bool,
+    },
 }
 
 /// Read Claude Code's statusLine JSON payload from stdin and extract
@@ -101,6 +117,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Watch => watch::run_forever(no_live),
+        Cmd::Setup { service, force } => setup::run(service, force, no_live),
+        Cmd::Stop { disable } => setup::stop(disable),
         Cmd::Mcp => {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
             rt.block_on(mcp::run(no_live))

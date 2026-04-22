@@ -1,13 +1,11 @@
 //! Status-line renderer + background watcher.
 //!
 //! [`render_status`] builds the one-line ANSI-coloured string shown in
-//! Claude Code's `statusLine`. It composes up to four segments:
+//! Claude Code's `statusLine`. It composes up to three segments:
 //!
-//! - 5h window (live if available, local estimate otherwise).
-//! - 5h reset time.
-//! - 7d window (live only).
+//! - 5h window (live if available, local estimate otherwise) + reset time.
 //! - Active-extra-usage segment (promotes itself to leading position
-//!   and hides the 5h % while subscription credits are being burned).
+//!   and hides the 5h % once the current 5h window is at its cap).
 //! - Per-session context (`ctx N%`) when a transcript is in scope.
 //!
 //! [`run_forever`] is the `watch` subcommand: it subscribes to JSONL
@@ -60,17 +58,25 @@ pub fn render_status(transcript_path: Option<&Path>, model_alias: Option<&str>, 
     let agg = stats::load_and_aggregate().unwrap_or_default();
     let live = live_usage::fetch_or_cached(no_live);
 
-    // Extra usage is "actively billing" once we've spent any credits. At that
-    // point the 5h meter is pinned at 100% and the 7d meter is noise next to
-    // the hard-limit dollar spend, so we hide both and let `extra` lead the
-    // line — followed by the 5h reset time so the user still sees when the
-    // main meter frees up.
-    let billing_extra = live
+    // Promote `extra` to the lead only once the *current* 5h window is at its
+    // cap. `extra_usage.used_credits` accumulates over the billing period, so
+    // testing it alone hides the 5h meter for the rest of the month after the
+    // first extra credit is ever spent — even when the current 5h window is
+    // fresh. Require both signals: credits actively burning AND 5h at cap.
+    // When promoted, the 5h label+pct is dropped but the reset time stays so
+    // the user still sees when the main meter frees up.
+    let five_h_at_cap = live
         .as_ref()
-        .and_then(|l| l.extra_usage.as_ref())
-        .filter(|e| e.is_enabled)
-        .and_then(|e| e.used_credits)
-        .is_some_and(|c| c > 0.0);
+        .and_then(|l| l.five_hour.as_ref())
+        .is_some_and(|w| w.utilization >= 100.0);
+
+    let billing_extra = five_h_at_cap
+        && live
+            .as_ref()
+            .and_then(|l| l.extra_usage.as_ref())
+            .filter(|e| e.is_enabled)
+            .and_then(|e| e.used_credits)
+            .is_some_and(|c| c > 0.0);
 
     // --- 5h window segment -------------------------------------------------
     // When billing_extra is active we drop the 5h label+pct but keep the
@@ -82,28 +88,6 @@ pub fn render_status(transcript_path: Option<&Path>, model_alias: Option<&str>, 
             Some((seg, reset)) => (seg, reset),
             None => local_five_h_segment(&agg),
         }
-    };
-
-    // --- 7d window segment (only from live endpoint, hidden when billing) -
-    let seven_d_segment = if billing_extra {
-        String::new()
-    } else {
-        live.as_ref()
-            .and_then(|l| l.seven_day.as_ref())
-            .map(|w| {
-                let pct = w.utilization;
-                let color = pct_color(pct);
-                let reset = w
-                    .resets_at
-                    .map(|t| format!(" (reset {})", t.with_timezone(&Local).format("%a")))
-                    .unwrap_or_default();
-                format!(
-                    " \x1b[90m|\x1b[0m \x1b[36m7d\x1b[0m \x1b[{c}m{p:.0}%\x1b[0m\x1b[90m{reset}\x1b[0m",
-                    c = color,
-                    p = pct
-                )
-            })
-            .unwrap_or_default()
     };
 
     // --- Extra usage segment (only when actually billing) -----------------
@@ -151,7 +135,7 @@ pub fn render_status(transcript_path: Option<&Path>, model_alias: Option<&str>, 
     if billing_extra {
         format!("{extra_segment}{reset_segment}{ctx_segment}")
     } else {
-        format!("{five_h_segment}{reset_segment}{seven_d_segment}{extra_segment}{ctx_segment}")
+        format!("{five_h_segment}{reset_segment}{ctx_segment}")
     }
 }
 

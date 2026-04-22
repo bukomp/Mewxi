@@ -410,13 +410,20 @@ pub fn aggregate(records: &[UsageRecord]) -> Aggregate {
     agg.recent = records.iter().rev().take(20).cloned().collect();
 
     // Rolling 5h session block, matching Anthropic's own accounting:
-    //  - A block starts at the clock hour of the first message (timestamp floored to the hour).
+    //  - A block starts at the clock hour of its oldest message (timestamp floored to the hour).
     //  - The block lasts exactly 5 hours from that hour. Messages whose timestamp falls
     //    within [block_start, block_start + 5h) count toward this block.
     //  - A gap of ≥5h between messages ends the block; the next message starts a new one.
+    //  - When a block's 5h ends mid-activity, subsequent messages start a new block at
+    //    floor_to_hour(their own timestamp) — so walking back we must also stop once an
+    //    older message's floor_to_hour would push block_start such that the newest message
+    //    no longer fits inside [block_start, block_start + 5h). Without this check,
+    //    continuous-activity histories spanning >5h collapse block_start to a past hour,
+    //    defeating the post-loop "current block" test and zeroing the whole window.
     //  - A block is "current" only if now < block_start + 5h.
     let now_utc = Utc::now();
     let five_h = chrono::Duration::hours(5);
+    let newest_ts = records.last().map(|r| r.timestamp);
     let mut block_start: Option<DateTime<Utc>> = None;
     let mut prev_ts: Option<DateTime<Utc>> = None;
     let mut block_records: Vec<UsageRecord> = Vec::new();
@@ -426,7 +433,13 @@ pub fn aggregate(records: &[UsageRecord]) -> Aggregate {
                 break;
             }
         }
-        block_start = Some(floor_to_hour(r.timestamp));
+        let candidate_start = floor_to_hour(r.timestamp);
+        if let Some(n) = newest_ts {
+            if candidate_start + five_h <= n {
+                break;
+            }
+        }
+        block_start = Some(candidate_start);
         prev_ts = Some(r.timestamp);
         agg.rolling_5h.add(r);
         block_records.push(r.clone());
