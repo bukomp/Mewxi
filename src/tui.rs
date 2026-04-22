@@ -382,13 +382,17 @@ fn render_narrow(
 }
 
 fn render_header(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<&LiveUsage>) {
-    let source = match live {
-        Some(l) if l.is_stale() => "• live: stale",
+    let source: String = match live {
+        Some(l) if l.is_stale() => format!("• live: stale {}m", l.age_seconds() / 60),
         Some(l) => {
             let age = l.age_seconds();
-            if age < 90 { "• live: fresh" } else { "• live: cached" }
+            if age < 90 {
+                "• live: fresh".to_string()
+            } else {
+                format!("• live: cached {}m", age / 60)
+            }
         }
-        None => "• live: off",
+        None => "• live: off".to_string(),
     };
     let line = Line::from(vec![
         Span::styled("Claude Usage", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -424,9 +428,9 @@ fn render_5h_gauge(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<&Liv
                     format!("  reset {} ({}m)", t.with_timezone(&Local).format("%H:%M"), remaining)
                 })
                 .unwrap_or_default();
-            let tag = match live {
-                Some(l) if l.is_stale() => "5h (stale)",
-                _ => "5h (live)",
+            let tag: String = match live {
+                Some(l) if l.is_stale() => format!("5h (stale {}m)", l.age_seconds() / 60),
+                _ => "5h (live)".to_string(),
             };
             (w.utilization, reset, tag)
         }
@@ -439,7 +443,7 @@ fn render_5h_gauge(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<&Liv
                     format!("  reset {} ({}m)", t.with_timezone(&Local).format("%H:%M"), remaining)
                 })
                 .unwrap_or_default();
-            (p, reset, "5h (estimate)")
+            (p, reset, "5h (estimate)".to_string())
         }
     };
     let ratio = (pct / 100.0).clamp(0.0, 1.0);

@@ -103,7 +103,7 @@ pub fn render_status(transcript_path: Option<&Path>, model_alias: Option<&str>, 
                 let color = pct_color(pct);
                 let sym = currency_symbol(e.currency.as_deref());
                 format!(
-                    "\x1b[36mextra\x1b[0m \x1b[{c}m{p:.0}%\x1b[0m \x1b[90m({sym}{:.2}/{sym}{:.2})\x1b[0m",
+                    "\x1b[36mextra\x1b[0m \x1b[{c}m{p:.1}%\x1b[0m \x1b[90m({sym}{:.2}/{sym}{:.2})\x1b[0m",
                     used,
                     limit,
                     c = color,
@@ -168,7 +168,7 @@ fn five_h_from_live(live: Option<&live_usage::LiveUsage>) -> Option<(String, Str
         " \x1b[90m(live)\x1b[0m".to_string()
     };
     let seg = format!(
-        "\x1b[36m5h\x1b[0m \x1b[{c}m{p:.0}%\x1b[0m{tag}",
+        "\x1b[36m5h\x1b[0m \x1b[{c}m{p:.1}%\x1b[0m{tag}",
         c = color,
         p = pct,
         tag = tag,
