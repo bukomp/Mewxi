@@ -35,10 +35,21 @@ cargo build --release
 ```
 
 No runtime dependencies beyond a working Rust toolchain at build time.
-macOS is the only platform where live `/usage` fetching is wired up
-(requires access to the `Claude Code-credentials` keychain entry via
-`security find-generic-password`). Other platforms still work in
-`--no-live` mode using local JSONL data only.
+Live `/usage` fetching works on macOS and Linux; the OAuth Bearer token
+is discovered in this order, first hit wins:
+
+1. `CLAUDE_USAGE_OAUTH_TOKEN` env var (universal escape hatch: CI,
+   remote shells without keychain access, Windows).
+2. **macOS only** — the `Claude Code-credentials` keychain entry via
+   `security find-generic-password`.
+3. `~/.claude/.credentials.json` — the plaintext file (mode 0600) that
+   Claude Code itself writes on Linux. Also acts as a fallback on
+   macOS when the keychain is unavailable (sandboxed runs, no GUI).
+
+Windows has no native-store integration yet; drop the credentials file
+into `%USERPROFILE%\.claude\` or set the env var. If none of the above
+is available, `--no-live` keeps every subcommand working against local
+JSONL data only.
 
 ---
 
@@ -132,9 +143,11 @@ claude-usage watch         # runs forever
 ```
 
 Watches `~/.claude/projects/` for JSONL changes via `notify`, re-renders
-the status line, and writes it atomically to
-`$XDG_CACHE_HOME/claude-usage/status.txt` (i.e. macOS:
-`~/Library/Caches/claude-usage/status.txt`).
+the status line, and writes it atomically to the platform cache dir:
+
+- **Linux:** `$XDG_CACHE_HOME/claude-usage/status.txt` (defaults to
+  `~/.cache/claude-usage/status.txt`).
+- **macOS:** `~/Library/Caches/claude-usage/status.txt`.
 
 - Coalesces event bursts; writes at most once per 500 ms.
 - Writes a heartbeat every 15 s even when idle so the cache never goes
@@ -142,8 +155,9 @@ the status line, and writes it atomically to
 - If the cache file is deleted out from under it, recreates on next
   tick.
 
-Typical setup: wire `statusLine` to `cat ~/Library/Caches/claude-usage/status.txt`
-and run `claude-usage watch` as a launchd agent or equivalent.
+Typical setup: wire `statusLine` to `cat` the above path and run
+`claude-usage watch` under a long-lived process supervisor — a launchd
+agent on macOS, a systemd user unit on Linux, or any equivalent.
 
 ---
 
@@ -311,17 +325,30 @@ any `watch` / `tui` processes after a `cargo build --release`).
 
 **5h gauge title says `(estimate)`, never `(live)`.**
 One of: `--no-live` is set; the `CLAUDE_USAGE_NO_LIVE` env var is set;
-you're not on macOS; you don't have a Claude Code subscription token in
-the keychain; or the endpoint is rate-limited and there's no cache yet.
+no credential was found (`CLAUDE_USAGE_OAUTH_TOKEN` unset, no macOS
+keychain entry, and `~/.claude/.credentials.json` missing or
+unreadable); or the endpoint is rate-limited and there's no cache yet.
 Run `claude-usage dump | jq .live` to see which branch you're in — a
-`null` means no live data at all.
+`null` means no live data at all. On Linux, check
+`ls -l ~/.claude/.credentials.json` — if Claude Code itself is logged
+in, that file should exist with mode `0600`.
 
 **5h local estimate disagrees with `(live)`.**
 Expected when you're on a plan whose cap differs from `11 500 000`
 tokens. Set `CLAUDE_USAGE_5H_CAP_TOKENS` to your plan's effective cap
 (Pro ≈ 2.3 M, Max 20× ≈ 46 M).
 
-**`security` prompts or returns a permission error.**
+**`security` prompts or returns a permission error (macOS).**
 The first time claude-usage reads the keychain entry it may need your
 approval. Open Keychain Access → login → search for
-`Claude Code-credentials` → Access Control → allow `security`.
+`Claude Code-credentials` → Access Control → allow `security`. If the
+keychain entry is genuinely missing (e.g., sandboxed shell, no GUI
+session), claude-usage transparently falls back to
+`~/.claude/.credentials.json`.
+
+**Live fetch fails on Linux.**
+Verify the credentials file exists and is readable:
+`ls -l ~/.claude/.credentials.json`. If Claude Code itself works but
+the file is absent, log out and back in to Claude Code so it rewrites
+the file. As a last resort, export `CLAUDE_USAGE_OAUTH_TOKEN` with the
+Bearer token directly.
