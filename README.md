@@ -1,4 +1,8 @@
-# Muxi
+<p align="center">
+  <img src="images/muxi.png" alt="Muxi" width="200">
+</p>
+
+<h1 align="center">Muxi</h1>
 
 A Rust tool for tracking, visualising, and exposing Claude Code usage stats
 across one or many `CLAUDE_CONFIG_DIR` accounts. One binary, seven subcommands:

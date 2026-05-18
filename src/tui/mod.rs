@@ -79,6 +79,16 @@ enum ViewMode {
     Setup,
 }
 
+/// Stylised cat-face brand logo. The fixed 100-col left/right padding
+/// in the file lets `Alignment::Center` place the glyph cleanly in
+/// wider terminals without us computing offsets ourselves.
+const LOGO_ASCII: &str = include_str!("../../images/muxi.ascii");
+const LOGO_CONTENT_HEIGHT: u16 = 28;
+/// Hold the splash for this long unless the user dismisses with a key.
+/// Long enough to register the brand, short enough that returning users
+/// don't feel held hostage.
+const SPLASH_DURATION: Duration = Duration::from_millis(1400);
+
 pub fn run(no_live: bool) -> Result<()> {
     // Silence stderr-bound logging from background fetch threads — any
     // `eprintln!` into the alternate screen would visibly corrupt rows.
@@ -92,6 +102,7 @@ pub fn run(no_live: bool) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    let _ = show_splash(&mut terminal, SPLASH_DURATION);
     let result = run_loop(&mut terminal, no_live);
 
     disable_raw_mode()?;
@@ -99,6 +110,95 @@ pub fn run(no_live: bool) -> Result<()> {
     terminal.show_cursor()?;
     live_usage::set_tui_mode(false);
     result
+}
+
+fn show_splash<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    duration: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        terminal.draw(|f| render_splash(f, f.area()))?;
+        let remaining = duration.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        let poll_for = remaining.min(Duration::from_millis(80));
+        if event::poll(poll_for)? {
+            if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
+    use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Clear, Paragraph};
+
+    f.render_widget(Clear, area);
+
+    if area.height < LOGO_CONTENT_HEIGHT + 2 || area.width < 40 {
+        let line = Line::from(Span::styled(
+            "Muxi",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+        f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+        return;
+    }
+
+    let lines: Vec<Line> = LOGO_ASCII
+        .lines()
+        .map(|l| {
+            Line::from(Span::styled(
+                l.to_string(),
+                Style::default().fg(Color::Magenta),
+            ))
+        })
+        .collect();
+    let logo_h = lines.len() as u16;
+    let tagline_h: u16 = 2;
+    let total_h = logo_h + tagline_h;
+    let top_pad = area.height.saturating_sub(total_h) / 2;
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top_pad),
+            Constraint::Length(logo_h),
+            Constraint::Length(tagline_h),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    f.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        chunks[1],
+    );
+
+    let tagline = vec![
+        Line::from(Span::styled(
+            "Muxi",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "multi-account Claude Code usage tracker",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(tagline).alignment(Alignment::Center),
+        chunks[2],
+    );
 }
 
 enum LiveMsg {
