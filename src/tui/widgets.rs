@@ -198,7 +198,7 @@ pub fn render_5h_gauge(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<
                 .resets_at
                 .map(|t| {
                     let remaining = (t - Utc::now()).num_minutes().max(0);
-                    format!("  reset {} ({}m)", t.with_timezone(&Local).format("%H:%M"), remaining)
+                    format!("  reset {} ({:>3}m)", t.with_timezone(&Local).format("%H:%M"), remaining)
                 })
                 .unwrap_or_default();
             let tag: String = match live {
@@ -213,7 +213,7 @@ pub fn render_5h_gauge(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<
                 .five_h_resets_at
                 .map(|t| {
                     let remaining = (t - Utc::now()).num_minutes().max(0);
-                    format!("  reset {} ({}m)", t.with_timezone(&Local).format("%H:%M"), remaining)
+                    format!("  reset {} ({:>3}m)", t.with_timezone(&Local).format("%H:%M"), remaining)
                 })
                 .unwrap_or_default();
             (p, reset, "5h (estimate)".to_string())

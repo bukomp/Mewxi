@@ -130,7 +130,7 @@ fn render_one_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
         .map(|t| {
             let local = t.with_timezone(&Local);
             let mins = (t - Utc::now()).num_minutes().max(0);
-            format!("reset {} ({}m)", local.format("%H:%M"), mins)
+            format!("reset {} ({:>3}m)", local.format("%H:%M"), mins)
         })
         .unwrap_or_default();
     let seven_d_meta = live

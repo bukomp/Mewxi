@@ -5,9 +5,17 @@ Track Claude Code usage in your status line and a TUI dashboard.
 ## 1. Install the binary
 
 ```sh
-cargo build --release
-mkdir -p ~/.local/bin
-cp target/release/claude-usage ~/.local/bin/
+cargo install --path . --root ~/.local
+```
+
+Builds release and writes `~/.local/bin/claude-usage`. Works on Linux, macOS,
+and Windows (use `%USERPROFILE%\.local` on Windows). Swap `--root` for any
+prefix you prefer (e.g. `/usr/local`).
+
+To uninstall:
+
+```sh
+cargo uninstall --root ~/.local claude-usage
 ```
 
 Make sure `~/.local/bin` is on your `PATH` (add to `~/.zshrc` / `~/.bashrc` if not):
