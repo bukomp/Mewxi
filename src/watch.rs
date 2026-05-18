@@ -145,10 +145,29 @@ pub(crate) fn render_status_for_account(
     };
 
     // --- Context segment ---------------------------------------------------
+    let session_id = transcript_path
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
+    // If Claude Code told us this session is on `[1m]`, persist that fact
+    // so the TUI (which doesn't see stdin) renders the same cap. Without
+    // this, ctx% in the all-sessions table can read ~5x higher than the
+    // statusline until any single message crosses 200K tokens.
+    if let (Some(alias), Some(sid)) = (model_alias, session_id.as_deref()) {
+        if alias.contains("[1m]") {
+            stats::mark_extended_context(account, sid);
+        }
+    }
     let ctx_segment = transcript_path
         .and_then(stats::current_context_from_transcript)
         .map(|sc| {
-            let cap = stats::context_cap_for(&sc.model, sc.max_observed, model_alias, account);
+            let cap = stats::context_cap_for(
+                &sc.model,
+                sc.max_observed,
+                model_alias,
+                account,
+                session_id.as_deref(),
+            );
             let pct = (sc.current as f64 / cap as f64 * 100.0).min(999.0);
             let color = if pct >= 85.0 { "31" } else if pct >= 60.0 { "33" } else { "32" };
             format!(

@@ -229,7 +229,13 @@ pub fn scan(
         let (current_context, context_cap) = if transcript_exists {
             match stats::current_context_from_transcript(&transcript) {
                 Some(SessionContext { current, max_observed, model: m }) => {
-                    let cap = stats::context_cap_for(&m, max_observed, None, account);
+                    let cap = stats::context_cap_for(
+                        &m,
+                        max_observed,
+                        None,
+                        account,
+                        Some(&marker.session_id),
+                    );
                     (Some(current), Some(cap))
                 }
                 None => (None, None),

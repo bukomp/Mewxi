@@ -587,20 +587,52 @@ pub fn extended_context_from_settings(account: &Account) -> bool {
 
 /// Decide a model's context cap. The heuristics, in order of confidence:
 ///  1. stdin alias from Claude Code containing `[1m]` → 1M
-///  2. Any message in this session had >200K context → 1M
-///  3. The account's `settings.json` model is `…[1m]` → 1M
-///  4. Otherwise 200K (default for all current Claude models)
+///  2. A prior statusline call for this session saw `[1m]` (marker file) → 1M
+///  3. Any message in this session had >200K context → 1M
+///  4. The account's `settings.json` model is `…[1m]` → 1M
+///  5. Otherwise 200K (default for all current Claude models)
+///
+/// `session_id` is optional and used to consult the persisted [1m] marker
+/// written by the statusline. Without it the TUI can't tell that the user
+/// is on [1m] until a single message exceeds 200K tokens, which leaves
+/// the ctx column showing wildly inflated percentages until then.
 pub fn context_cap_for(
     api_model: &str,
     max_observed: u64,
     stdin_alias: Option<&str>,
     account: &Account,
+    session_id: Option<&str>,
 ) -> u64 {
     let _ = api_model;
     let one_m = stdin_alias.is_some_and(|s| s.contains("[1m]"))
+        || session_id.is_some_and(|sid| extended_context_marked(account, sid))
         || max_observed > 200_000
         || extended_context_from_settings(account);
     if one_m { 1_000_000 } else { 200_000 }
+}
+
+fn extended_context_marker_path(account: &Account, session_id: &str) -> Option<std::path::PathBuf> {
+    dirs::cache_dir().map(|c| {
+        c.join("claude-usage")
+            .join("ext-ctx")
+            .join(format!("{}-{}.flag", account.slug(), session_id))
+    })
+}
+
+/// Record that this session has been seen using `[1m]` (1M context tier).
+/// Idempotent — writing an existing file is a no-op for our purposes.
+pub fn mark_extended_context(account: &Account, session_id: &str) {
+    let Some(p) = extended_context_marker_path(account, session_id) else { return };
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&p, b"");
+}
+
+/// True iff [`mark_extended_context`] was previously called for this session.
+pub fn extended_context_marked(account: &Account, session_id: &str) -> bool {
+    extended_context_marker_path(account, session_id)
+        .is_some_and(|p| p.exists())
 }
 
 /// Given a chronological list of 5h-block records and the plan's token cap,

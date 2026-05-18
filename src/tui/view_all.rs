@@ -333,6 +333,16 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         return;
     }
 
+    // Responsive columns — added in priority order as the screen widens.
+    // Base columns need ~84 chars (8 columns + 7 spacers + 2 borders);
+    // each extra column adds (length + 1 spacer). Thresholds include a
+    // small buffer so columns don't appear right at the edge of fitting.
+    let w = area.width;
+    let show_ctx = w >= 95;
+    let show_msgs = w >= 102;
+    let show_io = w >= 116;
+    let show_cache = w >= 125;
+
     let now = Utc::now();
     let rows: Vec<Row> = sessions
         .iter()
@@ -355,39 +365,87 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
             } else {
                 Style::default()
             };
-            Row::new(vec![
+            let mut cells: Vec<Cell> = vec![
                 Cell::from(format!("{arrow}{}", s.account_name)),
                 Cell::from(s.project.clone()),
                 Cell::from(short_id(&s.session_id)),
                 Cell::from(fmt_age(age_secs)),
-                Cell::from(fmt_tokens_compact(s.tokens)),
-                Cell::from(format!("${:.2}", s.cost_usd)),
-                Cell::from(short_model(&s.model)),
-                Cell::from(Span::styled(state_label, Style::default().fg(state_color))),
-            ])
-            .style(base_style)
+            ];
+            if show_msgs {
+                cells.push(Cell::from(s.totals.messages.to_string()));
+            }
+            if show_ctx {
+                cells.push(Cell::from(fmt_ctx(s.current_context, s.context_cap)));
+            }
+            cells.push(Cell::from(fmt_tokens_compact(s.tokens)));
+            if show_io {
+                cells.push(Cell::from(format!(
+                    "{}/{}",
+                    fmt_tokens_compact(s.totals.input),
+                    fmt_tokens_compact(s.totals.output),
+                )));
+            }
+            if show_cache {
+                cells.push(Cell::from(fmt_tokens_compact(s.totals.cache_read)));
+            }
+            cells.push(Cell::from(format!("${:.2}", s.cost_usd)));
+            cells.push(Cell::from(short_model(&s.model)));
+            cells.push(Cell::from(Span::styled(state_label, Style::default().fg(state_color))));
+            Row::new(cells).style(base_style)
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(12),
-            Constraint::Min(14),
-            Constraint::Length(11),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(9),
-            Constraint::Length(8),
-            Constraint::Length(7),
-        ],
-    )
-    .header(
-        Row::new(vec!["account", "project", "session", "age", "tokens", "cost", "model", "state"])
-            .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
-    )
-    .block(block);
+    let mut header_labels: Vec<&'static str> = vec!["account", "project", "session", "age"];
+    let mut constraints: Vec<Constraint> = vec![
+        Constraint::Length(12),
+        Constraint::Min(14),
+        Constraint::Length(11),
+        Constraint::Length(6),
+    ];
+    if show_msgs {
+        header_labels.push("msgs");
+        constraints.push(Constraint::Length(5));
+    }
+    if show_ctx {
+        header_labels.push("ctx");
+        constraints.push(Constraint::Length(5));
+    }
+    header_labels.push("tokens");
+    constraints.push(Constraint::Length(8));
+    if show_io {
+        header_labels.push("in/out");
+        // "999k/999k" = 9 chars, "1.00M/1.00M" worst case = 11. Header
+        // "in/out" is 6 chars. Give it 11 so both values stay legible.
+        constraints.push(Constraint::Length(11));
+    }
+    if show_cache {
+        header_labels.push("cache");
+        constraints.push(Constraint::Length(7));
+    }
+    header_labels.push("cost");
+    constraints.push(Constraint::Length(9));
+    header_labels.push("model");
+    constraints.push(Constraint::Length(8));
+    header_labels.push("state");
+    constraints.push(Constraint::Length(7));
+
+    let table = Table::new(rows, constraints)
+        .header(
+            Row::new(header_labels)
+                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+        )
+        .block(block);
     f.render_widget(table, area);
+}
+
+fn fmt_ctx(current: Option<u64>, cap: Option<u64>) -> String {
+    match (current, cap) {
+        (Some(c), Some(cap)) if cap > 0 => {
+            let pct = (c as f64 / cap as f64 * 100.0).round() as u32;
+            format!("{pct}%")
+        }
+        _ => "—".into(),
+    }
 }
 
 fn short_id(s: &str) -> String {
