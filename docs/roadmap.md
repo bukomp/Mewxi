@@ -40,5 +40,8 @@ new agent team," with cost accounting built in from day one.
 - Windows support (currently untested).
 - Export aggregates as Prometheus / OpenMetrics for dashboarding.
 - Per-project budgets with notifications when you cross them.
+- Automated Rust build & release pipeline in GitHub Actions —
+  cross-platform binaries (Linux / macOS / Windows) attached to tagged
+  releases, with `cargo publish` on version bumps.
 
 Suggestions welcome — open an issue.
