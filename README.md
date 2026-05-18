@@ -2,7 +2,7 @@
 
 <img src="images/muxi.png" alt="muxi — the digi-cat mascot" width="220" />
 
-# muxi
+# Muxi
 
 **MCP server + TUI for real-time coding-agent usage stats.**
 
