@@ -192,17 +192,50 @@ pub enum TailKind {
 /// is found in the inspected window.
 fn tail_activity(path: &Path) -> Option<TailKind> {
     let tail = read_tail(path, 256 * 1024)?;
-    for line in tail.lines().rev() {
+    let lines: Vec<&str> = tail.lines().collect();
+    for (idx, line) in lines.iter().enumerate().rev() {
         if line.is_empty() {
             continue;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let Some(a) = classify_record(&v) else { continue };
+        let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+
+        // Fast tools (Read/Grep/Glob) complete in <15 ms, well under the
+        // TUI's 500 ms debounce, so every scan lands AFTER the tool_result
+        // is written — we never observe the assistant tool_use as the tail
+        // record. Falling back to `Thinking` makes the entire fast-tool
+        // cascade invisible. Walk back to the matching assistant tool_use
+        // and surface its activity so e.g. a Read sequence keeps reading.
+        if t == "user" && a == Activity::Thinking {
+            if let Some(tool_a) = preceding_tool_activity(&lines[..idx]) {
+                return Some(TailKind::Completed(tool_a));
+            }
+        }
+
         // An assistant record we just classified as a tool is by
         // definition unresolved — nothing came after it in the file.
-        let is_pending = v.get("type").and_then(|t| t.as_str()) == Some("assistant")
-            && is_tool_activity(&a);
+        let is_pending = t == "assistant" && is_tool_activity(&a);
         return Some(if is_pending { TailKind::PendingTool(a) } else { TailKind::Completed(a) });
+    }
+    None
+}
+
+/// Walk `prior` lines (older-first) in reverse and return the tool
+/// activity of the most recent assistant record, if that record was a
+/// tool_use. If the most recent assistant record was thinking/text (no
+/// tool), or there is none in window, returns None.
+fn preceding_tool_activity(prior: &[&str]) -> Option<Activity> {
+    for line in prior.iter().rev() {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if v.get("type").and_then(|x| x.as_str()) != Some("assistant") {
+            continue;
+        }
+        let a = classify_record(&v)?;
+        return is_tool_activity(&a).then_some(a);
     }
     None
 }
