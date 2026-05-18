@@ -80,6 +80,12 @@ enum ViewMode {
 }
 
 pub fn run(no_live: bool) -> Result<()> {
+    // Silence stderr-bound logging from background fetch threads — any
+    // `eprintln!` into the alternate screen would visibly corrupt rows.
+    // Errors are still captured in `live_usage::most_recent_error()` so
+    // the TUI can render them in its own bordered footer.
+    live_usage::set_tui_mode(true);
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -91,6 +97,7 @@ pub fn run(no_live: bool) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+    live_usage::set_tui_mode(false);
     result
 }
 
@@ -114,6 +121,12 @@ enum LiveCmd {
 /// gauges keep ticking for both the active *and* the idle session
 /// without anyone having to interact with Claude Code.
 const POLLER_TICK: Duration = Duration::from_secs(5);
+
+/// How long view 1's session selection stays highlighted after the last
+/// navigation key. Long enough that the user can pick a row, glance at
+/// it, and decide whether to drill in; short enough that an unattended
+/// dashboard doesn't leave a stale highlight pinned to an arbitrary row.
+const SELECTION_VISIBLE: Duration = Duration::from_secs(5);
 
 fn spawn_live_poller(
     account: Account,
@@ -218,6 +231,12 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut selected_session: usize = 0;
     let mut selected_account: usize = 0;
     let mut selected_setup: usize = 0;
+    // View 1's session selection highlight fades out after a short
+    // idle period so the table doesn't stay visually pinned to a row
+    // the user picked once and forgot. The selection *index* still
+    // drives view 2's drill-down — only the row chrome (arrow / yellow
+    // bold) is suppressed once stale.
+    let mut last_session_select: Instant = Instant::now();
     let mut last_reload: HashMap<String, Instant> = HashMap::new();
     let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut last_full_tick = Instant::now();
@@ -281,6 +300,15 @@ fn run_loop<B: ratatui::backend::Backend>(
             selected_account = visible_accounts.len() - 1;
         }
 
+        let visible_selection = if last_session_select.elapsed() < SELECTION_VISIBLE {
+            Some(selected_session)
+        } else {
+            None
+        };
+
+        let live_error = live_usage::most_recent_error()
+            .map(|(acct, msg)| format!("[{acct}] {msg}"));
+
         terminal.draw(|f| {
             render(
                 f,
@@ -288,10 +316,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                 &visible_accounts,
                 &visible_sessions,
                 selected_session,
+                visible_selection,
                 selected_account,
                 selected_setup,
                 setup_snapshot.as_ref(),
                 setup_message.as_deref(),
+                live_error.as_deref(),
             )
         })?;
 
@@ -363,7 +393,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 let _ = cmd_tx.send(LiveCmd::Refresh);
                             }
                         }
-                        KeyCode::Char('1') => mode = ViewMode::AllSessions,
+                        KeyCode::Char('1') => {
+                            mode = ViewMode::AllSessions;
+                            last_session_select = Instant::now();
+                        }
                         KeyCode::Char('2') => mode = ViewMode::SessionDetail,
                         KeyCode::Char('3') => mode = ViewMode::AccountDetail,
                         KeyCode::Char('4') => {
@@ -401,6 +434,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
                                 if !sessions.is_empty() {
                                     selected_session = (selected_session + 1) % sessions.len();
+                                    last_session_select = Instant::now();
                                 }
                             }
                             ViewMode::AccountDetail => {
@@ -420,6 +454,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if !sessions.is_empty() {
                                     selected_session = (selected_session + sessions.len() - 1)
                                         % sessions.len();
+                                    last_session_select = Instant::now();
                                 }
                             }
                             ViewMode::AccountDetail => {
@@ -439,6 +474,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
                                 if !sessions.is_empty() {
                                     selected_session = (selected_session + 1).min(sessions.len() - 1);
+                                    last_session_select = Instant::now();
                                 }
                             }
                             ViewMode::AccountDetail => {
@@ -458,6 +494,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
                                 if selected_session > 0 {
                                     selected_session -= 1;
+                                    last_session_select = Instant::now();
                                 }
                             }
                             ViewMode::AccountDetail => {
@@ -492,38 +529,53 @@ fn render(
     accounts: &[&PerAccount],
     sessions: &[&SessionRef],
     selected_session: usize,
+    visible_session_selection: Option<usize>,
     selected_account: usize,
     selected_setup: usize,
     setup: Option<&SetupSnapshot>,
     setup_message: Option<&str>,
+    live_error: Option<&str>,
 ) {
     let area = f.area();
     let needs_setup = setup.is_some_and(|s| !s.fully_ok());
+    // Reserve 4 rows (2 borders + 2 content lines, wrapped) when there's
+    // a live-fetch error to surface. Skip the reservation entirely when
+    // there's no error so the view gets the full screen.
+    let error_height: u16 = if live_error.is_some() { 4 } else { 0 };
 
     let mut constraints = vec![ratatui::layout::Constraint::Length(1)]; // top header
     if needs_setup && mode != ViewMode::Setup {
         constraints.push(ratatui::layout::Constraint::Length(1)); // setup banner
     }
     constraints.push(ratatui::layout::Constraint::Min(0)); // view area
+    if error_height > 0 {
+        constraints.push(ratatui::layout::Constraint::Length(error_height));
+    }
     let chunks = ratatui::layout::Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints(constraints)
         .split(area);
 
     let header_area = chunks[0];
-    let (banner_area, view_area) = if needs_setup && mode != ViewMode::Setup {
-        (Some(chunks[1]), chunks[2])
-    } else {
-        (None, chunks[1])
+    let (banner_area, view_area, error_area) = match (needs_setup && mode != ViewMode::Setup, error_height > 0) {
+        (true, true) => (Some(chunks[1]), chunks[2], Some(chunks[3])),
+        (true, false) => (Some(chunks[1]), chunks[2], None),
+        (false, true) => (None, chunks[1], Some(chunks[2])),
+        (false, false) => (None, chunks[1], None),
     };
 
-    render_top_header(f, header_area, mode, accounts.len());
+    render_top_header(f, header_area);
     if let (Some(area), Some(snap)) = (banner_area, setup) {
         render_setup_banner(f, area, snap);
     }
+    if let (Some(area), Some(msg)) = (error_area, live_error) {
+        render_error_footer(f, area, msg);
+    }
 
     match mode {
-        ViewMode::AllSessions => view_all::render(f, view_area, accounts, sessions, selected_session),
+        ViewMode::AllSessions => {
+            view_all::render(f, view_area, accounts, sessions, visible_session_selection)
+        }
         ViewMode::SessionDetail => {
             view_session::render(f, view_area, accounts, sessions.get(selected_session).copied())
         }
@@ -536,23 +588,36 @@ fn render(
     }
 }
 
-fn render_top_header(f: &mut Frame, area: ratatui::layout::Rect, mode: ViewMode, n_accounts: usize) {
+fn render_top_header(f: &mut Frame, area: ratatui::layout::Rect) {
     use ratatui::layout::Alignment;
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::Paragraph;
-    let view_label = match mode {
-        ViewMode::AllSessions => format!("sessions · {n_accounts} account{}", if n_accounts == 1 { "" } else { "s" }),
-        ViewMode::SessionDetail => "session detail".into(),
-        ViewMode::AccountDetail => "account detail".into(),
-        ViewMode::Setup => "setup".into(),
-    };
-    let line = Line::from(vec![
-        Span::styled("Muxi", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        Span::raw("  ·  "),
-        Span::styled(view_label, Style::default().fg(Color::Cyan)),
-    ]);
+    let line = Line::from(vec![Span::styled(
+        "Muxi",
+        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+    )]);
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+}
+
+fn render_error_footer(f: &mut Frame, area: ratatui::layout::Rect, msg: &str) {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .title(Span::styled(
+            " live fetch error ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    let p = Paragraph::new(Line::from(Span::styled(
+        msg.to_string(),
+        Style::default().fg(Color::Red),
+    )))
+    .block(block)
+    .wrap(Wrap { trim: true });
+    f.render_widget(p, area);
 }
 
 fn render_setup_banner(f: &mut Frame, area: ratatui::layout::Rect, snap: &SetupSnapshot) {

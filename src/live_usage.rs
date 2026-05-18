@@ -234,10 +234,10 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Optio
     let token = match auth::read_oauth_token(account) {
         Ok(t) => t,
         Err(e) => {
-            log_once(format!(
-                "muxi: oauth token unavailable for '{}': {e}",
-                account.name
-            ));
+            log_once(
+                &account.name,
+                format!("muxi: oauth token unavailable for '{}': {e}", account.name),
+            );
             return cached;
         }
     };
@@ -246,6 +246,7 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Optio
         Ok(fresh) => {
             save_cached(account, &fresh);
             clear_429_flag(&account.name);
+            clear_error_entry(&account.name);
             Some(fresh)
         }
         Err(FetchError::RateLimited) => {
@@ -253,10 +254,10 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Optio
             cached
         }
         Err(e) => {
-            log_once(format!(
-                "muxi: live fetch failed for '{}': {e}",
-                account.name
-            ));
+            log_once(
+                &account.name,
+                format!("muxi: live fetch failed for '{}': {e}", account.name),
+            );
             cached
         }
     }
@@ -264,8 +265,46 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Optio
 
 // --- Minimal in-process state for 429 back-off + log dedupe -----------------
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::time::Instant;
+
+/// Set to `true` by the TUI before it enters the alternate screen. Once
+/// on, [`log_once`] no longer writes to stderr (which would corrupt the
+/// TUI's rendering) — it records into the in-memory registry so the TUI
+/// can surface errors in its own bordered footer instead.
+static TUI_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_tui_mode(on: bool) {
+    TUI_MODE.store(on, Ordering::Relaxed);
+}
+
+fn error_registry() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    static S: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn record_error(account: &str, msg: &str) {
+    if let Ok(mut m) = error_registry().lock() {
+        m.insert(account.to_string(), (msg.to_string(), Instant::now()));
+    }
+}
+
+fn clear_error_entry(account: &str) {
+    if let Ok(mut m) = error_registry().lock() {
+        m.remove(account);
+    }
+}
+
+/// Most recently observed live-fetch error across all accounts, if any.
+/// Returns (account, message) for the TUI to render in its error footer.
+pub fn most_recent_error() -> Option<(String, String)> {
+    let m = error_registry().lock().ok()?;
+    m.iter()
+        .max_by_key(|(_, (_, t))| *t)
+        .map(|(acct, (msg, _))| (acct.clone(), msg.clone()))
+}
 
 fn last_429_ts() -> &'static Mutex<HashMap<String, DateTime<Utc>>> {
     static S: OnceLock<Mutex<HashMap<String, DateTime<Utc>>>> = OnceLock::new();
@@ -293,7 +332,13 @@ fn is_recent_429(account: &str) -> bool {
     Utc::now() - ts < delta
 }
 
-fn log_once(msg: String) {
+fn log_once(account: &str, msg: String) {
+    record_error(account, &msg);
+    // In TUI mode, never write to stderr — it bleeds onto the alternate
+    // screen and corrupts the UI. The TUI reads the registry instead.
+    if TUI_MODE.load(Ordering::Relaxed) {
+        return;
+    }
     if let Ok(mut s) = logged_once_set().lock() {
         if s.insert(msg.clone()) {
             eprintln!("{msg}");

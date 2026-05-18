@@ -24,7 +24,7 @@ pub fn render(
     area: Rect,
     accounts: &[&PerAccount],
     sessions: &[&SessionRef],
-    selected: usize,
+    selected: Option<usize>,
 ) {
     // Reserve enough rows for every account block, capped so the
     // sessions table always gets at least 5 rows.
@@ -47,7 +47,12 @@ pub fn render(
 }
 
 fn render_account_stack(f: &mut Frame, area: Rect, accounts: &[&PerAccount]) {
-    let block = Block::default().borders(Borders::ALL).title("Accounts");
+    let title = format!(
+        "Accounts ({} account{})",
+        accounts.len(),
+        if accounts.len() == 1 { "" } else { "s" }
+    );
+    let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -290,7 +295,7 @@ fn currency_symbol(code: Option<&str>) -> &'static str {
     }
 }
 
-fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], selected: usize) {
+fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], selected: Option<usize>) {
     let active_count = sessions
         .iter()
         .filter(|s| s.state == SessionState::Active)
@@ -330,7 +335,8 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         .enumerate()
         .map(|(i, s)| {
             let age_secs = (now - s.state_since).num_seconds().max(0);
-            let arrow = if i == selected { "▶ " } else { "  " };
+            let is_selected = selected == Some(i);
+            let arrow = if is_selected { "▶ " } else { "  " };
             let state_label = match s.state {
                 SessionState::Active => "active",
                 SessionState::Idle => "idle",
@@ -339,7 +345,7 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
                 SessionState::Active => Color::Green,
                 SessionState::Idle => Color::DarkGray,
             };
-            let base_style = if i == selected {
+            let base_style = if is_selected {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else if s.state == SessionState::Idle {
                 Style::default().fg(Color::DarkGray)
