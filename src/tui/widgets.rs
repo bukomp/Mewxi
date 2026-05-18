@@ -223,7 +223,7 @@ pub fn render_5h_gauge(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<
     let label = format!("{:.1}%{}", pct, suffix);
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(source_tag))
-        .gauge_style(Style::default().fg(gauge_color(pct)))
+        .gauge_style(Style::default().fg(gauge_color(pct)).bg(Color::Black))
         .ratio(ratio)
         .label(label);
     f.render_widget(gauge, area);
@@ -239,7 +239,7 @@ pub fn render_7d_gauge(f: &mut Frame, area: Rect, live: Option<&LiveUsage>) {
             let ratio = (w.utilization / 100.0).clamp(0.0, 1.0);
             let gauge = Gauge::default()
                 .block(Block::default().borders(Borders::ALL).title("Weekly"))
-                .gauge_style(Style::default().fg(gauge_color(w.utilization)))
+                .gauge_style(Style::default().fg(gauge_color(w.utilization)).bg(Color::Black))
                 .ratio(ratio)
                 .label(format!("{:.1}%{}", w.utilization, reset));
             f.render_widget(gauge, area);
@@ -267,7 +267,7 @@ pub fn render_extra_gauge(f: &mut Frame, area: Rect, live: Option<&LiveUsage>) {
             let ratio = (pct / 100.0).clamp(0.0, 1.0);
             let gauge = Gauge::default()
                 .block(Block::default().borders(Borders::ALL).title("Extra usage"))
-                .gauge_style(Style::default().fg(gauge_color(pct)))
+                .gauge_style(Style::default().fg(gauge_color(pct)).bg(Color::Black))
                 .ratio(ratio)
                 .label(format!("{:.1}%  {sym}{:.2} / {sym}{:.2}", pct, used, limit));
             f.render_widget(gauge, area);

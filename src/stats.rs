@@ -121,7 +121,7 @@ fn floor_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
 /// concurrent watchers (one per account) don't clobber each other.
 pub fn cache_path_for(account: &Account) -> Option<PathBuf> {
     dirs::cache_dir()
-        .map(|c| c.join("muxi").join(format!("files-{}.json", account.slug())))
+        .map(|c| c.join("muxi").join(format!("files2-{}.json", account.slug())))
 }
 
 /// Per-account on-disk statusLine output: `status-<slug>.txt`.
@@ -368,19 +368,12 @@ fn project_name_from_path(path: &Path) -> String {
 }
 
 /// Claude Code encodes project paths by replacing '/' with '-'.
-/// We can't fully reverse it (dashes in real names collide) but we can
-/// strip the common leading `-Users-<name>-` pattern for readability.
+/// We can't fully reverse it (dashes in real project names collide with
+/// the path separator), so just show the last segment — the basename of
+/// the cwd, which is what users think of as the project name.
 fn decode_project_slug(slug: &str) -> String {
-    // Trim leading '-' and reveal as a path-ish string
     let s = slug.trim_start_matches('-');
-    // Just show the last two segments joined with '/' for brevity
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() > 2 {
-        let last2 = &parts[parts.len().saturating_sub(2)..];
-        last2.join("-")
-    } else {
-        s.to_string()
-    }
+    s.rsplit('-').next().unwrap_or(s).to_string()
 }
 
 /// Fold a chronologically-sorted slice of records into the
