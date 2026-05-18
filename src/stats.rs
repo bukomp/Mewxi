@@ -18,8 +18,9 @@
 //! - [`parse_file_cached`] — exposed for [`crate::live_session`]; reuses
 //!   the per-account cache transparently.
 //!
-//! Pricing is hard-coded per-million-token rates in [`price_for`],
-//! approximate public list prices as of 2026-04. Per-file parse
+//! Pricing comes from [`crate::pricing`], which refreshes daily from
+//! LiteLLM's public model_prices JSON and falls back to baked-in rates
+//! when offline. Per-file parse
 //! results are cached on disk keyed on `(mtime, size)` under
 //! `$XDG_CACHE_HOME/muxi/files-<slug>.json`, one file per
 //! account so concurrent watchers don't stomp on each other.
@@ -35,33 +36,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
-/// Per-million-token pricing in USD. Approximate public list prices as of 2026-04.
-/// Cache reads are billed at ~10% of base input; cache writes vary by TTL.
-/// Model-family lookup is a substring match on the lowercased `model`
-/// id: `opus` → Opus, `haiku` → Haiku, anything else (including
-/// `sonnet` and unknown ids) → Sonnet. This keeps us forward-compatible
-/// with new model names like `claude-opus-4-7` without a code change,
-/// but at the cost of mis-pricing hypothetical non-Sonnet unknowns.
-fn price_for(model: &str) -> ModelPrice {
-    let m = model.to_ascii_lowercase();
-    if m.contains("opus") {
-        ModelPrice { input: 15.0, output: 75.0, cache_write_5m: 18.75, cache_write_1h: 30.0, cache_read: 1.5 }
-    } else if m.contains("haiku") {
-        ModelPrice { input: 1.0, output: 5.0, cache_write_5m: 1.25, cache_write_1h: 2.0, cache_read: 0.1 }
-    } else {
-        // sonnet & unknown → sonnet rates
-        ModelPrice { input: 3.0, output: 15.0, cache_write_5m: 3.75, cache_write_1h: 6.0, cache_read: 0.3 }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ModelPrice {
-    input: f64,
-    output: f64,
-    cache_write_5m: f64,
-    cache_write_1h: f64,
-    cache_read: f64,
-}
+use crate::pricing::price_for;
 
 /// A single assistant message's token usage, extracted from a JSONL session file.
 #[derive(Clone, Debug, Serialize, Deserialize)]

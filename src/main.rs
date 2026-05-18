@@ -21,6 +21,7 @@ mod auth;
 mod live_session;
 mod live_usage;
 mod mcp;
+mod pricing;
 mod setup;
 mod stats;
 mod tui;
