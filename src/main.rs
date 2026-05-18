@@ -1,4 +1,4 @@
-//! CLI entry point for claude-usage.
+//! CLI entry point for muxi.
 //!
 //! Five subcommands, one binary:
 //!
@@ -27,10 +27,10 @@ mod tui;
 mod watch;
 
 #[derive(Parser)]
-#[command(name = "claude-usage", version, about = "MCP server + TUI for Claude Code usage stats")]
+#[command(name = "muxi", version, about = "MCP server + TUI for Claude Code usage stats")]
 struct Cli {
     /// Disable live usage fetch from Claude Code's OAuth endpoint. Local JSONL only.
-    /// Also honored via the CLAUDE_USAGE_NO_LIVE env var (any non-empty value).
+    /// Also honored via the MUXI_NO_LIVE env var (any non-empty value).
     #[arg(long, global = true)]
     no_live: bool,
 
@@ -55,7 +55,7 @@ enum Cmd {
         /// Also install a user-scope service (systemd on Linux, launchd on macOS) to run the watcher at login.
         #[arg(long)]
         service: bool,
-        /// Overwrite an existing non-claude-usage statusLine entry in each account's settings.json.
+        /// Overwrite an existing non-muxi statusLine entry in each account's settings.json.
         #[arg(long)]
         force: bool,
     },
@@ -122,7 +122,7 @@ fn read_status_payload_from_stdin() -> (Option<std::path::PathBuf>, Option<Strin
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let no_live = cli.no_live || std::env::var_os("CLAUDE_USAGE_NO_LIVE").is_some_and(|v| !v.is_empty());
+    let no_live = cli.no_live || std::env::var_os("MUXI_NO_LIVE").is_some_and(|v| !v.is_empty());
     match cli.cmd {
         Cmd::Tui => tui::run(no_live),
         Cmd::Dump => {

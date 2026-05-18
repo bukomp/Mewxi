@@ -21,7 +21,7 @@
 //! Pricing is hard-coded per-million-token rates in [`price_for`],
 //! approximate public list prices as of 2026-04. Per-file parse
 //! results are cached on disk keyed on `(mtime, size)` under
-//! `$XDG_CACHE_HOME/claude-usage/files-<slug>.json`, one file per
+//! `$XDG_CACHE_HOME/muxi/files-<slug>.json`, one file per
 //! account so concurrent watchers don't stomp on each other.
 
 use crate::accounts::Account;
@@ -142,23 +142,23 @@ fn floor_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// Per-account on-disk file-cache path: `files-<slug>.json` under the
-/// shared `claude-usage` cache dir. Keeping caches per-account means
+/// shared `muxi` cache dir. Keeping caches per-account means
 /// concurrent watchers (one per account) don't clobber each other.
 pub fn cache_path_for(account: &Account) -> Option<PathBuf> {
     dirs::cache_dir()
-        .map(|c| c.join("claude-usage").join(format!("files-{}.json", account.slug())))
+        .map(|c| c.join("muxi").join(format!("files-{}.json", account.slug())))
 }
 
 /// Per-account on-disk statusLine output: `status-<slug>.txt`.
 pub fn status_cache_path_for(account: &Account) -> Option<PathBuf> {
     dirs::cache_dir()
-        .map(|c| c.join("claude-usage").join(format!("status-{}.txt", account.slug())))
+        .map(|c| c.join("muxi").join(format!("status-{}.txt", account.slug())))
 }
 
 /// Single-file mirror of the most-recently-modified account, kept so
 /// existing statusLine hooks pointed at `status.txt` continue to work.
 pub fn status_cache_path_mirror() -> Option<PathBuf> {
-    dirs::cache_dir().map(|c| c.join("claude-usage").join("status.txt"))
+    dirs::cache_dir().map(|c| c.join("muxi").join("status.txt"))
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -613,7 +613,7 @@ pub fn context_cap_for(
 
 fn extended_context_marker_path(account: &Account, session_id: &str) -> Option<std::path::PathBuf> {
     dirs::cache_dir().map(|c| {
-        c.join("claude-usage")
+        c.join("muxi")
             .join("ext-ctx")
             .join(format!("{}-{}.flag", account.slug(), session_id))
     })

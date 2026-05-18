@@ -498,21 +498,26 @@ fn render(
     setup_message: Option<&str>,
 ) {
     let area = f.area();
-    // "Setup incomplete" banner — shown on every non-setup view when wiring
-    // is missing, so the user discovers the fix without reading docs.
     let needs_setup = setup.is_some_and(|s| !s.fully_ok());
+
+    let mut constraints = vec![ratatui::layout::Constraint::Length(1)]; // top header
+    if needs_setup && mode != ViewMode::Setup {
+        constraints.push(ratatui::layout::Constraint::Length(1)); // setup banner
+    }
+    constraints.push(ratatui::layout::Constraint::Min(0)); // view area
+    let chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    let header_area = chunks[0];
     let (banner_area, view_area) = if needs_setup && mode != ViewMode::Setup {
-        let chunks = ratatui::layout::Layout::default()
-            .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Min(0),
-            ])
-            .split(area);
-        (Some(chunks[0]), chunks[1])
+        (Some(chunks[1]), chunks[2])
     } else {
-        (None, area)
+        (None, chunks[1])
     };
+
+    render_top_header(f, header_area, mode, accounts.len());
     if let (Some(area), Some(snap)) = (banner_area, setup) {
         render_setup_banner(f, area, snap);
     }
@@ -529,6 +534,25 @@ fn render(
         }
         ViewMode::Setup => view_setup::render(f, view_area, setup, selected_setup, setup_message),
     }
+}
+
+fn render_top_header(f: &mut Frame, area: ratatui::layout::Rect, mode: ViewMode, n_accounts: usize) {
+    use ratatui::layout::Alignment;
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+    let view_label = match mode {
+        ViewMode::AllSessions => format!("sessions · {n_accounts} account{}", if n_accounts == 1 { "" } else { "s" }),
+        ViewMode::SessionDetail => "session detail".into(),
+        ViewMode::AccountDetail => "account detail".into(),
+        ViewMode::Setup => "setup".into(),
+    };
+    let line = Line::from(vec![
+        Span::styled("Muxi", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::raw("  ·  "),
+        Span::styled(view_label, Style::default().fg(Color::Cyan)),
+    ]);
+    f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
 
 fn render_setup_banner(f: &mut Frame, area: ratatui::layout::Rect, snap: &SetupSnapshot) {
@@ -559,10 +583,10 @@ fn toggle_ignore_for_selected(
     let name = acct.account_name.clone();
     match accounts::toggle_ignored(&name) {
         Ok(true) => Some(format!(
-            "[{name}] now ignored — restart `claude-usage tui` to drop from other views"
+            "[{name}] now ignored — restart `muxi tui` to drop from other views"
         )),
         Ok(false) => Some(format!(
-            "[{name}] un-ignored — restart `claude-usage tui` to see in other views"
+            "[{name}] un-ignored — restart `muxi tui` to see in other views"
         )),
         Err(e) => Some(format!("[{name}] toggle ignore FAILED: {e}")),
     }

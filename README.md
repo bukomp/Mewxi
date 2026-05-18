@@ -1,17 +1,17 @@
-# claude-usage
+# Muxi
 
 A Rust tool for tracking, visualising, and exposing Claude Code usage stats
 across one or many `CLAUDE_CONFIG_DIR` accounts. One binary, seven subcommands:
 
 | Subcommand | What it does |
 |------------|--------------|
-| `claude-usage tui`    | Interactive full-screen dashboard with three views (all sessions / session detail / account detail). |
-| `claude-usage status` | One-line ANSI-coloured summary for Claude Code's `statusLine`. Auto-detects which account owns the active transcript. |
-| `claude-usage watch`  | Background daemon that keeps a `status-<account>.txt` per account hot. |
-| `claude-usage setup`  | Wire `statusLine` into `~/.claude/settings.json` and (optionally) install a watcher service. |
-| `claude-usage stop`   | Stop the watcher service (systemd on Linux, launchd on macOS); `--disable` also removes it from autostart. |
-| `claude-usage dump`   | Dump the full per-account aggregate + live sessions as JSON. |
-| `claude-usage mcp`    | Expose usage stats as an MCP server over stdio. |
+| `muxi tui`    | Interactive full-screen dashboard with three views (all sessions / session detail / account detail). |
+| `muxi status` | One-line ANSI-coloured summary for Claude Code's `statusLine`. Auto-detects which account owns the active transcript. |
+| `muxi watch`  | Background daemon that keeps a `status-<account>.txt` per account hot. |
+| `muxi setup`  | Wire `statusLine` into `~/.claude/settings.json` and (optionally) install a watcher service. |
+| `muxi stop`   | Stop the watcher service (systemd on Linux, launchd on macOS); `--disable` also removes it from autostart. |
+| `muxi dump`   | Dump the full per-account aggregate + live sessions as JSON. |
+| `muxi mcp`    | Expose usage stats as an MCP server over stdio. |
 
 Data comes from two sources:
 
@@ -32,12 +32,12 @@ the network entirely.
 
 Most users run a single Claude Code account out of `~/.claude` and need no
 config. If you split work and personal into separate dirs via
-`CLAUDE_CONFIG_DIR` (e.g. `~/.claude-work` and `~/.claude-priv`),
-`claude-usage` auto-discovers every `~/.claude*` directory that contains a
+`CLAUDE_CONFIG_DIR` (e.g. `~/.claude-work` and `~/.claude-priv`), Muxi
+auto-discovers every `~/.claude*` directory that contains a
 `projects/` subtree and treats each as one account.
 
 For explicit control — friendly names, per-account token sources, custom
-paths — create `~/.config/claude-usage/accounts.toml`:
+paths — create `~/.config/muxi/accounts.toml`:
 
 ```toml
 default_account = "work"
@@ -64,12 +64,12 @@ token_source = { env = "CLAUDE_CI_TOKEN" }
 - `{ keychain = "service" }` — macOS `security find-generic-password -s <service>`.
 - `{ file = "/path" }` — JSON file with `claudeAiOauth.accessToken`.
 
-`ignored` is a list of account names you don't want claude-usage to
+`ignored` is a list of account names you don't want Muxi to
 touch. Ignored accounts are still **discovered** so the setup view
 (`4`) lists them and lets you press `i` to flip the flag — they just
 don't appear in any other view, the `dump` output, MCP tool results,
 or the statusLine. Toggling from the TUI rewrites this list back to
-`accounts.toml` automatically; restart `claude-usage tui` after a
+`accounts.toml` automatically; restart `muxi tui` after a
 toggle for it to take effect across views 1/2/3.
 
 If `accounts.toml` is missing, every entry defaults to the
@@ -83,14 +83,14 @@ demand the first time you press `i` in view 4.
 
 ```sh
 cargo build --release
-# Binary lands at ./target/release/claude-usage
+# Binary lands at ./target/release/muxi
 ```
 
 No runtime dependencies beyond a working Rust toolchain at build time.
 Live `/usage` fetching works on macOS and Linux; the OAuth Bearer token
 is discovered in this order, first hit wins:
 
-1. `CLAUDE_USAGE_OAUTH_TOKEN` env var (universal escape hatch: CI,
+1. `MUXI_OAUTH_TOKEN` env var (universal escape hatch: CI,
    remote shells without keychain access, Windows).
 2. **macOS only** — the `Claude Code-credentials` keychain entry via
    `security find-generic-password`.
@@ -108,7 +108,7 @@ JSONL data only.
 ## The TUI
 
 ```sh
-claude-usage tui
+muxi tui
 ```
 
 Four views:
@@ -128,7 +128,7 @@ The account-detail view auto-adapts to terminal width — above 100
 columns you get a multi-column layout; below, a stacked one.
 
 > **You don't need to run the `setup` subcommand by hand.** Launch
-> `claude-usage tui` once; on first run it shows the setup view so
+> `muxi tui` once; on first run it shows the setup view so
 > you can wire `statusLine` for every account and install the watcher
 > service with a single keypress (`a`).
 
@@ -140,7 +140,7 @@ live-status indicator (`live: fresh` / `cached` / `stale` / `off`).
 **5h gauge** — the rolling 5-hour window that mirrors Anthropic's own
 subscription accounting. Title says `(live)` when it comes from the OAuth
 endpoint, `(estimate)` when computed locally from JSONL against
-`CLAUDE_USAGE_5H_CAP_TOKENS` (default 11.5 M tokens, calibrated against
+`MUXI_5H_CAP_TOKENS` (default 11.5 M tokens, calibrated against
 Max 5× at the time of writing — adjust for your plan). Reset time is the
 clock-hour of the oldest message in the block plus 5 h.
 
@@ -182,7 +182,7 @@ ratio uses 40 / 70 as the yellow / green thresholds.
 ## `status` — the `statusLine` integration
 
 ```sh
-claude-usage status        # reads Claude Code's stdin payload
+muxi status        # reads Claude Code's stdin payload
 ```
 
 Drop this into your Claude Code `statusLine` hook. Claude Code writes a
@@ -205,7 +205,7 @@ use both to render:
 The 7d window is shown in the TUI but omitted from the statusLine to
 keep the line short.
 
-`claude-usage status` is fast enough to invoke per keypress — the
+`muxi status` is fast enough to invoke per keypress — the
 per-file JSONL cache (`files.json`) skips untouched files and the
 live endpoint is served from `live.json` for 60 s between refreshes.
 For heavier setups the optional `watch` daemon can pre-render the
@@ -216,9 +216,9 @@ line to disk (see below).
 ## `setup` — one-shot install
 
 ```sh
-claude-usage setup              # wire statusLine + seed the cache
-claude-usage setup --service    # also install a user service unit for `watch`
-claude-usage setup --force      # overwrite an existing statusLine entry
+muxi setup              # wire statusLine + seed the cache
+muxi setup --service    # also install a user service unit for `watch`
+muxi setup --force      # overwrite an existing statusLine entry
 ```
 
 Does the wiring described above for you:
@@ -231,20 +231,20 @@ Does the wiring described above for you:
 2. Seeds the status cache with one render so the optional `watch`
    daemon has something on disk from the start.
 3. With `--service`: installs a user-scope service unit and starts it.
-   - **Linux:** `~/.config/systemd/user/claude-usage-watch.service`,
+   - **Linux:** `~/.config/systemd/user/muxi-watch.service`,
      enabled via `systemctl --user enable --now`.
-   - **macOS:** `~/Library/LaunchAgents/com.claude-usage.watch.plist`,
+   - **macOS:** `~/Library/LaunchAgents/com.muxi.watch.plist`,
      loaded via `launchctl load -w`.
 
-The service unit captures the absolute path of the `claude-usage`
+The service unit captures the absolute path of the `muxi`
 binary you ran `setup` from — if you move the binary later, re-run
-`claude-usage setup --service` so the unit points at the new location.
+`muxi setup --service` so the unit points at the new location.
 
 ## `stop` — stop the watcher
 
 ```sh
-claude-usage stop              # stop the running service (will restart on login)
-claude-usage stop --disable    # stop and prevent it from starting on login
+muxi stop              # stop the running service (will restart on login)
+muxi stop --disable    # stop and prevent it from starting on login
 ```
 
 Counterpart to `setup --service`. Maps to `systemctl --user stop` (Linux)
@@ -256,7 +256,7 @@ is left on disk either way, so `setup --service` can bring it back.
 ## `watch` — background daemon
 
 ```sh
-claude-usage watch         # runs forever
+muxi watch         # runs forever
 ```
 
 Spawns one `notify` watcher per account's `projects/` and writes a
@@ -264,9 +264,9 @@ per-account `status-<slug>.txt` plus a `status.txt` mirror of whichever
 account was modified most recently. Atomic renames, per-account 500 ms
 debounce, 15 s heartbeat.
 
-- **Linux:** `$XDG_CACHE_HOME/claude-usage/` (defaults to
-  `~/.cache/claude-usage/`).
-- **macOS:** `~/Library/Caches/claude-usage/`.
+- **Linux:** `$XDG_CACHE_HOME/muxi/` (defaults to
+  `~/.cache/muxi/`).
+- **macOS:** `~/Library/Caches/muxi/`.
 
 A single-account statusLine that just `cat`s `status.txt` keeps working;
 multi-account dashboards can point separately at `status-work.txt`,
@@ -277,7 +277,7 @@ multi-account dashboards can point separately at `status-work.txt`,
 ## `mcp` — expose as an MCP server
 
 ```sh
-claude-usage mcp           # stdio MCP
+muxi mcp           # stdio MCP
 ```
 
 Speaks JSON-RPC 2.0 per the 2024-11-05 MCP protocol version. Every
@@ -306,7 +306,7 @@ built binary.
 ## `dump` — JSON
 
 ```sh
-claude-usage dump | jq .
+muxi dump | jq .
 ```
 
 Emits
@@ -329,10 +329,10 @@ Handy for scripting your own analyses without recomputing everything.
 
 | Setting | Effect |
 |---------|--------|
-| `--no-live` (global flag) / `CLAUDE_USAGE_NO_LIVE=<nonempty>` | Disable all calls to `api.anthropic.com/api/oauth/usage`. All panels fall back to local JSONL. |
-| `CLAUDE_USAGE_5H_CAP_TOKENS`   | Override the local 5h token cap used by the `status` and TUI estimates. Default 11 500 000 (Max 5×). Pro ≈ 2 300 000, Max 20× ≈ 46 000 000. |
+| `--no-live` (global flag) / `MUXI_NO_LIVE=<nonempty>` | Disable all calls to `api.anthropic.com/api/oauth/usage`. All panels fall back to local JSONL. |
+| `MUXI_5H_CAP_TOKENS`   | Override the local 5h token cap used by the `status` and TUI estimates. Default 11 500 000 (Max 5×). Pro ≈ 2 300 000, Max 20× ≈ 46 000 000. |
 
-Caches live under `$XDG_CACHE_HOME/claude-usage/` (one per account, plus a mirror):
+Caches live under `$XDG_CACHE_HOME/muxi/` (one per account, plus a mirror):
 
 - `files-<slug>.json`   — per-account, per-file `(mtime, size, parsed_records)` cache so untouched JSONLs skip re-parsing.
 - `live-<slug>.json`    — per-account last fetched OAuth payload + `fetched_at`.
@@ -451,35 +451,35 @@ value comes alive as soon as you start a session.
 running.**
 Fixed in current `scan_all`: file iteration is sorted so dedup is
 deterministic. If you still see flap, confirm that a stale daemon
-isn't running an older binary (`ps aux | grep claude-usage` + restart
+isn't running an older binary (`ps aux | grep muxi` + restart
 any `watch` / `tui` processes after a `cargo build --release`).
 
 **5h gauge title says `(estimate)`, never `(live)`.**
-One of: `--no-live` is set; the `CLAUDE_USAGE_NO_LIVE` env var is set;
-no credential was found (`CLAUDE_USAGE_OAUTH_TOKEN` unset, no macOS
+One of: `--no-live` is set; the `MUXI_NO_LIVE` env var is set;
+no credential was found (`MUXI_OAUTH_TOKEN` unset, no macOS
 keychain entry, and `~/.claude/.credentials.json` missing or
 unreadable); or the endpoint is rate-limited and there's no cache yet.
-Run `claude-usage dump | jq .live` to see which branch you're in — a
+Run `muxi dump | jq .live` to see which branch you're in — a
 `null` means no live data at all. On Linux, check
 `ls -l ~/.claude/.credentials.json` — if Claude Code itself is logged
 in, that file should exist with mode `0600`.
 
 **5h local estimate disagrees with `(live)`.**
 Expected when you're on a plan whose cap differs from `11 500 000`
-tokens. Set `CLAUDE_USAGE_5H_CAP_TOKENS` to your plan's effective cap
+tokens. Set `MUXI_5H_CAP_TOKENS` to your plan's effective cap
 (Pro ≈ 2.3 M, Max 20× ≈ 46 M).
 
 **`security` prompts or returns a permission error (macOS).**
-The first time claude-usage reads the keychain entry it may need your
+The first time Muxi reads the keychain entry it may need your
 approval. Open Keychain Access → login → search for
 `Claude Code-credentials` → Access Control → allow `security`. If the
 keychain entry is genuinely missing (e.g., sandboxed shell, no GUI
-session), claude-usage transparently falls back to
+session), Muxi transparently falls back to
 `~/.claude/.credentials.json`.
 
 **Live fetch fails on Linux.**
 Verify the credentials file exists and is readable:
 `ls -l ~/.claude/.credentials.json`. If Claude Code itself works but
 the file is absent, log out and back in to Claude Code so it rewrites
-the file. As a last resort, export `CLAUDE_USAGE_OAUTH_TOKEN` with the
+the file. As a last resort, export `MUXI_OAUTH_TOKEN` with the
 Bearer token directly.

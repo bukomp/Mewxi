@@ -52,7 +52,7 @@ async fn handle(req: Value, no_live: bool) -> Option<Value> {
         "initialize" => Some(ok(id, json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "claude-usage", "version": env!("CARGO_PKG_VERSION") }
+            "serverInfo": { "name": "muxi", "version": env!("CARGO_PKG_VERSION") }
         }))),
         "notifications/initialized" | "notifications/cancelled" => None,
         "ping" => Some(ok(id, json!({}))),
@@ -76,7 +76,7 @@ fn tool_defs() -> Value {
     json!([
         {
             "name": "list_accounts",
-            "description": "List every Claude Code account claude-usage knows about (one per CLAUDE_CONFIG_DIR), with its directory and configured default.",
+            "description": "List every Claude Code account muxi knows about (one per CLAUDE_CONFIG_DIR), with its directory and configured default.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {

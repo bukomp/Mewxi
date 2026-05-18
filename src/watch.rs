@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_5H_CAP_TOKENS: u64 = 11_500_000;
 
 fn five_h_cap_tokens() -> u64 {
-    std::env::var("CLAUDE_USAGE_5H_CAP_TOKENS")
+    std::env::var("MUXI_5H_CAP_TOKENS")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&v: &u64| v > 0)
@@ -65,7 +65,7 @@ pub fn render_status(
 ) -> String {
     let view = match accounts::load_accounts() {
         Ok(v) => v,
-        Err(e) => return format!("\x1b[31mclaude-usage: {e}\x1b[0m"),
+        Err(e) => return format!("\x1b[31mmuxi: {e}\x1b[0m"),
     };
 
     let account = match transcript_path

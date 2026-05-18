@@ -26,43 +26,24 @@ pub fn render(
     sessions: &[&SessionRef],
     selected: usize,
 ) {
-    let title = format!(
-        "Claude Usage — {} account{}",
-        accounts.len(),
-        if accounts.len() == 1 { "" } else { "s" }
-    );
-
     // Reserve enough rows for every account block, capped so the
     // sessions table always gets at least 5 rows.
     let want = (ROWS_PER_ACCOUNT * accounts.len() as u16) + 2; // +2 for borders
-    let max_for_accounts = area.height.saturating_sub(8);
+    let max_for_accounts = area.height.saturating_sub(6);
     let acct_height = want.min(max_for_accounts).max(5);
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),           // header
             Constraint::Length(acct_height), // per-account gauges
-            Constraint::Min(5),              // live sessions table
-            Constraint::Length(1),           // footer
+            Constraint::Min(5),               // live sessions table
+            Constraint::Length(1),            // footer
         ])
         .split(area);
 
-    render_header(f, rows[0], &title);
-    render_account_stack(f, rows[1], accounts);
-    render_sessions_table(f, rows[2], sessions, selected);
-    render_footer(f, rows[3], "1 here · 2 session · 3 account · 4 setup");
-}
-
-fn render_header(f: &mut Frame, area: Rect, title: &str) {
-    let line = Line::from(vec![Span::styled(
-        title.to_string(),
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    )]);
-    f.render_widget(
-        Paragraph::new(line).block(Block::default().borders(Borders::ALL)),
-        area,
-    );
+    render_account_stack(f, rows[0], accounts);
+    render_sessions_table(f, rows[1], sessions, selected);
+    render_footer(f, rows[2], "1 here · 2 session · 3 account · 4 setup");
 }
 
 fn render_account_stack(f: &mut Frame, area: Rect, accounts: &[&PerAccount]) {
@@ -326,7 +307,7 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         let inner = block.inner(area);
         f.render_widget(block, area);
         let p = Paragraph::new(Line::from(Span::styled(
-            "no sessions touched in the last 2h — start a claude conversation or press `r` to rescan",
+            "no sessions touched in the last 2h — start a session or press `r` to rescan",
             Style::default().fg(Color::DarkGray),
         )));
         f.render_widget(p, inner);

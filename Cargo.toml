@@ -1,11 +1,11 @@
 [package]
-name = "claude-usage"
+name = "muxi"
 version = "0.1.0"
 edition = "2021"
 description = "MCP server + TUI for real-time Claude Code usage stats"
 
 [[bin]]
-name = "claude-usage"
+name = "muxi"
 path = "src/main.rs"
 
 [dependencies]
