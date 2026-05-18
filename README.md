@@ -81,9 +81,7 @@ For MCP, see [docs/mcp.md](docs/mcp.md).
 
 ### 🐾 fun fact
 
-> Muxi is a **digi-cat**: nine lives, all of them spent in your terminal.
-> She purrs in tokens, naps on JSONL, and judges your context window
-> percentage from across the room. Feed her well — she remembers every
-> 5-hour block you've ever burned, and she will mention it.
+> Muxi is a **digi-cat**. She has as many lives as you have agents open,
+> and unlike other cats, she lives them all at once.
 
 </div>
