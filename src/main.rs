@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 
 mod accounts;
 mod auth;
+mod chat_log;
 mod live_session;
 mod live_usage;
 mod mcp;

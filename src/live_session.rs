@@ -289,6 +289,7 @@ pub struct LiveSession {
     pub account_name: String,
     pub session_id: String,
     pub project: String,
+    pub cwd: PathBuf,
     pub transcript_path: PathBuf,
     pub last_activity: DateTime<Utc>,
     /// When the session entered its current [`SessionState`]. Carries
@@ -551,6 +552,7 @@ pub fn scan(
             account_name: account.name.clone(),
             session_id: marker.session_id.clone(),
             project,
+            cwd: marker.cwd.clone(),
             transcript_path: transcript,
             last_activity,
             state_since,

@@ -58,6 +58,7 @@ pub struct SessionRef {
     pub account_name: String,
     pub session_id: String,
     pub project: String,
+    pub cwd: PathBuf,
     pub transcript_path: PathBuf,
     pub last_activity: chrono::DateTime<chrono::Utc>,
     pub state_since: chrono::DateTime<chrono::Utc>,
@@ -427,6 +428,13 @@ fn run_loop<B: ratatui::backend::Backend>(
 
     let mut mode = ViewMode::AllSessions;
     let mut selected_session: usize = 0;
+    let mut last_selected_session: usize = usize::MAX;
+    // Stable identity of the session currently being inspected in
+    // SessionDetail. The flattened list is re-sorted every frame by
+    // last_activity, so a raw index would silently jump to a different
+    // session whenever another session's activity moves it ahead.
+    let mut pinned_session: Option<(String, String)> = None;
+    let mut chat_scroll: usize = 0;
     let mut selected_account: usize = 0;
     let mut selected_setup: usize = 0;
     // View 1's session selection highlight fades out after a short
@@ -503,6 +511,20 @@ fn run_loop<B: ratatui::backend::Backend>(
             selected_account = visible_accounts.len() - 1;
         }
 
+        // Re-resolve selected_session from the pinned identity so a
+        // re-sort of visible_sessions (e.g. another session's activity
+        // bumped it to the top) doesn't make the detail view jump.
+        if mode == ViewMode::SessionDetail {
+            if let Some((acct, sid)) = &pinned_session {
+                if let Some(idx) = visible_sessions
+                    .iter()
+                    .position(|s| s.account_name == *acct && s.session_id == *sid)
+                {
+                    selected_session = idx;
+                }
+            }
+        }
+
         let visible_selection = if last_session_select.elapsed() < SELECTION_VISIBLE {
             Some(selected_session)
         } else {
@@ -532,6 +554,11 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
         };
 
+        if selected_session != last_selected_session {
+            chat_scroll = 0;
+            last_selected_session = selected_session;
+        }
+
         terminal.draw(|f| {
             render(
                 f,
@@ -539,6 +566,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 &visible_accounts,
                 &visible_sessions,
                 selected_session,
+                &mut chat_scroll,
                 visible_selection,
                 selected_account,
                 selected_setup,
@@ -624,12 +652,22 @@ fn run_loop<B: ratatui::backend::Backend>(
                         KeyCode::Char('1') => {
                             mode = ViewMode::AllSessions;
                             last_session_select = Instant::now();
+                            pinned_session = None;
                         }
-                        KeyCode::Char('2') => mode = ViewMode::SessionDetail,
-                        KeyCode::Char('3') => mode = ViewMode::AccountDetail,
+                        KeyCode::Char('2') => {
+                            mode = ViewMode::SessionDetail;
+                            pinned_session = visible_sessions
+                                .get(selected_session)
+                                .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                        }
+                        KeyCode::Char('3') => {
+                            mode = ViewMode::AccountDetail;
+                            pinned_session = None;
+                        }
                         KeyCode::Char('4') => {
                             setup_snapshot = setup::inspect(no_live).ok();
                             mode = ViewMode::Setup;
+                            pinned_session = None;
                         }
                         KeyCode::Char('R') if mode == ViewMode::Setup => {
                             setup_snapshot = setup::inspect(no_live).ok();
@@ -663,6 +701,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if !sessions.is_empty() {
                                     selected_session = (selected_session + 1) % sessions.len();
                                     last_session_select = Instant::now();
+                                    if mode == ViewMode::SessionDetail {
+                                        pinned_session = visible_sessions
+                                            .get(selected_session)
+                                            .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                                    }
                                 }
                             }
                             ViewMode::AccountDetail => {
@@ -683,6 +726,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_session = (selected_session + sessions.len() - 1)
                                         % sessions.len();
                                     last_session_select = Instant::now();
+                                    if mode == ViewMode::SessionDetail {
+                                        pinned_session = visible_sessions
+                                            .get(selected_session)
+                                            .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                                    }
                                 }
                             }
                             ViewMode::AccountDetail => {
@@ -703,6 +751,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if !sessions.is_empty() {
                                     selected_session = (selected_session + 1).min(sessions.len() - 1);
                                     last_session_select = Instant::now();
+                                    if mode == ViewMode::SessionDetail {
+                                        pinned_session = visible_sessions
+                                            .get(selected_session)
+                                            .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                                    }
                                 }
                             }
                             ViewMode::AccountDetail => {
@@ -723,6 +776,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if selected_session > 0 {
                                     selected_session -= 1;
                                     last_session_select = Instant::now();
+                                    if mode == ViewMode::SessionDetail {
+                                        pinned_session = visible_sessions
+                                            .get(selected_session)
+                                            .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                                    }
                                 }
                             }
                             ViewMode::AccountDetail => {
@@ -739,7 +797,23 @@ fn run_loop<B: ratatui::backend::Backend>(
                         KeyCode::Enter => {
                             if mode == ViewMode::AllSessions && !sessions.is_empty() {
                                 mode = ViewMode::SessionDetail;
+                                pinned_session = visible_sessions
+                                    .get(selected_session)
+                                    .map(|s| (s.account_name.clone(), s.session_id.clone()));
                             }
+                        }
+                        KeyCode::PageUp if mode == ViewMode::SessionDetail => {
+                            chat_scroll = chat_scroll.saturating_add(10);
+                        }
+                        KeyCode::PageDown if mode == ViewMode::SessionDetail => {
+                            chat_scroll = chat_scroll.saturating_sub(10);
+                        }
+                        KeyCode::Home if mode == ViewMode::SessionDetail => {
+                            // Jump to oldest — cap value gets clamped in view.
+                            chat_scroll = usize::MAX / 2;
+                        }
+                        KeyCode::End if mode == ViewMode::SessionDetail => {
+                            chat_scroll = 0;
                         }
                         _ => {}
                     }
@@ -757,6 +831,7 @@ fn render(
     accounts: &[&PerAccount],
     sessions: &[&SessionRef],
     selected_session: usize,
+    chat_scroll: &mut usize,
     visible_session_selection: Option<usize>,
     selected_account: usize,
     selected_setup: usize,
@@ -805,7 +880,7 @@ fn render(
             view_all::render(f, view_area, accounts, sessions, visible_session_selection)
         }
         ViewMode::SessionDetail => {
-            view_session::render(f, view_area, accounts, sessions.get(selected_session).copied())
+            view_session::render(f, view_area, accounts, sessions.get(selected_session).copied(), chat_scroll)
         }
         ViewMode::AccountDetail => {
             if let Some(pa) = accounts.get(selected_account) {
@@ -987,6 +1062,7 @@ fn flatten_sessions(accounts: &[PerAccount]) -> Vec<SessionRef> {
                 account_name: ls.account_name.clone(),
                 session_id: ls.session_id.clone(),
                 project: ls.project.clone(),
+                cwd: ls.cwd.clone(),
                 transcript_path: ls.transcript_path.clone(),
                 last_activity: ls.last_activity,
                 state_since: ls.state_since,
