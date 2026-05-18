@@ -172,6 +172,7 @@ fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
 
 /// What the tail says about the session, with enough context for the
 /// caller to decide whether the marker's `idle` flag should override.
+#[derive(Debug, PartialEq, Eq)]
 pub enum TailKind {
     /// Last meaningful record is an assistant `tool_use` with no
     /// matching `tool_result` yet — Claude is paused on that tool, be
@@ -187,11 +188,21 @@ pub enum TailKind {
     Completed(Activity),
 }
 
+/// Max age of a `tool_result` tail for which we still carry the
+/// preceding tool's activity. Past this, Claude has had enough time
+/// that the pause is a real reasoning pause, not the inter-record gap
+/// in a fast-tool cascade — so we flip to `Thinking` instead.
+const TOOL_RESULT_CARRY_WINDOW: chrono::Duration = chrono::Duration::milliseconds(1500);
+
 /// Walk the tail of a transcript backwards looking for the most recent
 /// record that implies an activity. Returns None if nothing meaningful
 /// is found in the inspected window.
 fn tail_activity(path: &Path) -> Option<TailKind> {
     let tail = read_tail(path, 256 * 1024)?;
+    classify_tail(&tail, Utc::now())
+}
+
+fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailKind> {
     let lines: Vec<&str> = tail.lines().collect();
     for (idx, line) in lines.iter().enumerate().rev() {
         if line.is_empty() {
@@ -207,7 +218,13 @@ fn tail_activity(path: &Path) -> Option<TailKind> {
         // record. Falling back to `Thinking` makes the entire fast-tool
         // cascade invisible. Walk back to the matching assistant tool_use
         // and surface its activity so e.g. a Read sequence keeps reading.
-        if t == "user" && a == Activity::Thinking {
+        //
+        // But: once the tool_result has been sitting on disk longer than
+        // `TOOL_RESULT_CARRY_WINDOW`, Claude is no longer mid-cascade — it
+        // is genuinely thinking before the next move. Stop carrying then,
+        // so the activity column actually surfaces real reasoning pauses
+        // as `thinking`.
+        if t == "user" && a == Activity::Thinking && record_is_recent(&v, now) {
             if let Some(tool_a) = preceding_tool_activity(&lines[..idx]) {
                 return Some(TailKind::Completed(tool_a));
             }
@@ -219,6 +236,19 @@ fn tail_activity(path: &Path) -> Option<TailKind> {
         return Some(if is_pending { TailKind::PendingTool(a) } else { TailKind::Completed(a) });
     }
     None
+}
+
+/// Returns true when the record's `timestamp` is within
+/// [`TOOL_RESULT_CARRY_WINDOW`] of `now`. Records without a parseable
+/// timestamp are treated as recent — keeps test stubs working and lets
+/// malformed records degrade to the (safer) carry-back path rather
+/// than flipping to a confident `Thinking`.
+fn record_is_recent(v: &serde_json::Value, now: DateTime<Utc>) -> bool {
+    let Some(ts_str) = v.get("timestamp").and_then(|x| x.as_str()) else { return true };
+    match DateTime::parse_from_rfc3339(ts_str) {
+        Ok(ts) => now - ts.with_timezone(&Utc) < TOOL_RESULT_CARRY_WINDOW,
+        Err(_) => true,
+    }
 }
 
 /// Walk `prior` lines (older-first) in reverse and return the tool
@@ -543,4 +573,134 @@ pub fn scan(
             .then_with(|| b.last_activity.cmp(&a.last_activity))
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn now() -> DateTime<Utc> {
+        // Fixed reference point so timestamped fixtures have a stable "now".
+        Utc.with_ymd_and_hms(2026, 5, 18, 18, 0, 0).unwrap()
+    }
+
+    fn assistant_thinking() -> &'static str {
+        r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":""}]}}"#
+    }
+    fn assistant_tool_use(name: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"{name}"}}]}}}}"#
+        )
+    }
+    fn user_tool_result() -> &'static str {
+        r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#
+    }
+    fn user_tool_result_at(ts: DateTime<Utc>) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"{}","message":{{"content":[{{"type":"tool_result"}}]}}}}"#,
+            ts.to_rfc3339()
+        )
+    }
+    fn assistant_text() -> &'static str {
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#
+    }
+
+    #[test]
+    fn pending_tool_when_tool_use_is_tail() {
+        // Slow tool still running: assistant tool_use is the latest record,
+        // nothing after it yet. Must surface as Pending so the marker's
+        // `idle` (e.g. AskUserQuestion) can't downgrade us to Waiting.
+        let tail = format!("{}\n{}\n", assistant_thinking(), assistant_tool_use("Read"));
+        assert_eq!(classify_tail(&tail, now()), Some(TailKind::PendingTool(Activity::Reading)));
+    }
+
+    #[test]
+    fn carry_tool_activity_past_tool_result() {
+        // The regression: fast Read completes in <15ms, so scans always
+        // land after the tool_result is written. Without the walk-back,
+        // this returned Completed(Thinking) and made the whole Read
+        // cascade invisible. With it, we surface Completed(Reading).
+        // No timestamp → treated as recent → carry-back applies.
+        let tail = format!(
+            "{}\n{}\n{}\n",
+            assistant_thinking(),
+            assistant_tool_use("Read"),
+            user_tool_result()
+        );
+        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Reading)));
+    }
+
+    #[test]
+    fn carry_works_for_bash_and_edit_too() {
+        let bash_tail = format!("{}\n{}\n", assistant_tool_use("Bash"), user_tool_result());
+        assert_eq!(classify_tail(&bash_tail, now()), Some(TailKind::Completed(Activity::Running)));
+        let edit_tail = format!("{}\n{}\n", assistant_tool_use("Edit"), user_tool_result());
+        assert_eq!(classify_tail(&edit_tail, now()), Some(TailKind::Completed(Activity::Editing)));
+    }
+
+    #[test]
+    fn fresh_tool_result_carries_back() {
+        // tool_result is 200ms old — well within the carry window. The
+        // user is mid-cascade; surface the tool's activity, not Thinking.
+        let recent = now() - chrono::Duration::milliseconds(200);
+        let tail = format!(
+            "{}\n{}\n",
+            assistant_tool_use("Read"),
+            user_tool_result_at(recent)
+        );
+        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Reading)));
+    }
+
+    #[test]
+    fn stale_tool_result_flips_to_thinking() {
+        // tool_result is 5s old — Claude is past the cascade window and
+        // is genuinely reasoning before the next action. Show Thinking
+        // rather than continuing to claim the tool is the activity.
+        let stale = now() - chrono::Duration::seconds(5);
+        let tail = format!(
+            "{}\n{}\n",
+            assistant_tool_use("Read"),
+            user_tool_result_at(stale)
+        );
+        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Thinking)));
+    }
+
+    #[test]
+    fn thinking_only_tail_stays_thinking() {
+        // Claude has emitted a thinking block but not yet the tool_use.
+        // No prior tool to carry; must read as Completed(Thinking) so the
+        // activity column actually says "thinking" during this window.
+        let tail = format!("{}\n", assistant_thinking());
+        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Thinking)));
+    }
+
+    #[test]
+    fn tool_result_with_no_preceding_tool_falls_back_to_thinking() {
+        // Defensive: malformed tail with a tool_result but no assistant
+        // tool_use anywhere in window. Carry-back finds nothing → fall
+        // through to the original Completed(Thinking) classification.
+        let tail = format!("{}\n", user_tool_result());
+        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Thinking)));
+    }
+
+    #[test]
+    fn final_text_classifies_as_writing() {
+        // End of turn: assistant ends with a text block, no tool to carry.
+        let tail = format!("{}\n", assistant_text());
+        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Writing)));
+    }
+
+    #[test]
+    fn skips_non_meaningful_records() {
+        // Records like ai-title / file-history-snapshot don't classify;
+        // the walk-back must skip them and use the real last activity.
+        let tail = format!(
+            "{}\n{}\n{}\n{}\n",
+            assistant_tool_use("Bash"),
+            user_tool_result(),
+            r#"{"type":"ai-title"}"#,
+            r#"{"type":"file-history-snapshot"}"#
+        );
+        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Running)));
+    }
 }
