@@ -9,10 +9,12 @@
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::accounts::Account;
 use crate::auth;
 
 const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -52,6 +54,13 @@ pub struct ExtraUsage {
     pub currency: Option<String>,
 }
 
+/// Current cache schema. Bump whenever the meaning of a cached value
+/// changes in a way old readers can't safely interpret — e.g. the
+/// per-CLAUDE_CONFIG_DIR token fix, where v1 caches were written with
+/// a single shared token and so contained the wrong account's numbers.
+/// `load_cached` returns `None` for any cache file at a lower version.
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LiveUsage {
     #[serde(default)]
@@ -62,6 +71,10 @@ pub struct LiveUsage {
     pub extra_usage: Option<ExtraUsage>,
     /// When we fetched this — set by us, not the server.
     pub fetched_at: DateTime<Utc>,
+    /// Set when written; absent on caches from pre-`CACHE_SCHEMA_VERSION`
+    /// builds, which means they're discarded by `load_cached`.
+    #[serde(default)]
+    pub cache_schema_version: u32,
 }
 
 impl LiveUsage {
@@ -120,6 +133,7 @@ pub fn fetch_live(token: &str) -> Result<LiveUsage, FetchError> {
                 seven_day: parsed.seven_day,
                 extra_usage: parsed.extra_usage,
                 fetched_at: Utc::now(),
+                cache_schema_version: CACHE_SCHEMA_VERSION,
             })
         }
         Err(ureq::Error::Status(429, _)) => Err(FetchError::RateLimited),
@@ -142,18 +156,28 @@ struct RawLive {
     extra_usage: Option<ExtraUsage>,
 }
 
-pub fn cache_path() -> Option<PathBuf> {
-    dirs::cache_dir().map(|c| c.join("claude-usage").join("live.json"))
+pub fn cache_path(account: &Account) -> Option<PathBuf> {
+    dirs::cache_dir().map(|c| {
+        c.join("claude-usage")
+            .join(format!("live-{}.json", account.slug()))
+    })
 }
 
-pub fn load_cached() -> Option<LiveUsage> {
-    let p = cache_path()?;
+pub fn load_cached(account: &Account) -> Option<LiveUsage> {
+    let p = cache_path(account)?;
     let bytes = fs::read(&p).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let parsed: LiveUsage = serde_json::from_slice(&bytes).ok()?;
+    // Reject caches from older binaries (which may have been written with
+    // the wrong account's token, before per-CLAUDE_CONFIG_DIR keychain
+    // discovery existed). They'll be refetched fresh on next call.
+    if parsed.cache_schema_version < CACHE_SCHEMA_VERSION {
+        return None;
+    }
+    Some(parsed)
 }
 
-pub fn save_cached(u: &LiveUsage) {
-    let Some(p) = cache_path() else { return };
+pub fn save_cached(account: &Account, u: &LiveUsage) {
+    let Some(p) = cache_path(account) else { return };
     if let Some(parent) = p.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -169,8 +193,20 @@ pub fn save_cached(u: &LiveUsage) {
 /// If a fetch fails, return the stale cached value (if any) rather than nothing.
 ///
 /// `no_live=true` short-circuits to cache only and never hits the network.
-pub fn fetch_or_cached(no_live: bool) -> Option<LiveUsage> {
-    let cached = load_cached();
+pub fn fetch_or_cached(account: &Account, no_live: bool) -> Option<LiveUsage> {
+    fetch_or_cached_inner(account, no_live, false)
+}
+
+/// Like [`fetch_or_cached`] but bypass the `REFRESH_INTERVAL` freshness
+/// short-circuit and always attempt one HTTP call. Used by the TUI's
+/// initial poller bootstrap so a cold open never trusts a poisoned
+/// cache from a stale background daemon. 429 backoff is still honored.
+pub fn fetch_force(account: &Account, no_live: bool) -> Option<LiveUsage> {
+    fetch_or_cached_inner(account, no_live, true)
+}
+
+fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Option<LiveUsage> {
+    let cached = load_cached(account);
 
     if no_live {
         return cached;
@@ -178,39 +214,49 @@ pub fn fetch_or_cached(no_live: bool) -> Option<LiveUsage> {
 
     let now = Utc::now();
     if let Some(ref c) = cached {
-        // Hold off on refetch after a 429 for longer.
-        let min_age = if is_recent_429() {
-            BACKOFF_AFTER_429
-        } else {
-            REFRESH_INTERVAL
-        };
-        if let Ok(delta) = chrono::Duration::from_std(min_age) {
-            if now - c.fetched_at < delta {
-                return Some(c.clone());
+        // 429 backoff is non-negotiable even with `force` — we don't want
+        // to hammer the endpoint after it told us to back off.
+        if is_recent_429(&account.name) {
+            if let Ok(delta) = chrono::Duration::from_std(BACKOFF_AFTER_429) {
+                if now - c.fetched_at < delta {
+                    return Some(c.clone());
+                }
+            }
+        } else if !force {
+            if let Ok(delta) = chrono::Duration::from_std(REFRESH_INTERVAL) {
+                if now - c.fetched_at < delta {
+                    return Some(c.clone());
+                }
             }
         }
     }
 
-    let token = match auth::read_oauth_token() {
+    let token = match auth::read_oauth_token(account) {
         Ok(t) => t,
         Err(e) => {
-            log_once(format!("claude-usage: oauth token unavailable: {e}"));
+            log_once(format!(
+                "claude-usage: oauth token unavailable for '{}': {e}",
+                account.name
+            ));
             return cached;
         }
     };
 
     match fetch_live(&token) {
         Ok(fresh) => {
-            save_cached(&fresh);
-            clear_429_flag();
+            save_cached(account, &fresh);
+            clear_429_flag(&account.name);
             Some(fresh)
         }
         Err(FetchError::RateLimited) => {
-            mark_429();
+            mark_429(&account.name);
             cached
         }
         Err(e) => {
-            log_once(format!("claude-usage: live fetch failed: {e}"));
+            log_once(format!(
+                "claude-usage: live fetch failed for '{}': {e}",
+                account.name
+            ));
             cached
         }
     }
@@ -221,28 +267,28 @@ pub fn fetch_or_cached(no_live: bool) -> Option<LiveUsage> {
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-fn last_429_ts() -> &'static Mutex<Option<DateTime<Utc>>> {
-    static S: OnceLock<Mutex<Option<DateTime<Utc>>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(None))
+fn last_429_ts() -> &'static Mutex<HashMap<String, DateTime<Utc>>> {
+    static S: OnceLock<Mutex<HashMap<String, DateTime<Utc>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 fn logged_once_set() -> &'static Mutex<std::collections::HashSet<String>> {
     static S: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-fn mark_429() {
+fn mark_429(account: &str) {
     if let Ok(mut g) = last_429_ts().lock() {
-        *g = Some(Utc::now());
+        g.insert(account.to_string(), Utc::now());
     }
 }
-fn clear_429_flag() {
+fn clear_429_flag(account: &str) {
     if let Ok(mut g) = last_429_ts().lock() {
-        *g = None;
+        g.remove(account);
     }
 }
-fn is_recent_429() -> bool {
+fn is_recent_429(account: &str) -> bool {
     let Ok(g) = last_429_ts().lock() else { return false };
-    let Some(ts) = *g else { return false };
+    let Some(ts) = g.get(account).copied() else { return false };
     let Ok(delta) = chrono::Duration::from_std(BACKOFF_AFTER_429) else { return false };
     Utc::now() - ts < delta
 }

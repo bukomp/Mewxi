@@ -1,33 +1,37 @@
-//! Parse, cache, and aggregate Claude Code assistant-message usage from the
-//! local JSONL transcripts under `~/.claude/projects/`.
+//! Parse, cache, and aggregate Claude Code assistant-message usage from
+//! the per-account JSONL transcripts under each `CLAUDE_CONFIG_DIR`.
 //!
 //! The public surface is small:
 //!
-//! - [`scan_all`] — walk every JSONL, parse assistant messages into
-//!   [`UsageRecord`]s, dedup by `message_id`, return chronological.
+//! - [`scan_all`] — walk every JSONL under a given root, parse
+//!   assistant messages into [`UsageRecord`]s, dedup by `message_id`,
+//!   return chronological.
 //! - [`aggregate`] — fold a slice of records into an [`Aggregate`] with
 //!   all-time / period totals, per-model / per-project / per-day
 //!   breakdowns, plus the rolling 5-hour block.
-//! - [`load_and_aggregate`] — one-shot `scan_all` + `aggregate`.
+//! - [`load_and_aggregate_for`] — one-shot `scan_all` + `aggregate`
+//!   scoped to a single [`Account`].
 //! - [`overage_cost_usd`] — USD cost of tokens in a 5h block that
 //!   exceed a caller-supplied cap.
 //! - [`current_context_from_transcript`] / [`context_cap_for`] —
 //!   per-session context size and cap detection for the `ctx` segment.
+//! - [`parse_file_cached`] — exposed for [`crate::live_session`]; reuses
+//!   the per-account cache transparently.
 //!
 //! Pricing is hard-coded per-million-token rates in [`price_for`],
-//! approximate public list prices as of 2026-04. Unknown model ids fall
-//! through to Sonnet rates. The 5-hour block detection matches
-//! Anthropic's own accounting (clock-hour floor + 5h gap breaks the
-//! block). Per-file parse results are cached on disk keyed on
-//! `(mtime, size)` under `$XDG_CACHE_HOME/claude-usage/files.json`, so
-//! repeat scans over a large history are near-instant.
+//! approximate public list prices as of 2026-04. Per-file parse
+//! results are cached on disk keyed on `(mtime, size)` under
+//! `$XDG_CACHE_HOME/claude-usage/files-<slug>.json`, one file per
+//! account so concurrent watchers don't stomp on each other.
 
+use crate::accounts::Account;
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
@@ -137,15 +141,23 @@ fn floor_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_naive_utc_and_offset(floored, Utc)
 }
 
-pub fn claude_projects_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+/// Per-account on-disk file-cache path: `files-<slug>.json` under the
+/// shared `claude-usage` cache dir. Keeping caches per-account means
+/// concurrent watchers (one per account) don't clobber each other.
+pub fn cache_path_for(account: &Account) -> Option<PathBuf> {
+    dirs::cache_dir()
+        .map(|c| c.join("claude-usage").join(format!("files-{}.json", account.slug())))
 }
 
-pub fn cache_path() -> Option<PathBuf> {
-    dirs::cache_dir().map(|c| c.join("claude-usage").join("files.json"))
+/// Per-account on-disk statusLine output: `status-<slug>.txt`.
+pub fn status_cache_path_for(account: &Account) -> Option<PathBuf> {
+    dirs::cache_dir()
+        .map(|c| c.join("claude-usage").join(format!("status-{}.txt", account.slug())))
 }
 
-pub fn status_cache_path() -> Option<PathBuf> {
+/// Single-file mirror of the most-recently-modified account, kept so
+/// existing statusLine hooks pointed at `status.txt` continue to work.
+pub fn status_cache_path_mirror() -> Option<PathBuf> {
     dirs::cache_dir().map(|c| c.join("claude-usage").join("status.txt"))
 }
 
@@ -161,25 +173,54 @@ struct FileEntry {
     records: Vec<UsageRecord>,
 }
 
-fn load_file_cache() -> FileCache {
-    let Some(path) = cache_path() else { return FileCache::default() };
-    fs::read(&path)
+fn load_file_cache(path: &Path) -> FileCache {
+    fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
-fn save_file_cache(cache: &FileCache) {
-    let Some(path) = cache_path() else { return };
+fn save_file_cache(path: &Path, cache: &FileCache) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(bytes) = serde_json::to_vec(cache) {
         let tmp = path.with_extension("json.tmp");
         if fs::write(&tmp, &bytes).is_ok() {
-            let _ = fs::rename(&tmp, &path);
+            let _ = fs::rename(&tmp, path);
         }
     }
+}
+
+/// Process-wide cache of per-file parse results, populated as
+/// [`scan_all`] runs. Lets [`parse_file_cached`] (used by
+/// [`crate::live_session::scan`]) return the freshest records without
+/// re-reading the file on every UI tick.
+fn parsed_cache() -> &'static Mutex<HashMap<PathBuf, (u64, u64, Vec<UsageRecord>)>> {
+    static S: OnceLock<Mutex<HashMap<PathBuf, (u64, u64, Vec<UsageRecord>)>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Parse a transcript file, reusing the process-wide cache when the
+/// file's `(mtime, size)` matches the cached entry. Public so the
+/// live-session detector can share work with [`scan_all`].
+pub fn parse_file_cached(path: &Path) -> Result<Vec<UsageRecord>> {
+    let meta = fs::metadata(path)?;
+    let mtime = mtime_unix(&meta);
+    let size = meta.len();
+    let key = path.to_path_buf();
+    if let Ok(g) = parsed_cache().lock() {
+        if let Some((m, s, recs)) = g.get(&key) {
+            if *m == mtime && *s == size {
+                return Ok(recs.clone());
+            }
+        }
+    }
+    let recs = parse_file(path).unwrap_or_default();
+    if let Ok(mut g) = parsed_cache().lock() {
+        g.insert(key, (mtime, size, recs.clone()));
+    }
+    Ok(recs)
 }
 
 fn mtime_unix(m: &fs::Metadata) -> u64 {
@@ -190,19 +231,23 @@ fn mtime_unix(m: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-/// Walk every JSONL in ~/.claude/projects and return all usage records.
-/// Deduplicates by message_id so resumed/forked sessions don't double-count.
+/// Walk every JSONL under `root` and return all usage records.
+/// Deduplicates by message_id so resumed/forked sessions don't
+/// double-count. `cache_path` is the per-account on-disk cache the
+/// caller provides (see [`cache_path_for`]); `None` disables caching.
 ///
-/// Uses an on-disk per-file cache keyed on (mtime, size): unchanged files skip
+/// Uses the cache keyed on (mtime, size): unchanged files skip
 /// re-parsing, so repeat scans on a large history are near-instant.
-pub fn scan_all(root: &Path) -> Result<Vec<UsageRecord>> {
+pub fn scan_all(root: &Path, cache_path: Option<&Path>) -> Result<Vec<UsageRecord>> {
     let mut out = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     if !root.exists() {
         return Ok(out);
     }
 
-    let mut cache = load_file_cache();
+    let mut cache = cache_path
+        .map(load_file_cache)
+        .unwrap_or_default();
     let mut next: HashMap<PathBuf, FileEntry> = HashMap::new();
     let mut changed = false;
 
@@ -238,6 +283,13 @@ pub fn scan_all(root: &Path) -> Result<Vec<UsageRecord>> {
     // per-project cost totals to flap between scans.
     let mut ordered: Vec<(&PathBuf, &FileEntry)> = next.iter().collect();
     ordered.sort_by(|a, b| a.0.cmp(b.0));
+    // Populate the process-wide parsed cache so live_session::scan can
+    // skip re-reading these files this tick.
+    if let Ok(mut g) = parsed_cache().lock() {
+        for (p, fe) in &ordered {
+            g.insert((*p).clone(), (fe.mtime_unix, fe.size, fe.records.clone()));
+        }
+    }
     for (_, fe) in ordered {
         for r in &fe.records {
             if seen.insert(r.message_id.clone()) {
@@ -248,7 +300,9 @@ pub fn scan_all(root: &Path) -> Result<Vec<UsageRecord>> {
     out.sort_by_key(|r| r.timestamp);
 
     if changed {
-        save_file_cache(&FileCache { files: next });
+        if let Some(p) = cache_path {
+            save_file_cache(p, &FileCache { files: next });
+        }
     }
     Ok(out)
 }
@@ -459,9 +513,10 @@ pub fn aggregate(records: &[UsageRecord]) -> Aggregate {
     agg
 }
 
-pub fn load_and_aggregate() -> Result<Aggregate> {
-    let root = claude_projects_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-    let records = scan_all(&root)?;
+pub fn load_and_aggregate_for(account: &Account) -> Result<Aggregate> {
+    let root = account.projects_dir();
+    let cache = cache_path_for(account);
+    let records = scan_all(&root, cache.as_deref())?;
     Ok(aggregate(&records))
 }
 
@@ -510,12 +565,10 @@ pub fn current_context_from_transcript(path: &Path) -> Option<SessionContext> {
     Some(SessionContext { current: cur, max_observed, model })
 }
 
-/// Read `"model"` from the user's Claude Code settings and return true if it
+/// Read `"model"` from an account's settings and return true if it
 /// requests an extended-context variant (e.g. `opus[1m]`, `sonnet[1m]`).
-pub fn extended_context_from_settings() -> bool {
-    let Some(home) = dirs::home_dir() else { return false };
-    for rel in [".claude/settings.json", ".claude/settings.local.json"] {
-        let path = home.join(rel);
+pub fn extended_context_from_settings(account: &Account) -> bool {
+    for path in account.settings_paths() {
         let Ok(s) = std::fs::read_to_string(&path) else { continue };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { continue };
         let model_str: Option<String> = match v.get("model") {
@@ -535,13 +588,18 @@ pub fn extended_context_from_settings() -> bool {
 /// Decide a model's context cap. The heuristics, in order of confidence:
 ///  1. stdin alias from Claude Code containing `[1m]` → 1M
 ///  2. Any message in this session had >200K context → 1M
-///  3. `~/.claude/settings.json` model is `…[1m]` → 1M
+///  3. The account's `settings.json` model is `…[1m]` → 1M
 ///  4. Otherwise 200K (default for all current Claude models)
-pub fn context_cap_for(api_model: &str, max_observed: u64, stdin_alias: Option<&str>) -> u64 {
+pub fn context_cap_for(
+    api_model: &str,
+    max_observed: u64,
+    stdin_alias: Option<&str>,
+    account: &Account,
+) -> u64 {
     let _ = api_model;
     let one_m = stdin_alias.is_some_and(|s| s.contains("[1m]"))
         || max_observed > 200_000
-        || extended_context_from_settings();
+        || extended_context_from_settings(account);
     if one_m { 1_000_000 } else { 200_000 }
 }
 

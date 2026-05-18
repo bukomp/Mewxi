@@ -1,31 +1,81 @@
 # claude-usage
 
-A Rust tool for tracking, visualising, and exposing Claude Code usage stats.
-One binary, seven subcommands:
+A Rust tool for tracking, visualising, and exposing Claude Code usage stats
+across one or many `CLAUDE_CONFIG_DIR` accounts. One binary, seven subcommands:
 
 | Subcommand | What it does |
 |------------|--------------|
-| `claude-usage tui`    | Interactive full-screen dashboard that updates as session files change. |
-| `claude-usage status` | One-line ANSI-coloured summary for Claude Code's `statusLine`. |
-| `claude-usage watch`  | Background daemon that keeps the `status` output cached and hot. |
+| `claude-usage tui`    | Interactive full-screen dashboard with three views (all sessions / session detail / account detail). |
+| `claude-usage status` | One-line ANSI-coloured summary for Claude Code's `statusLine`. Auto-detects which account owns the active transcript. |
+| `claude-usage watch`  | Background daemon that keeps a `status-<account>.txt` per account hot. |
 | `claude-usage setup`  | Wire `statusLine` into `~/.claude/settings.json` and (optionally) install a watcher service. |
 | `claude-usage stop`   | Stop the watcher service (systemd on Linux, launchd on macOS); `--disable` also removes it from autostart. |
-| `claude-usage dump`   | Dump the full aggregate as JSON (for scripts / debugging). |
+| `claude-usage dump`   | Dump the full per-account aggregate + live sessions as JSON. |
 | `claude-usage mcp`    | Expose usage stats as an MCP server over stdio. |
 
 Data comes from two sources:
 
 1. **Local transcripts** — every assistant message in every JSONL under
-   `~/.claude/projects/` is parsed, tokens and dollars are summed, and the
-   result is cached on disk keyed by `(mtime, size)` so re-scans are cheap.
+   each account's `projects/` is parsed, tokens and dollars are summed,
+   and the result is cached on disk keyed by `(mtime, size)` so re-scans
+   are cheap. One cache file per account: `files-<slug>.json`.
 2. **Claude Code's OAuth `/usage` endpoint** — the same source that powers
    the in-CLI `/usage` command and its status bar, giving the authoritative
-   5-hour and 7-day utilisation windows. Cached for 60 s to stay cheap to
-   call per keypress.
+   5-hour and 7-day utilisation windows. Cached for 60 s per account
+   (`live-<slug>.json`) to stay cheap to call per keypress.
 
 Everything is best-effort. If the OAuth call fails, the TUI falls back to
 a local estimate. If the token store is unreadable, `--no-live` silences
 the network entirely.
+
+## Multi-account configuration
+
+Most users run a single Claude Code account out of `~/.claude` and need no
+config. If you split work and personal into separate dirs via
+`CLAUDE_CONFIG_DIR` (e.g. `~/.claude-work` and `~/.claude-priv`),
+`claude-usage` auto-discovers every `~/.claude*` directory that contains a
+`projects/` subtree and treats each as one account.
+
+For explicit control — friendly names, per-account token sources, custom
+paths — create `~/.config/claude-usage/accounts.toml`:
+
+```toml
+default_account = "work"
+ignored = ["default"]   # names to hide from every view (toggleable from view 4)
+
+[[accounts]]
+name = "work"
+dir  = "~/.claude-work"
+token_source = { keychain = "Claude Code-credentials" }
+
+[[accounts]]
+name = "priv"
+dir  = "~/.claude-priv"
+token_source = { keychain = "Claude Code-credentials-priv" }
+
+[[accounts]]
+name = "ci"
+dir  = "~/.claude-ci"
+token_source = { env = "CLAUDE_CI_TOKEN" }
+```
+
+`token_source` accepts one of:
+- `{ env = "VARNAME" }` — read the bearer from an env var.
+- `{ keychain = "service" }` — macOS `security find-generic-password -s <service>`.
+- `{ file = "/path" }` — JSON file with `claudeAiOauth.accessToken`.
+
+`ignored` is a list of account names you don't want claude-usage to
+touch. Ignored accounts are still **discovered** so the setup view
+(`4`) lists them and lets you press `i` to flip the flag — they just
+don't appear in any other view, the `dump` output, MCP tool results,
+or the statusLine. Toggling from the TUI rewrites this list back to
+`accounts.toml` automatically; restart `claude-usage tui` after a
+toggle for it to take effect across views 1/2/3.
+
+If `accounts.toml` is missing, every entry defaults to the
+`Claude Code-credentials` keychain service (or the existing
+`~/.claude/.credentials.json` on Linux). The file is created on
+demand the first time you press `i` in view 4.
 
 ---
 
@@ -61,10 +111,26 @@ JSONL data only.
 claude-usage tui
 ```
 
-Keys: `q` / `Esc` to quit, `r` to force reload + live refetch.
+Four views:
 
-The layout auto-adapts to terminal width. Above 100 columns you get a
-multi-column layout; below, a stacked one.
+| Key | View |
+|-----|------|
+| `1` | **All sessions** — per-account 5h / weekly / extra bars stacked at the top, plus a single table of every currently-running session across every account. |
+| `2` | **Session detail** — the selected session's parent-account bars + this session's token breakdown, context %, and meta. |
+| `3` | **Account detail** — the original single-pane dashboard scoped to the selected account (header, three gauges, burn rate, sparkline, efficiency, by-project table). |
+| `4` | **Setup** — per-account statusLine wiring status + background watcher service status. Toggle individual rows with `s` / `w`, or press `a` to apply everything that's missing. The TUI drops you here automatically on first launch when anything is unwired; until then every other view shows a yellow `⚠ setup incomplete — press 4 to fix` banner at the top. |
+
+Navigation: `Tab` / `↑` / `↓` cycle the selection inside the active
+view; `Enter` from view 1 drills into the highlighted session. `q` /
+`Esc` quits, `r` forces a reload + OAuth refetch.
+
+The account-detail view auto-adapts to terminal width — above 100
+columns you get a multi-column layout; below, a stacked one.
+
+> **You don't need to run the `setup` subcommand by hand.** Launch
+> `claude-usage tui` once; on first run it shows the setup view so
+> you can wire `statusLine` for every account and install the watcher
+> service with a single keypress (`a`).
 
 ### What each panel means
 
@@ -193,22 +259,18 @@ is left on disk either way, so `setup --service` can bring it back.
 claude-usage watch         # runs forever
 ```
 
-Watches `~/.claude/projects/` for JSONL changes via `notify`, re-renders
-the status line, and writes it atomically to the platform cache dir:
+Spawns one `notify` watcher per account's `projects/` and writes a
+per-account `status-<slug>.txt` plus a `status.txt` mirror of whichever
+account was modified most recently. Atomic renames, per-account 500 ms
+debounce, 15 s heartbeat.
 
-- **Linux:** `$XDG_CACHE_HOME/claude-usage/status.txt` (defaults to
-  `~/.cache/claude-usage/status.txt`).
-- **macOS:** `~/Library/Caches/claude-usage/status.txt`.
+- **Linux:** `$XDG_CACHE_HOME/claude-usage/` (defaults to
+  `~/.cache/claude-usage/`).
+- **macOS:** `~/Library/Caches/claude-usage/`.
 
-- Coalesces event bursts; writes at most once per 500 ms.
-- Writes a heartbeat every 15 s even when idle so the cache never goes
-  stale during low-activity periods.
-- If the cache file is deleted out from under it, recreates on next
-  tick.
-
-Typical setup: wire `statusLine` to `cat` the above path and run
-`claude-usage watch` under a long-lived process supervisor — a launchd
-agent on macOS, a systemd user unit on Linux, or any equivalent.
+A single-account statusLine that just `cat`s `status.txt` keeps working;
+multi-account dashboards can point separately at `status-work.txt`,
+`status-priv.txt`, etc.
 
 ---
 
@@ -218,18 +280,23 @@ agent on macOS, a systemd user unit on Linux, or any equivalent.
 claude-usage mcp           # stdio MCP
 ```
 
-Speaks JSON-RPC 2.0 per the 2024-11-05 MCP protocol version. Tools
-exposed:
+Speaks JSON-RPC 2.0 per the 2024-11-05 MCP protocol version. Every
+data-returning tool accepts an optional `account` string; when omitted,
+totals/breakdowns are summed across every configured account and
+`by_project` keys are namespaced as `<account>/<project>` to stay
+unique.
 
 | Tool | Purpose |
 |------|---------|
-| `get_totals`     | All-time / month / week / today totals plus session & project counts. |
-| `get_today`      | Today's totals only. |
-| `get_by_model`   | Totals grouped by model, sorted by cost. |
-| `get_by_project` | Totals grouped by project, sorted by cost. `limit` (default 50). |
-| `get_by_day`     | Last `days` days (default 14), newest first. |
-| `get_recent`     | Most recent assistant messages (`limit`, default 20). |
-| `get_live_usage` | Raw live payload from the OAuth endpoint. Returns `{unavailable: true, ...}` when no credential / rate-limited / `--no-live`. |
+| `list_accounts`      | Every configured account with its directory. |
+| `list_live_sessions` | Currently-active transcripts across all accounts (or `account`-filtered). |
+| `get_totals`         | All-time / month / week / today totals plus session & project counts. |
+| `get_today`          | Today's totals only. |
+| `get_by_model`       | Totals grouped by model, sorted by cost. |
+| `get_by_project`     | Totals grouped by project, sorted by cost. `limit` (default 50). |
+| `get_by_day`         | Last `days` days (default 14), newest first. |
+| `get_recent`         | Most recent assistant messages (`limit`, default 20). Each record gains an `account` field. |
+| `get_live_usage`     | Live OAuth payload for one account. Defaults to `default_account`. |
 
 Wire into Claude Code's MCP config as a stdio server pointed at the
 built binary.
@@ -242,8 +309,19 @@ built binary.
 claude-usage dump | jq .
 ```
 
-Emits `{ "aggregate": {...}, "live": {...|null} }`. Handy for scripting
-your own analyses without recomputing everything.
+Emits
+
+```json
+{
+  "generated_at": "...",
+  "default_account": "...",
+  "accounts": [
+    { "name": "...", "dir": "...", "aggregate": {...}, "live": {...|null}, "live_sessions": [...] }
+  ]
+}
+```
+
+Handy for scripting your own analyses without recomputing everything.
 
 ---
 
@@ -254,12 +332,12 @@ your own analyses without recomputing everything.
 | `--no-live` (global flag) / `CLAUDE_USAGE_NO_LIVE=<nonempty>` | Disable all calls to `api.anthropic.com/api/oauth/usage`. All panels fall back to local JSONL. |
 | `CLAUDE_USAGE_5H_CAP_TOKENS`   | Override the local 5h token cap used by the `status` and TUI estimates. Default 11 500 000 (Max 5×). Pro ≈ 2 300 000, Max 20× ≈ 46 000 000. |
 
-Caches live under `$XDG_CACHE_HOME/claude-usage/`:
+Caches live under `$XDG_CACHE_HOME/claude-usage/` (one per account, plus a mirror):
 
-- `files.json`   — per-file `(mtime, size, parsed_records)` cache so
-  untouched JSONLs skip re-parsing.
-- `live.json`    — last fetched OAuth payload + `fetched_at`.
-- `status.txt`   — the last statusLine string written by `watch`.
+- `files-<slug>.json`   — per-account, per-file `(mtime, size, parsed_records)` cache so untouched JSONLs skip re-parsing.
+- `live-<slug>.json`    — per-account last fetched OAuth payload + `fetched_at`.
+- `status-<slug>.txt`   — per-account statusLine written by `watch`.
+- `status.txt`          — mirror of whichever account was modified most recently (back-compat with single-account statusLine hooks).
 
 ---
 
@@ -269,13 +347,15 @@ Caches live under `$XDG_CACHE_HOME/claude-usage/`:
 
 | Module | Role |
 |--------|------|
-| `main.rs`        | `clap` CLI parse, subcommand dispatch, stdin-payload decode for `status`. |
-| `stats.rs`       | JSONL parsing, per-file cache, aggregation, 5h-block detection, pricing & context-cap heuristics. **The heart of the app.** |
-| `live_usage.rs`  | HTTP call to `api.anthropic.com/api/oauth/usage`, schema, on-disk cache, 429 backoff + log dedupe. |
-| `auth.rs`        | Read the OAuth Bearer token from the OS credential store (macOS only so far). |
-| `tui.rs`         | Ratatui layout, rendering, keybindings, `notify`-driven reload loop, live-poller thread. |
-| `watch.rs`       | Status-line string formatting and the `watch` daemon loop. |
-| `mcp.rs`         | JSON-RPC 2.0 MCP server over stdio. |
+| `main.rs`         | `clap` CLI parse, subcommand dispatch, stdin-payload decode for `status`, multi-account `dump`. |
+| `accounts.rs`     | Discover accounts from `accounts.toml` and/or `~/.claude*` auto-discovery. `Account`, `TokenSource`, `AccountsView`. |
+| `stats.rs`        | Per-account JSONL parsing, file cache, aggregation, 5h-block detection, pricing & context-cap heuristics. |
+| `live_session.rs` | Detect currently-open Claude Code instances by reading `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` marker files (gated on PID liveness via `ps`). One row per running `claude` process; subagent / one-shot transcripts are excluded by canonical-path matching. Marker `status` drives `active` (busy) vs `idle`. |
+| `live_usage.rs`   | Per-account HTTP call to `api.anthropic.com/api/oauth/usage`, cache, per-account 429 backoff. |
+| `auth.rs`         | Read each account's OAuth Bearer over its configured `TokenSource` (env / keychain / file). |
+| `tui/`            | Multi-view ratatui dashboard: `mod.rs` (event loop, ViewMode, AppState), `view_all.rs`, `view_session.rs`, `view_account.rs`, `widgets.rs`. |
+| `watch.rs`        | Account-aware status-line renderer + per-account `notify` watcher fan-out. |
+| `mcp.rs`          | JSON-RPC 2.0 MCP server; per-tool `account` filter and `list_accounts` / `list_live_sessions`. |
 
 ### Data flow (TUI)
 

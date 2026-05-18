@@ -18,7 +18,9 @@ notify = "6"
 ratatui = "0.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "time"] }
+toml = "0.8"
 ureq = { version = "2", features = ["json"] }
 walkdir = "2"
 

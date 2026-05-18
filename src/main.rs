@@ -16,7 +16,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod accounts;
 mod auth;
+mod live_session;
 mod live_usage;
 mod mcp;
 mod setup;
@@ -48,12 +50,12 @@ enum Cmd {
     Status,
     /// Run a background watcher that keeps the status cache hot as session files change.
     Watch,
-    /// Wire Claude Code's statusLine to this binary and (optionally) install a watcher service.
+    /// Wire Claude Code's statusLine into every discovered account and (optionally) install the watcher service. Same actions are available inside the TUI under view 4 (no CLI run required).
     Setup {
         /// Also install a user-scope service (systemd on Linux, launchd on macOS) to run the watcher at login.
         #[arg(long)]
         service: bool,
-        /// Overwrite an existing statusLine entry in ~/.claude/settings.json.
+        /// Overwrite an existing non-claude-usage statusLine entry in each account's settings.json.
         #[arg(long)]
         force: bool,
     },
@@ -99,11 +101,25 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Tui => tui::run(no_live),
         Cmd::Dump => {
-            let agg = stats::load_and_aggregate()?;
-            let live = live_usage::fetch_or_cached(no_live);
+            let view = accounts::load_accounts()?;
+            let mut out_accounts = Vec::with_capacity(view.accounts.len());
+            let alive = live_session::alive_pids();
+            for account in &view.accounts {
+                let agg = stats::load_and_aggregate_for(account).unwrap_or_default();
+                let live = live_usage::fetch_or_cached(account, no_live);
+                let live_sessions = live_session::scan(account, &alive);
+                out_accounts.push(serde_json::json!({
+                    "name": account.name,
+                    "dir": account.dir,
+                    "aggregate": agg,
+                    "live": live,
+                    "live_sessions": live_sessions,
+                }));
+            }
             let out = serde_json::json!({
-                "aggregate": agg,
-                "live": live,
+                "generated_at": chrono::Utc::now(),
+                "default_account": view.default_account,
+                "accounts": out_accounts,
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
             Ok(())
