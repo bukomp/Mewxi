@@ -68,6 +68,7 @@ pub struct SessionRef {
     pub current_context: Option<u64>,
     pub context_cap: Option<u64>,
     pub state: SessionState,
+    pub activity: crate::live_session::Activity,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -658,6 +659,7 @@ fn flatten_sessions(accounts: &[PerAccount]) -> Vec<SessionRef> {
                 current_context: ls.current_context,
                 context_cap: ls.context_cap,
                 state: ls.state,
+                activity: ls.activity.clone(),
             })
         })
         .collect();

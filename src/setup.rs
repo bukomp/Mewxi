@@ -191,6 +191,36 @@ fn inspect_statusline(path: &Path, binary: &Path, no_live: bool) -> StatusLineSt
 /// here silently turns into many-minute refreshes.
 const STATUSLINE_REFRESH_INTERVAL_SECS: u64 = 5;
 
+/// Hook events we wire into each account's `settings.json` so the TUI
+/// can show `awaiting` when a permission dialog is up. Claude Code
+/// emits nothing to the transcript during the dialog, so without these
+/// hooks we'd have no signal. See `Cmd::Hook` in `main.rs` for the
+/// handler — it just touches/removes a sibling marker file.
+///
+/// `PermissionRequest` sets the marker; `PostToolUse` + `PostToolUseFailure`
+/// both clear it (a denied/failed tool fires PostToolUseFailure, an
+/// approved one fires PostToolUse, and we want the marker gone in both
+/// cases). `Stop` clears too, as a belt-and-suspenders for any edge
+/// case where neither post-tool event fires.
+const HOOK_SET_EVENT: &str = "PermissionRequest";
+const HOOK_CLEAR_EVENTS: &[&str] = &["PostToolUse", "PostToolUseFailure", "Stop"];
+
+fn hook_command_set(binary: &Path, account_dir: &Path) -> String {
+    format!(
+        "{} hook awaiting-set --dir {}",
+        shell_quote(binary),
+        shell_quote(account_dir)
+    )
+}
+
+fn hook_command_clear(binary: &Path, account_dir: &Path) -> String {
+    format!(
+        "{} hook awaiting-clear --dir {}",
+        shell_quote(binary),
+        shell_quote(account_dir)
+    )
+}
+
 /// Write a `statusLine` block into `<settings_path>`, preserving any other
 /// keys. Creates parent dirs if missing. Idempotent when already at the
 /// desired shape; returns Ok(false) in that case. If the existing block
@@ -259,6 +289,180 @@ fn existing_points_at_us(sl: &serde_json::Value, binary: &Path, no_live: bool) -
         format!("{} --no-live status", shell_quote(binary))
     };
     cmd == a || cmd == b
+}
+
+/// Install (or refresh) the awaiting-permission hooks in
+/// `<settings_path>`. Returns Ok(true) if anything changed. Preserves
+/// any pre-existing hook entries for the same events — we add our
+/// `command` to the existing array rather than replacing it. Hooks
+/// from a previous install (pointing at this same binary) get
+/// overwritten in place so a binary-path change doesn't leave stale
+/// entries behind.
+pub fn wire_awaiting_hooks(settings_path: &Path, binary: &Path, account_dir: &Path) -> Result<bool> {
+    let mut root: serde_json::Value = if settings_path.exists() {
+        let s = fs::read_to_string(settings_path)
+            .with_context(|| format!("reading {}", settings_path.display()))?;
+        if s.trim().is_empty() { serde_json::json!({}) } else {
+            serde_json::from_str(&s).with_context(|| format!("parsing {}", settings_path.display()))?
+        }
+    } else {
+        if let Some(parent) = settings_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        serde_json::json!({})
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("{} is not a JSON object", settings_path.display()))?;
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("`hooks` is not an object"))?;
+
+    let set_cmd = hook_command_set(binary, account_dir);
+    let clear_cmd = hook_command_clear(binary, account_dir);
+    let binary_prefix = format!("{} hook ", shell_quote(binary));
+
+    let mut changed = false;
+    changed |= upsert_hook(hooks, HOOK_SET_EVENT, None, &set_cmd, &binary_prefix);
+    for ev in HOOK_CLEAR_EVENTS {
+        // Tools-matchers like "*" only apply to events that key by tool
+        // (PostToolUse, PostToolUseFailure). `Stop` has no matcher.
+        let matcher = if *ev == "Stop" { None } else { Some("*") };
+        changed |= upsert_hook(hooks, ev, matcher, &clear_cmd, &binary_prefix);
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let serialized = serde_json::to_string_pretty(&root)? + "\n";
+    atomic_write(settings_path, serialized.as_bytes())?;
+    Ok(true)
+}
+
+/// Make sure `hooks[event]` contains a group with the given matcher
+/// whose inner `hooks` array carries `{type: command, command: cmd}`.
+/// Drops any older entry whose command starts with `binary_prefix` so
+/// re-installing with a different account_dir or binary path doesn't
+/// pile up duplicates. Returns true if the structure was mutated.
+fn upsert_hook(
+    hooks: &mut serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    matcher: Option<&str>,
+    cmd: &str,
+    binary_prefix: &str,
+) -> bool {
+    let arr = hooks
+        .entry(event.to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut();
+    let Some(arr) = arr else { return false };
+
+    let want = serde_json::json!({"type": "command", "command": cmd});
+
+    // First pass: drop any stale entry that targets this binary (so we
+    // refresh in place rather than leak duplicates).
+    let mut changed = false;
+    for group in arr.iter_mut() {
+        let Some(grp) = group.as_object_mut() else { continue };
+        let Some(inner) = grp.get_mut("hooks").and_then(|h| h.as_array_mut()) else { continue };
+        let before = inner.len();
+        inner.retain(|h| {
+            let c = h.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            !(c.starts_with(binary_prefix) && c != cmd)
+        });
+        if inner.len() != before {
+            changed = true;
+        }
+    }
+
+    // Already wired? Scan for an exact match with the right matcher.
+    let already = arr.iter().any(|g| {
+        let matcher_ok = match matcher {
+            Some(m) => g.get("matcher").and_then(|x| x.as_str()) == Some(m),
+            None => g.get("matcher").is_none(),
+        };
+        matcher_ok
+            && g.get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|a| a.iter().any(|h| h == &want))
+                .unwrap_or(false)
+    });
+    if already {
+        return changed;
+    }
+
+    // Try to append to an existing group with the matching matcher
+    // (don't fragment unnecessarily) before adding a brand-new group.
+    for group in arr.iter_mut() {
+        let Some(grp) = group.as_object_mut() else { continue };
+        let matcher_ok = match matcher {
+            Some(m) => grp.get("matcher").and_then(|x| x.as_str()) == Some(m),
+            None => !grp.contains_key("matcher"),
+        };
+        if !matcher_ok { continue; }
+        let inner = grp
+            .entry("hooks".to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut();
+        if let Some(inner) = inner {
+            inner.push(want);
+            return true;
+        }
+    }
+
+    let mut new_group = serde_json::Map::new();
+    if let Some(m) = matcher {
+        new_group.insert("matcher".into(), serde_json::Value::String(m.into()));
+    }
+    new_group.insert("hooks".into(), serde_json::Value::Array(vec![want]));
+    arr.push(serde_json::Value::Object(new_group));
+    true
+}
+
+/// Remove our awaiting-permission hooks from `<settings_path>`. No-op
+/// if absent. Returns Ok(true) if a change was made.
+#[allow(dead_code)]
+pub fn unwire_awaiting_hooks(settings_path: &Path, binary: &Path) -> Result<bool> {
+    if !settings_path.exists() { return Ok(false); }
+    let s = fs::read_to_string(settings_path)?;
+    if s.trim().is_empty() { return Ok(false); }
+    let mut root: serde_json::Value = serde_json::from_str(&s)
+        .with_context(|| format!("parsing {}", settings_path.display()))?;
+    let Some(obj) = root.as_object_mut() else { return Ok(false) };
+    let Some(hooks) = obj.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return Ok(false);
+    };
+    let binary_prefix = format!("{} hook ", shell_quote(binary));
+    let mut changed = false;
+    for events in std::iter::once(HOOK_SET_EVENT).chain(HOOK_CLEAR_EVENTS.iter().copied()) {
+        let Some(arr) = hooks.get_mut(events).and_then(|v| v.as_array_mut()) else { continue };
+        for group in arr.iter_mut() {
+            let Some(grp) = group.as_object_mut() else { continue };
+            let Some(inner) = grp.get_mut("hooks").and_then(|h| h.as_array_mut()) else { continue };
+            let before = inner.len();
+            inner.retain(|h| {
+                let c = h.get("command").and_then(|c| c.as_str()).unwrap_or("");
+                !c.starts_with(&binary_prefix)
+            });
+            if inner.len() != before { changed = true; }
+        }
+        arr.retain(|g| {
+            g.get("hooks").and_then(|h| h.as_array()).map(|a| !a.is_empty()).unwrap_or(true)
+        });
+        if arr.is_empty() {
+            hooks.remove(events);
+            changed = true;
+        }
+    }
+    if hooks.is_empty() {
+        obj.remove("hooks");
+    }
+    if changed {
+        let serialized = serde_json::to_string_pretty(&root)? + "\n";
+        atomic_write(settings_path, serialized.as_bytes())?;
+    }
+    Ok(changed)
 }
 
 /// Remove the `statusLine` block from `<settings_path>`. No-op if the
@@ -617,6 +821,7 @@ pub fn apply_all(force: bool, no_live: bool) -> Result<ApplyOutcome> {
         errors: Vec::new(),
     };
     let snap = inspect(no_live)?;
+    let view = accounts::load_accounts()?;
     for acct in snap.accounts.iter().filter(|a| !a.ignored) {
         match &acct.statusline {
             StatusLineState::OtherCommand(cmd) if !force => {
@@ -634,6 +839,14 @@ pub fn apply_all(force: bool, no_live: bool) -> Result<ApplyOutcome> {
                 Err(e) => out.errors.push(format!("{}: {e}", acct.account_name)),
             },
         }
+        // Hooks live alongside the statusLine — quietly wire them in
+        // even when statusLine wasn't touched, so the TUI's `awaiting`
+        // status starts working after a single re-run of setup.
+        if let Some(acct_full) = view.all_accounts().find(|(a, _)| a.name == acct.account_name).map(|(a, _)| a) {
+            if let Err(e) = wire_awaiting_hooks(&acct.settings_path, &snap.binary, &acct_full.dir) {
+                out.errors.push(format!("{} hooks: {e}", acct.account_name));
+            }
+        }
     }
     if !snap.watcher.is_ok() {
         match install_watcher(&snap.binary, no_live) {
@@ -650,6 +863,7 @@ pub fn apply_all(force: bool, no_live: bool) -> Result<ApplyOutcome> {
 
 pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
     let snap = inspect(no_live)?;
+    let view = accounts::load_accounts()?;
     println!("claude-usage setup");
     println!("  binary:   {}", snap.binary.display());
     println!();
@@ -669,6 +883,13 @@ pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
                 Ok(false) => println!("  [{}] statusLine already wired ({})", acct.account_name, acct.settings_path.display()),
                 Err(e) => println!("  [{}] FAILED: {e}", acct.account_name),
             },
+        }
+        if let Some(acct_full) = view.all_accounts().find(|(a, _)| a.name == acct.account_name).map(|(a, _)| a) {
+            match wire_awaiting_hooks(&acct.settings_path, &snap.binary, &acct_full.dir) {
+                Ok(true) => println!("  [{}] installed awaiting-permission hooks", acct.account_name),
+                Ok(false) => {}
+                Err(e) => println!("  [{}] hooks FAILED: {e}", acct.account_name),
+            }
         }
     }
 

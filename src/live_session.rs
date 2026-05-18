@@ -32,6 +32,7 @@ use crate::stats::{self, SessionContext, UsageTotals};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
 use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -39,6 +40,185 @@ use std::path::{Path, PathBuf};
 pub enum SessionState {
     Active,
     Idle,
+}
+
+/// What the session is doing right now — a one-word summary derived from
+/// the marker (`busy`/`idle`) and the tail of the transcript. `Waiting`
+/// is the only state used when the marker is idle; the rest are picked
+/// from the most recent record's `content` and indicate what Claude is
+/// currently spending its turn on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Activity {
+    Waiting,
+    Starting,
+    Thinking,
+    Writing,
+    Reading,
+    Editing,
+    Searching,
+    Fetching,
+    Running,
+    Delegating,
+    Asking,
+    /// A permission dialog is currently up. Detected via the hook-written
+    /// `<session>.awaiting` sibling of the session marker — Claude Code
+    /// itself emits no transcript record when the dialog appears.
+    Awaiting,
+    Tool(String),
+}
+
+impl Activity {
+    pub fn label(&self) -> String {
+        match self {
+            Activity::Waiting => "waiting".into(),
+            Activity::Starting => "starting".into(),
+            Activity::Thinking => "thinking".into(),
+            Activity::Writing => "writing".into(),
+            Activity::Reading => "reading".into(),
+            Activity::Editing => "editing".into(),
+            Activity::Searching => "searching".into(),
+            Activity::Fetching => "fetching".into(),
+            Activity::Running => "running".into(),
+            Activity::Delegating => "delegating".into(),
+            Activity::Asking => "asking".into(),
+            Activity::Awaiting => "awaiting".into(),
+            Activity::Tool(n) => n.clone(),
+        }
+    }
+}
+
+fn classify_tool(name: &str) -> Activity {
+    // Strip MCP server prefix: mcp__server__tool → tool.
+    let short = name.rsplit("__").next().unwrap_or(name);
+    match short.to_ascii_lowercase().as_str() {
+        "read" => Activity::Reading,
+        "edit" | "write" | "notebookedit" => Activity::Editing,
+        "bash" | "bashoutput" | "killbash" | "killshell" => Activity::Running,
+        "grep" | "glob" => Activity::Searching,
+        "websearch" | "toolsearch" => Activity::Searching,
+        "webfetch" => Activity::Fetching,
+        "agent" | "task" => Activity::Delegating,
+        "askuserquestion" => Activity::Asking,
+        other => Activity::Tool(other.to_string()),
+    }
+}
+
+/// Inspect one JSONL record and report the activity it implies, or None
+/// if it's a record kind that says nothing about what Claude is doing
+/// (attachment, ai-title, file-history-snapshot, etc.).
+fn classify_record(j: &serde_json::Value) -> Option<Activity> {
+    let t = j.get("type")?.as_str()?;
+    match t {
+        "assistant" => {
+            let arr = j.get("message")?.get("content")?.as_array()?;
+            // Walk content items in reverse — the last meaningful item is
+            // what Claude was producing when the record was written.
+            for ci in arr.iter().rev() {
+                let Some(ct) = ci.get("type").and_then(|x| x.as_str()) else { continue };
+                match ct {
+                    "tool_use" => {
+                        let name = ci.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                        return Some(classify_tool(name));
+                    }
+                    "thinking" => return Some(Activity::Thinking),
+                    "text" => return Some(Activity::Writing),
+                    _ => continue,
+                }
+            }
+            None
+        }
+        "user" => {
+            let content = j.get("message")?.get("content")?;
+            if let Some(arr) = content.as_array() {
+                let has_tool_result = arr.iter().any(|ci| {
+                    ci.get("type").and_then(|x| x.as_str()) == Some("tool_result")
+                });
+                if has_tool_result {
+                    // Tool returned, Claude is processing the result before
+                    // its next move.
+                    return Some(Activity::Thinking);
+                }
+            }
+            // Plain prompt — user just sent something, no response yet.
+            Some(Activity::Starting)
+        }
+        _ => None,
+    }
+}
+
+/// Read the last `max_bytes` of `path` as a string, discarding any
+/// partial leading line so callers can safely split on `\n`. Returns
+/// None on read errors or empty files.
+fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    let start = len.saturating_sub(max_bytes);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    f.read_to_end(&mut buf).ok()?;
+    if start > 0 {
+        if let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+            buf.drain(..=nl);
+        } else {
+            return None;
+        }
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// What the tail says about the session, with enough context for the
+/// caller to decide whether the marker's `idle` flag should override.
+pub enum TailKind {
+    /// Last meaningful record is an assistant `tool_use` with no
+    /// matching `tool_result` yet — Claude is paused on that tool, be
+    /// it executing, awaiting a permission prompt, or blocked on
+    /// `AskUserQuestion`. The marker may read either `busy` or `idle`
+    /// (Claude Code flips to idle while a question dialog is up) but
+    /// the session is not actually waiting for a fresh prompt.
+    PendingTool(Activity),
+    /// Last meaningful record completed Claude's side of the turn —
+    /// an assistant text/thinking block, or a user tool_result that
+    /// Claude has not yet acted on. Safe to surface `Waiting` when
+    /// the marker says idle.
+    Completed(Activity),
+}
+
+/// Walk the tail of a transcript backwards looking for the most recent
+/// record that implies an activity. Returns None if nothing meaningful
+/// is found in the inspected window.
+fn tail_activity(path: &Path) -> Option<TailKind> {
+    let tail = read_tail(path, 256 * 1024)?;
+    for line in tail.lines().rev() {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Some(a) = classify_record(&v) else { continue };
+        // An assistant record we just classified as a tool is by
+        // definition unresolved — nothing came after it in the file.
+        let is_pending = v.get("type").and_then(|t| t.as_str()) == Some("assistant")
+            && is_tool_activity(&a);
+        return Some(if is_pending { TailKind::PendingTool(a) } else { TailKind::Completed(a) });
+    }
+    None
+}
+
+fn is_tool_activity(a: &Activity) -> bool {
+    matches!(
+        a,
+        Activity::Reading
+            | Activity::Editing
+            | Activity::Searching
+            | Activity::Fetching
+            | Activity::Running
+            | Activity::Delegating
+            | Activity::Asking
+            | Activity::Tool(_)
+    )
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,6 +243,10 @@ pub struct LiveSession {
     pub current_context: Option<u64>,
     pub context_cap: Option<u64>,
     pub state: SessionState,
+    /// One-word summary of what Claude is doing right now. `Waiting`
+    /// when the marker is idle; otherwise derived from the tail of the
+    /// transcript (last `tool_use`, `thinking`, `text`, or `tool_result`).
+    pub activity: Activity,
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +434,37 @@ pub fn scan(
             SessionState::Idle
         };
 
+        // Sidechannel marker written by the `claude-usage hook awaiting-set`
+        // command we install into each account's `settings.json` —
+        // present means a permission dialog is currently up. Claude Code
+        // itself emits nothing to the transcript while the dialog is
+        // displayed (the `tool_use` record only lands after the user
+        // responds), so the hook is the only reliable signal.
+        let awaiting_marker = account
+            .dir
+            .join("sessions")
+            .join(format!("{}.awaiting", marker.session_id));
+
+        // Decide activity:
+        //  1. `.awaiting` file present → permission dialog up, hands down.
+        //  2. Otherwise an unresolved tool_use in the transcript →
+        //     surface that tool's activity (covers `AskUserQuestion`,
+        //     where Claude Code flips the marker to `idle` but Claude
+        //     is genuinely paused on the user).
+        //  3. Otherwise honor the marker: `idle` → Waiting, `busy` →
+        //     last completed tail activity (Thinking/Writing) or
+        //     Starting if there's nothing yet.
+        let activity = if awaiting_marker.exists() {
+            Activity::Awaiting
+        } else {
+            match (state, transcript_exists.then(|| tail_activity(&transcript)).flatten()) {
+                (_, Some(TailKind::PendingTool(a))) => a,
+                (SessionState::Idle, _) => Activity::Waiting,
+                (SessionState::Active, Some(TailKind::Completed(a))) => a,
+                (SessionState::Active, None) => Activity::Starting,
+            }
+        };
+
         // Carry `state_since` forward while the state hasn't flipped so
         // the displayed age keeps growing through repeated scans (and
         // through every appended record while Active). For a transition
@@ -281,6 +496,7 @@ pub fn scan(
             current_context,
             context_cap,
             state,
+            activity,
         });
     }
 

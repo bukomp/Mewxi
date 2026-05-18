@@ -65,6 +65,31 @@ enum Cmd {
         #[arg(long)]
         disable: bool,
     },
+    /// Internal: hook handler invoked by Claude Code's settings.json hooks.
+    /// Reads the hook payload JSON from stdin, extracts session_id, and
+    /// touches or removes `<dir>/sessions/<session_id>.awaiting` so the
+    /// TUI knows a permission dialog is up.
+    #[command(hide = true)]
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookAction {
+    /// Mark the calling session as awaiting permission (creates the marker).
+    AwaitingSet {
+        /// `CLAUDE_CONFIG_DIR` of the account that installed the hook.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+    },
+    /// Clear the awaiting-permission marker for the calling session.
+    AwaitingClear {
+        /// `CLAUDE_CONFIG_DIR` of the account that installed the hook.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+    },
 }
 
 /// Read Claude Code's statusLine JSON payload from stdin and extract
@@ -139,5 +164,40 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
             rt.block_on(mcp::run(no_live))
         }
+        Cmd::Hook { action } => run_hook(action),
     }
+}
+
+/// Read Claude Code's hook payload from stdin and pull `session_id`.
+/// The payload shape is `{"session_id": "<uuid>", ...}` — every hook
+/// event includes it. Best-effort: returns None if stdin is empty,
+/// not JSON, or missing the field.
+fn read_session_id_from_stdin() -> Option<String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf).ok()?;
+    let v: serde_json::Value = serde_json::from_str(buf.trim()).ok()?;
+    v.get("session_id").and_then(|s| s.as_str()).map(String::from)
+}
+
+fn run_hook(action: HookAction) -> Result<()> {
+    // Hooks must never fail Claude Code — silently no-op on bad input.
+    // Claude Code waits for the hook to exit; we want it back fast.
+    let (dir, do_set) = match action {
+        HookAction::AwaitingSet { dir } => (dir, true),
+        HookAction::AwaitingClear { dir } => (dir, false),
+    };
+    let Some(session_id) = read_session_id_from_stdin() else {
+        return Ok(());
+    };
+    let marker = dir.join("sessions").join(format!("{session_id}.awaiting"));
+    if do_set {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::File::create(&marker);
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+    Ok(())
 }

@@ -7,7 +7,7 @@
 
 use super::widgets::{fmt_tokens_compact, gauge_color, render_footer};
 use super::{PerAccount, SessionRef};
-use crate::live_session::SessionState;
+use crate::live_session::{Activity, SessionState};
 use crate::live_usage::{LiveUsage, REFRESH_INTERVAL};
 use chrono::{Local, Utc};
 use ratatui::Frame;
@@ -339,9 +339,9 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
     // small buffer so columns don't appear right at the edge of fitting.
     let w = area.width;
     let show_ctx = w >= 95;
-    let show_msgs = w >= 102;
-    let show_io = w >= 116;
-    let show_cache = w >= 125;
+    let show_status = w >= 107;
+    let show_io = w >= 121;
+    let show_cache = w >= 130;
 
     let now = Utc::now();
     let rows: Vec<Row> = sessions
@@ -371,8 +371,9 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
                 Cell::from(short_id(&s.session_id)),
                 Cell::from(fmt_age(age_secs)),
             ];
-            if show_msgs {
-                cells.push(Cell::from(s.totals.messages.to_string()));
+            if show_status {
+                let (label, color) = activity_display(&s.activity);
+                cells.push(Cell::from(Span::styled(label, Style::default().fg(color))));
             }
             if show_ctx {
                 cells.push(Cell::from(fmt_ctx(s.current_context, s.context_cap)));
@@ -402,9 +403,11 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         Constraint::Length(11),
         Constraint::Length(6),
     ];
-    if show_msgs {
-        header_labels.push("msgs");
-        constraints.push(Constraint::Length(5));
+    if show_status {
+        header_labels.push("status");
+        // Longest label is "delegating" (10 chars); pad to 11 so the
+        // header "status" + value never bump the next column.
+        constraints.push(Constraint::Length(11));
     }
     if show_ctx {
         header_labels.push("ctx");
@@ -436,6 +439,25 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         )
         .block(block);
     f.render_widget(table, area);
+}
+
+fn activity_display(a: &Activity) -> (String, Color) {
+    let color = match a {
+        Activity::Waiting => Color::DarkGray,
+        Activity::Starting => Color::Cyan,
+        Activity::Thinking => Color::Cyan,
+        Activity::Writing => Color::Green,
+        Activity::Reading => Color::Blue,
+        Activity::Editing => Color::Yellow,
+        Activity::Searching => Color::Blue,
+        Activity::Fetching => Color::Blue,
+        Activity::Running => Color::Magenta,
+        Activity::Delegating => Color::Magenta,
+        Activity::Asking => Color::Yellow,
+        Activity::Awaiting => Color::Red,
+        Activity::Tool(_) => Color::White,
+    };
+    (a.label(), color)
 }
 
 fn fmt_ctx(current: Option<u64>, cap: Option<u64>) -> String {
