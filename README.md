@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="images/muxi.png" alt="muxi — the digi-cat mascot" width="220" />
+<img src="images/muxi.png" alt="Muxi — the digi-cat mascot" width="220" />
 
 # Muxi
 
@@ -8,7 +8,7 @@
 
 One binary. Every account. No telemetry going anywhere but your terminal.
 
-> Today muxi reads Claude Code. Gemini CLI and Codex are on the [roadmap](docs/roadmap.md).
+> Today Muxi reads Claude Code. Gemini CLI and Codex are on the [roadmap](docs/roadmap.md).
 
 </div>
 
@@ -19,8 +19,8 @@ One binary. Every account. No telemetry going anywhere but your terminal.
 - [Installation](docs/installation.md) — build from source, get the binary on your PATH.
 - [Quick start](docs/quickstart.md) — five minutes from zero to a live status line.
 - [TUI guide](docs/tui.md) — the four views, keybinds, what each pane means.
-- [MCP server](docs/mcp.md) — wire muxi into Claude Code as a read-only data source.
-- [Multi-account](docs/accounts.md) — point muxi at every `CLAUDE_CONFIG_DIR` you have.
+- [MCP server](docs/mcp.md) — wire Muxi into Claude Code as a read-only data source.
+- [Multi-account](docs/accounts.md) — point Muxi at every `CLAUDE_CONFIG_DIR` you have.
 - [Architecture](docs/architecture.md) — how the pieces fit, for the curious.
 - [Roadmap](docs/roadmap.md) — what's coming next.
 
@@ -28,7 +28,7 @@ One binary. Every account. No telemetry going anywhere but your terminal.
 
 ## What is this?
 
-muxi reads the JSONL transcripts Claude Code already writes to disk, pairs
+Muxi reads the JSONL transcripts Claude Code already writes to disk, pairs
 them with the same live `/usage` endpoint the CLI itself uses, and gives you:
 
 - a **TUI dashboard** with 5-hour / weekly / extra-usage gauges, per-model
@@ -81,7 +81,7 @@ For MCP, see [docs/mcp.md](docs/mcp.md).
 
 ### 🐾 fun fact
 
-> muxi is a **digi-cat**: nine lives, all of them spent in your terminal.
+> Muxi is a **digi-cat**: nine lives, all of them spent in your terminal.
 > She purrs in tokens, naps on JSONL, and judges your context window
 > percentage from across the room. Feed her well — she remembers every
 > 5-hour block you've ever burned, and she will mention it.

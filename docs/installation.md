@@ -1,6 +1,6 @@
 # Installation
 
-muxi is a single Rust binary. No daemon to install, no Python to manage.
+Muxi is a single Rust binary. No daemon to install, no Python to manage.
 
 ## From source
 
@@ -14,7 +14,7 @@ The binary lands in `~/.cargo/bin/muxi`. Make sure that's on your `PATH`.
 ## Requirements
 
 - Rust 1.75+ (2021 edition).
-- An existing Claude Code install — muxi reads from `~/.claude*/projects/`
+- An existing Claude Code install — Muxi reads from `~/.claude*/projects/`
   and the OAuth credentials those directories already hold.
 - Linux or macOS. Windows isn't tested.
 

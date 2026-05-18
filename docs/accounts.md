@@ -1,9 +1,9 @@
 # Multi-account
 
-An "account" in muxi is one `CLAUDE_CONFIG_DIR` — a directory with its
+An "account" in Muxi is one `CLAUDE_CONFIG_DIR` — a directory with its
 own `projects/` JSONL subtree and its own credentials. People with a
 work/personal split (`claude-work`, `claude-priv`) point each shell at a
-different dir; muxi sees all of them at once.
+different dir; Muxi sees all of them at once.
 
 ## Discovery order
 
@@ -28,7 +28,7 @@ dir  = "/Users/me/.claude-priv"
 ```
 
 If you set up Claude Code the normal way (single `~/.claude`) you don't
-need this file. muxi finds it automatically.
+need this file. Muxi finds it automatically.
 
 ## Auth
 
