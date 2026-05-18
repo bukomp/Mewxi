@@ -11,7 +11,7 @@ use crate::live_session::{Activity, SessionState};
 use crate::live_usage::{LiveUsage, REFRESH_INTERVAL};
 use chrono::{Local, Utc};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table};
@@ -424,6 +424,11 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
             Row::new(header_labels)
                 .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
         )
+        // ratatui 0.28 defaults Table to Flex::Start, so Constraint::Min
+        // no longer absorbs leftover width — the project column would sit
+        // at 14 chars and leave a gap after the rightmost column. Legacy
+        // flex restores the "fill remaining space" behavior.
+        .flex(Flex::Legacy)
         .block(block);
     f.render_widget(table, area);
 }

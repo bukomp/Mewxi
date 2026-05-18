@@ -322,6 +322,10 @@ const POLLER_TICK: Duration = Duration::from_secs(5);
 /// dashboard doesn't leave a stale highlight pinned to an arbitrary row.
 const SELECTION_VISIBLE: Duration = Duration::from_secs(5);
 
+/// How long a live-fetch error stays in the footer before it auto-hides.
+/// The user can also dismiss it earlier with `x`.
+const ERROR_VISIBLE: Duration = Duration::from_secs(10);
+
 fn spawn_live_poller(
     account: Account,
     no_live: bool,
@@ -436,6 +440,11 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut last_full_tick = Instant::now();
     let mut setup_snapshot: Option<SetupSnapshot> = setup::inspect(no_live).ok();
     let mut setup_message: Option<String> = None;
+    // Error footer auto-hide: track the currently-displayed error so we
+    // can time it out after 10s and let the user dismiss it with `x`.
+    // Resets whenever a new (different) error appears.
+    let mut error_shown: Option<(String, Instant)> = None;
+    let mut error_dismissed = false;
 
     // Refresh the launchd watcher if it's still running the previous
     // binary in memory — otherwise it will keep overwriting our cache
@@ -500,8 +509,28 @@ fn run_loop<B: ratatui::backend::Backend>(
             None
         };
 
-        let live_error = live_usage::most_recent_error()
+        let raw_error = live_usage::most_recent_error()
             .map(|(acct, msg)| format!("[{acct}] {msg}"));
+        let live_error = match &raw_error {
+            None => {
+                error_shown = None;
+                error_dismissed = false;
+                None
+            }
+            Some(msg) => {
+                let is_new = error_shown.as_ref().is_none_or(|(m, _)| m != msg);
+                if is_new {
+                    error_shown = Some((msg.clone(), Instant::now()));
+                    error_dismissed = false;
+                }
+                let age = error_shown.as_ref().map(|(_, t)| t.elapsed()).unwrap_or_default();
+                if error_dismissed || age >= ERROR_VISIBLE {
+                    None
+                } else {
+                    Some(msg.as_str())
+                }
+            }
+        };
 
         terminal.draw(|f| {
             render(
@@ -515,7 +544,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 selected_setup,
                 setup_snapshot.as_ref(),
                 setup_message.as_deref(),
-                live_error.as_deref(),
+                live_error,
             )
         })?;
 
@@ -585,6 +614,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                             for (_, cmd_tx) in &live_pollers {
                                 let _ = cmd_tx.send(LiveCmd::Refresh);
+                            }
+                        }
+                        KeyCode::Char('x') | KeyCode::Char('X') => {
+                            if error_shown.is_some() {
+                                error_dismissed = true;
                             }
                         }
                         KeyCode::Char('1') => {
@@ -795,16 +829,37 @@ fn render_top_header(f: &mut Frame, area: ratatui::layout::Rect) {
 }
 
 fn render_error_footer(f: &mut Frame, area: ratatui::layout::Rect, msg: &str) {
+    use ratatui::layout::Alignment;
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+    let title = Line::from(vec![
+        Span::styled(
+            " live fetch error ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    // Right-aligned dismiss hint on the top border. Bracketed `x` so the
+    // key to press is unmistakable; the parenthetical reminds the user
+    // the banner also auto-hides.
+    let hint = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            "[x]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ),
+        Span::styled(
+            " hide (auto-hides in 10s) ",
+            Style::default().fg(Color::Yellow),
+        ),
+    ]);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red))
-        .title(Span::styled(
-            " live fetch error ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ));
+        .title(title)
+        .title(hint.alignment(Alignment::Right));
     let p = Paragraph::new(Line::from(Span::styled(
         msg.to_string(),
         Style::default().fg(Color::Red),
