@@ -29,7 +29,7 @@
 
 use crate::accounts::Account;
 use crate::stats::{self, SessionContext, UsageTotals};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -72,6 +72,12 @@ struct SessionMarker {
     session_id: String,
     cwd: PathBuf,
     status: String,
+    /// Wall-clock time the marker was last refreshed (ms since epoch).
+    /// Used as the activity timestamp for brand-new sessions whose
+    /// transcript JSONL hasn't been created yet (user opened a window
+    /// but hasn't sent the first prompt).
+    updated_at_ms: Option<i64>,
+    started_at_ms: Option<i64>,
 }
 
 /// Snapshot the currently-alive PIDs once per scan wave so we don't
@@ -121,6 +127,8 @@ fn read_markers(account: &Account, alive: &HashSet<u32>) -> Vec<SessionMarker> {
             .and_then(|s| s.as_str())
             .unwrap_or("idle")
             .to_string();
+        let updated_at_ms = v.get("updatedAt").and_then(|x| x.as_i64());
+        let started_at_ms = v.get("startedAt").and_then(|x| x.as_i64());
         let (Some(pid), Some(session_id), Some(cwd)) = (pid, session_id, cwd) else {
             continue;
         };
@@ -129,9 +137,20 @@ fn read_markers(account: &Account, alive: &HashSet<u32>) -> Vec<SessionMarker> {
         if !alive.contains(&pid) {
             continue;
         }
-        out.push(SessionMarker { pid, session_id, cwd, status });
+        out.push(SessionMarker {
+            pid,
+            session_id,
+            cwd,
+            status,
+            updated_at_ms,
+            started_at_ms,
+        });
     }
     out
+}
+
+fn ms_to_utc(ms: i64) -> Option<DateTime<Utc>> {
+    Utc.timestamp_millis_opt(ms).single()
 }
 
 /// Return one [`LiveSession`] per currently-open Claude Code instance
@@ -158,13 +177,13 @@ pub fn scan(
         let transcript = projects
             .join(&proj_dir)
             .join(format!("{}.jsonl", marker.session_id));
-        if !transcript.exists() {
-            // Marker exists but transcript hasn't materialized yet —
-            // brand-new session. Skip; it'll show up on next scan.
-            continue;
-        }
+        let transcript_exists = transcript.exists();
 
-        let records = stats::parse_file_cached(&transcript).unwrap_or_default();
+        let records = if transcript_exists {
+            stats::parse_file_cached(&transcript).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut totals = UsageTotals::default();
         let mut last_activity = DateTime::<Utc>::MIN_UTC;
         let mut model = String::new();
@@ -181,14 +200,22 @@ pub fn scan(
             }
         }
         if last_activity == DateTime::<Utc>::MIN_UTC {
-            // No usage records yet (fresh session, user hasn't sent
-            // the first message). Use the JSONL mtime as a reasonable
-            // proxy so the row sorts correctly.
-            if let Ok(meta) = std::fs::metadata(&transcript) {
-                if let Ok(mtime) = meta.modified() {
-                    last_activity = DateTime::<Utc>::from(mtime);
-                }
-            }
+            // No usage records yet — either the transcript JSONL hasn't
+            // been created (brand-new window, no first prompt sent) or
+            // it exists but has no records for this sessionId yet.
+            // Prefer marker timestamps so the row sorts correctly even
+            // without a transcript file; fall back to JSONL mtime.
+            last_activity = marker
+                .updated_at_ms
+                .and_then(ms_to_utc)
+                .or_else(|| marker.started_at_ms.and_then(ms_to_utc))
+                .or_else(|| {
+                    std::fs::metadata(&transcript)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(DateTime::<Utc>::from)
+                })
+                .unwrap_or_else(Utc::now);
         }
         if project.is_empty() {
             project = marker
@@ -199,12 +226,16 @@ pub fn scan(
                 .to_string();
         }
 
-        let (current_context, context_cap) = match stats::current_context_from_transcript(&transcript) {
-            Some(SessionContext { current, max_observed, model: m }) => {
-                let cap = stats::context_cap_for(&m, max_observed, None, account);
-                (Some(current), Some(cap))
+        let (current_context, context_cap) = if transcript_exists {
+            match stats::current_context_from_transcript(&transcript) {
+                Some(SessionContext { current, max_observed, model: m }) => {
+                    let cap = stats::context_cap_for(&m, max_observed, None, account);
+                    (Some(current), Some(cap))
+                }
+                None => (None, None),
             }
-            None => (None, None),
+        } else {
+            (None, None)
         };
 
         let state = if marker.status == "busy" {
