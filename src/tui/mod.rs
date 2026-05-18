@@ -60,6 +60,7 @@ pub struct SessionRef {
     pub project: String,
     pub transcript_path: PathBuf,
     pub last_activity: chrono::DateTime<chrono::Utc>,
+    pub state_since: chrono::DateTime<chrono::Utc>,
     pub model: String,
     pub tokens: u64,
     pub cost_usd: f64,
@@ -174,7 +175,7 @@ fn run_loop<B: ratatui::backend::Backend>(
             account: a.clone(),
             agg: stats::load_and_aggregate_for(a).unwrap_or_default(),
             live: live_usage::load_cached(a),
-            live_sessions: live_session::scan(a, &alive),
+            live_sessions: live_session::scan(a, &alive, &[]),
         })
         .collect();
 
@@ -329,7 +330,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 }
                 if let Some(pa) = per_account.iter_mut().find(|p| p.account.name == name) {
                     pa.agg = stats::load_and_aggregate_for(&pa.account).unwrap_or_default();
-                    pa.live_sessions = live_session::scan(&pa.account, &alive);
+                    pa.live_sessions = live_session::scan(&pa.account, &alive, &pa.live_sessions);
                     last_reload.insert(name.clone(), Instant::now());
                 }
                 dirty.remove(&name);
@@ -354,7 +355,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             let alive = live_session::alive_pids();
                             for pa in per_account.iter_mut() {
                                 pa.agg = stats::load_and_aggregate_for(&pa.account).unwrap_or_default();
-                                pa.live_sessions = live_session::scan(&pa.account, &alive);
+                                pa.live_sessions = live_session::scan(&pa.account, &alive, &pa.live_sessions);
                                 last_reload.insert(pa.account.name.clone(), Instant::now());
                             }
                             for (_, cmd_tx) in &live_pollers {
@@ -649,6 +650,7 @@ fn flatten_sessions(accounts: &[PerAccount]) -> Vec<SessionRef> {
                 project: ls.project.clone(),
                 transcript_path: ls.transcript_path.clone(),
                 last_activity: ls.last_activity,
+                state_since: ls.state_since,
                 model: ls.model.clone(),
                 tokens: ls.session_tokens.total_tokens(),
                 cost_usd: ls.session_tokens.cost_usd,

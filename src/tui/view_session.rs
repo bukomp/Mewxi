@@ -72,7 +72,7 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
         Span::styled(s.model.clone(), Style::default().fg(Color::Green)),
     ];
     if s.state == SessionState::Idle {
-        let mins = (Utc::now() - s.last_activity).num_minutes().max(0);
+        let mins = (Utc::now() - s.state_since).num_minutes().max(0);
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("[idle for {mins}m]"),

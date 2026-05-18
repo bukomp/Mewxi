@@ -107,7 +107,7 @@ fn main() -> Result<()> {
             for account in &view.accounts {
                 let agg = stats::load_and_aggregate_for(account).unwrap_or_default();
                 let live = live_usage::fetch_or_cached(account, no_live);
-                let live_sessions = live_session::scan(account, &alive);
+                let live_sessions = live_session::scan(account, &alive, &[]);
                 out_accounts.push(serde_json::json!({
                     "name": account.name,
                     "dir": account.dir,

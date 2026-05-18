@@ -197,7 +197,7 @@ async fn handle_tool_call(id: Option<Value>, params: Value, no_live: bool) -> Va
                 let alive = live_session::alive_pids();
                 let mut out = Vec::new();
                 for a in &accounts_to_scan {
-                    out.extend(live_session::scan(a, &alive));
+                    out.extend(live_session::scan(a, &alive, &[]));
                 }
                 out.sort_by(|x, y| y.last_activity.cmp(&x.last_activity));
                 out

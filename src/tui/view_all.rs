@@ -338,7 +338,7 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let age_secs = (now - s.last_activity).num_seconds().max(0);
+            let age_secs = (now - s.state_since).num_seconds().max(0);
             let arrow = if i == selected { "▶ " } else { "  " };
             let state_label = match s.state {
                 SessionState::Active => "active",
@@ -408,12 +408,19 @@ fn short_model(m: &str) -> String {
     }
 }
 
+/// Age column is 6 chars wide. Always include the next-finer unit so the
+/// value ticks visibly every second/minute rather than freezing between
+/// rollovers — when the marker flips the column has to *look* like it
+/// reset, which is invisible if "5m" sits there for 60s before becoming
+/// "6m". Max widths: "59m59s", "23h59m", "99d23h" — all exactly 6 chars.
 fn fmt_age(secs: i64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {
-        format!("{}m", secs / 60)
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     } else {
-        format!("{}h", secs / 3600)
+        format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
     }
 }

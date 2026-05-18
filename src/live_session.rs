@@ -48,6 +48,16 @@ pub struct LiveSession {
     pub project: String,
     pub transcript_path: PathBuf,
     pub last_activity: DateTime<Utc>,
+    /// When the session entered its current [`SessionState`]. Carries
+    /// forward across scans while the state is unchanged so the TUI's
+    /// "age" column shows time-in-current-state rather than time-since-
+    /// last-record. On a transition (same session seen previously with a
+    /// different state) it snaps to `Utc::now()` — the moment of the
+    /// observed flip — rather than `last_activity`, because the marker
+    /// can flip before the new turn's first JSONL record hits disk. For
+    /// a never-before-seen session, falls back to `last_activity` so the
+    /// first frame reflects real elapsed time.
+    pub state_since: DateTime<Utc>,
     pub model: String,
     pub session_tokens: UsageTotals,
     pub current_context: Option<u64>,
@@ -127,7 +137,15 @@ fn read_markers(account: &Account, alive: &HashSet<u32>) -> Vec<SessionMarker> {
 /// Return one [`LiveSession`] per currently-open Claude Code instance
 /// belonging to `account`. Pass [`alive_pids`] for `alive`; callers
 /// that iterate multiple accounts should compute it once and share.
-pub fn scan(account: &Account, alive: &HashSet<u32>) -> Vec<LiveSession> {
+///
+/// `previous` is the result of the most recent scan for this account (or
+/// `&[]` on a cold start / one-shot caller). It's used solely to preserve
+/// `state_since` across scans when the session's state hasn't flipped.
+pub fn scan(
+    account: &Account,
+    alive: &HashSet<u32>,
+    previous: &[LiveSession],
+) -> Vec<LiveSession> {
     let projects = account.projects_dir();
     if !projects.exists() {
         return Vec::new();
@@ -195,12 +213,32 @@ pub fn scan(account: &Account, alive: &HashSet<u32>) -> Vec<LiveSession> {
             SessionState::Idle
         };
 
+        // Carry `state_since` forward while the state hasn't flipped so
+        // the displayed age keeps growing through repeated scans (and
+        // through every appended record while Active). For a transition
+        // (same session seen previously with a different state) snap to
+        // `Utc::now()` — the moment we observed the flip. We can't use
+        // `last_activity` here because the marker can flip before the
+        // first JSONL record of the new turn hits disk; using the stale
+        // record timestamp would leave `state_since` equal to its old
+        // value and the age column would look unchanged. For a session
+        // we've truly never seen, fall back to `last_activity` so the
+        // first frame shows a realistic age instead of pretending the
+        // state just began.
+        let prior = previous.iter().find(|p| p.session_id == marker.session_id);
+        let state_since = match prior {
+            Some(p) if p.state == state => p.state_since,
+            Some(_) => Utc::now(),
+            None => last_activity,
+        };
+
         out.push(LiveSession {
             account_name: account.name.clone(),
             session_id: marker.session_id.clone(),
             project,
             transcript_path: transcript,
             last_activity,
+            state_since,
             model,
             session_tokens: totals,
             current_context,
