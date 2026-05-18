@@ -29,7 +29,7 @@ mod tui;
 mod watch;
 
 #[derive(Parser)]
-#[command(name = "muxi", version, about = "MCP server + TUI for Claude Code usage stats")]
+#[command(name = "muxi", version, about = "MCP server + TUI for coding-agent usage stats")]
 struct Cli {
     /// Disable live usage fetch from Claude Code's OAuth endpoint. Local JSONL only.
     /// Also honored via the MUXI_NO_LIVE env var (any non-empty value).

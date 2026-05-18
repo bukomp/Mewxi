@@ -4,9 +4,11 @@
 
 # muxi
 
-**MCP server + TUI for real-time Claude Code usage stats.**
+**MCP server + TUI for real-time coding-agent usage stats.**
 
 One binary. Every account. No telemetry going anywhere but your terminal.
+
+> Today muxi reads Claude Code. Gemini CLI and Codex are on the [roadmap](docs/roadmap.md).
 
 </div>
 

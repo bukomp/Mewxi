@@ -2,7 +2,7 @@
 name = "muxi"
 version = "0.1.0"
 edition = "2021"
-description = "MCP server + TUI for real-time Claude Code usage stats"
+description = "MCP server + TUI for real-time coding-agent usage stats"
 
 [[bin]]
 name = "muxi"
