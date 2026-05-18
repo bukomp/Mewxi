@@ -84,6 +84,18 @@ enum ViewMode {
 /// wider terminals without us computing offsets ourselves.
 const LOGO_ASCII: &str = include_str!("../../images/muxi.ascii");
 const LOGO_CONTENT_HEIGHT: u16 = 28;
+
+/// Big "Muxi" in standard-figlet ASCII line-art, mixed case. 24 cols ×
+/// 5 rows. Trailing whitespace on a line before `\n\` is preserved —
+/// only the source newline + leading indent after `\` is consumed.
+const MUXI_BIG: &str = " __  __               _ \n\
+                        |  \\/  | _   _ __  __(_)\n\
+                        | |\\/| || | | |\\ \\/ /| |\n\
+                        | |  | || |_| | >  < | |\n\
+                        |_|  |_| \\__,_|/_/\\_\\|_|";
+const MUXI_BIG_HEIGHT: u16 = 5;
+const MUXI_BIG_WIDTH: u16 = 24;
+
 /// Hold the splash for this long unless the user dismisses with a key.
 /// Long enough to register the brand, short enough that returning users
 /// don't feel held hostage.
@@ -143,7 +155,14 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
 
     f.render_widget(Clear, area);
 
-    if area.height < LOGO_CONTENT_HEIGHT + 2 || area.width < 40 {
+    let gap_h: u16 = 1;
+    let tagline_h: u16 = 1;
+    let want_full = area.height >= LOGO_CONTENT_HEIGHT + gap_h + MUXI_BIG_HEIGHT + tagline_h
+        && area.width >= MUXI_BIG_WIDTH + 4;
+    let want_big = area.height >= MUXI_BIG_HEIGHT + tagline_h
+        && area.width >= MUXI_BIG_WIDTH + 4;
+
+    if !want_big {
         let line = Line::from(Span::styled(
             "Muxi",
             Style::default()
@@ -154,50 +173,73 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
         return;
     }
 
-    let lines: Vec<Line> = LOGO_ASCII
+    let mut constraints: Vec<Constraint> = Vec::new();
+    let total_h = if want_full {
+        LOGO_CONTENT_HEIGHT + gap_h + MUXI_BIG_HEIGHT + tagline_h
+    } else {
+        MUXI_BIG_HEIGHT + tagline_h
+    };
+    let top_pad = area.height.saturating_sub(total_h) / 2;
+    constraints.push(Constraint::Length(top_pad));
+    if want_full {
+        constraints.push(Constraint::Length(LOGO_CONTENT_HEIGHT));
+        constraints.push(Constraint::Length(gap_h));
+    }
+    constraints.push(Constraint::Length(MUXI_BIG_HEIGHT));
+    constraints.push(Constraint::Length(tagline_h));
+    constraints.push(Constraint::Min(0));
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    let mut idx = 1; // skip top_pad
+
+    if want_full {
+        // Strip the file's blank padding rows so LOGO_CONTENT_HEIGHT is
+        // the actual rendered height.
+        let logo_lines: Vec<Line> = LOGO_ASCII
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                Line::from(Span::styled(
+                    l.to_string(),
+                    Style::default().fg(Color::Magenta),
+                ))
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(logo_lines).alignment(Alignment::Center),
+            chunks[idx],
+        );
+        idx += 2; // skip logo + gap
+    }
+
+    let muxi_lines: Vec<Line> = MUXI_BIG
         .lines()
         .map(|l| {
             Line::from(Span::styled(
                 l.to_string(),
-                Style::default().fg(Color::Magenta),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ))
         })
         .collect();
-    let logo_h = lines.len() as u16;
-    let tagline_h: u16 = 2;
-    let total_h = logo_h + tagline_h;
-    let top_pad = area.height.saturating_sub(total_h) / 2;
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(top_pad),
-            Constraint::Length(logo_h),
-            Constraint::Length(tagline_h),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
     f.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        chunks[1],
+        Paragraph::new(muxi_lines).alignment(Alignment::Center),
+        chunks[idx],
     );
+    idx += 1;
 
-    let tagline = vec![
-        Line::from(Span::styled(
-            "Muxi",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "multi-account Claude Code usage tracker",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    let tagline = Line::from(Span::styled(
+        "multi-agent CLI usage tracker",
+        Style::default().fg(Color::DarkGray),
+    ));
     f.render_widget(
         Paragraph::new(tagline).alignment(Alignment::Center),
-        chunks[2],
+        chunks[idx],
     );
 }
 
