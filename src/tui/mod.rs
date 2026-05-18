@@ -79,11 +79,19 @@ enum ViewMode {
     Setup,
 }
 
-/// Stylised cat-face brand logo. The fixed 100-col left/right padding
-/// in the file lets `Alignment::Center` place the glyph cleanly in
-/// wider terminals without us computing offsets ourselves.
-const LOGO_ASCII: &str = include_str!("../../images/muxi.ascii");
-const LOGO_CONTENT_HEIGHT: u16 = 28;
+/// Stylised cat-face brand logos at four sizes. We pick the biggest one
+/// that fits the splash area at runtime; the smaller variants are used
+/// on narrower terminals so the cat stays recognisable instead of being
+/// truncated. `_DIMS` tuples are `(rendered_height, max_line_width)`
+/// after stripping blank padding rows.
+const LOGO_LARGE: &str = include_str!("../../images/muxi.ascii");
+const LOGO_MEDIUM: &str = include_str!("../../images/muxi-medium.ascii");
+const LOGO_SMALL: &str = include_str!("../../images/muxi-small.ascii");
+const LOGO_TINY: &str = include_str!("../../images/muxi-tiny.ascii");
+const LOGO_LARGE_DIMS: (u16, u16) = (35, 84);
+const LOGO_MEDIUM_DIMS: (u16, u16) = (26, 64);
+const LOGO_SMALL_DIMS: (u16, u16) = (18, 44);
+const LOGO_TINY_DIMS: (u16, u16) = (12, 32);
 
 /// Big "Muxi" in standard-figlet ASCII line-art, mixed case. 24 cols ×
 /// 5 rows. Trailing whitespace on a line before `\n\` is preserved —
@@ -157,89 +165,133 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
 
     let gap_h: u16 = 1;
     let tagline_h: u16 = 1;
-    let want_full = area.height >= LOGO_CONTENT_HEIGHT + gap_h + MUXI_BIG_HEIGHT + tagline_h
-        && area.width >= MUXI_BIG_WIDTH + 4;
-    let want_big = area.height >= MUXI_BIG_HEIGHT + tagline_h
-        && area.width >= MUXI_BIG_WIDTH + 4;
+    let plain_muxi_h: u16 = 1;
 
-    if !want_big {
-        let line = Line::from(Span::styled(
-            "Muxi",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ));
-        f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
-        return;
-    }
+    let muxi_style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
+    let tagline_style = Style::default().fg(Color::DarkGray);
 
-    let mut constraints: Vec<Constraint> = Vec::new();
-    let total_h = if want_full {
-        LOGO_CONTENT_HEIGHT + gap_h + MUXI_BIG_HEIGHT + tagline_h
+    // Pick the biggest cat that fits together with the figlet + a
+    // one-row gap between every element (logo / muxi / tagline). The
+    // tiny cat falls back to plain-text "Muxi" instead of the figlet,
+    // so the brand label is always present.
+    let figlet_block = MUXI_BIG_HEIGHT + gap_h + gap_h + tagline_h;
+    let plain_block = plain_muxi_h + gap_h + gap_h + tagline_h;
+    let cat: Option<(&'static str, u16, bool)> = if area.height
+        >= LOGO_LARGE_DIMS.0 + figlet_block
+        && area.width >= LOGO_LARGE_DIMS.1.max(MUXI_BIG_WIDTH)
+    {
+        Some((LOGO_LARGE, LOGO_LARGE_DIMS.0, true))
+    } else if area.height >= LOGO_MEDIUM_DIMS.0 + figlet_block
+        && area.width >= LOGO_MEDIUM_DIMS.1.max(MUXI_BIG_WIDTH)
+    {
+        Some((LOGO_MEDIUM, LOGO_MEDIUM_DIMS.0, true))
+    } else if area.height >= LOGO_SMALL_DIMS.0 + figlet_block
+        && area.width >= LOGO_SMALL_DIMS.1.max(MUXI_BIG_WIDTH)
+    {
+        Some((LOGO_SMALL, LOGO_SMALL_DIMS.0, true))
+    } else if area.height >= LOGO_TINY_DIMS.0 + plain_block
+        && area.width >= LOGO_TINY_DIMS.1
+    {
+        Some((LOGO_TINY, LOGO_TINY_DIMS.0, false))
     } else {
-        MUXI_BIG_HEIGHT + tagline_h
+        None
     };
-    let top_pad = area.height.saturating_sub(total_h) / 2;
-    constraints.push(Constraint::Length(top_pad));
-    if want_full {
-        constraints.push(Constraint::Length(LOGO_CONTENT_HEIGHT));
-        constraints.push(Constraint::Length(gap_h));
-    }
-    constraints.push(Constraint::Length(MUXI_BIG_HEIGHT));
-    constraints.push(Constraint::Length(tagline_h));
-    constraints.push(Constraint::Min(0));
 
+    let muxi_line = || Line::from(Span::styled("Muxi", muxi_style));
+    let tagline_line = || {
+        Line::from(Span::styled(
+            "multi-agent CLI usage tracker",
+            tagline_style,
+        ))
+    };
+
+    // No cat fits: plain-text "Muxi" centred, with tagline below if
+    // there's room. Add the one-row gap when the screen can afford it.
+    let Some((src, logo_h, show_figlet)) = cat else {
+        if area.height < plain_muxi_h + tagline_h {
+            f.render_widget(
+                Paragraph::new(muxi_line()).alignment(Alignment::Center),
+                area,
+            );
+            return;
+        }
+        let with_gap = area.height >= plain_muxi_h + gap_h + tagline_h;
+        let total_h = plain_muxi_h + if with_gap { gap_h } else { 0 } + tagline_h;
+        let top_pad = area.height.saturating_sub(total_h) / 2;
+        let mut constraints = vec![
+            Constraint::Length(top_pad),
+            Constraint::Length(plain_muxi_h),
+        ];
+        if with_gap {
+            constraints.push(Constraint::Length(gap_h));
+        }
+        constraints.push(Constraint::Length(tagline_h));
+        constraints.push(Constraint::Min(0));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+        f.render_widget(
+            Paragraph::new(muxi_line()).alignment(Alignment::Center),
+            chunks[1],
+        );
+        let tagline_idx = if with_gap { 3 } else { 2 };
+        f.render_widget(
+            Paragraph::new(tagline_line()).alignment(Alignment::Center),
+            chunks[tagline_idx],
+        );
+        return;
+    };
+
+    let muxi_h = if show_figlet { MUXI_BIG_HEIGHT } else { plain_muxi_h };
+    let total_h = logo_h + gap_h + muxi_h + gap_h + tagline_h;
+    let top_pad = area.height.saturating_sub(total_h) / 2;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(top_pad),
+            Constraint::Length(logo_h),
+            Constraint::Length(gap_h),
+            Constraint::Length(muxi_h),
+            Constraint::Length(gap_h),
+            Constraint::Length(tagline_h),
+            Constraint::Min(0),
+        ])
         .split(area);
 
-    let mut idx = 1; // skip top_pad
-
-    if want_full {
-        // Strip the file's blank padding rows so LOGO_CONTENT_HEIGHT is
-        // the actual rendered height.
-        let logo_lines: Vec<Line> = LOGO_ASCII
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| {
-                Line::from(Span::styled(
-                    l.to_string(),
-                    Style::default().fg(Color::Magenta),
-                ))
-            })
-            .collect();
-        f.render_widget(
-            Paragraph::new(logo_lines).alignment(Alignment::Center),
-            chunks[idx],
-        );
-        idx += 2; // skip logo + gap
-    }
-
-    let muxi_lines: Vec<Line> = MUXI_BIG
+    // Strip the file's blank padding rows so the rendered height
+    // matches the LOGO_*_DIMS.0 we sized the slot to.
+    let logo_lines: Vec<Line> = src
         .lines()
-        .map(|l| {
-            Line::from(Span::styled(
-                l.to_string(),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ))
-        })
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::Magenta))))
         .collect();
     f.render_widget(
-        Paragraph::new(muxi_lines).alignment(Alignment::Center),
-        chunks[idx],
+        Paragraph::new(logo_lines).alignment(Alignment::Center),
+        chunks[1],
     );
-    idx += 1;
 
-    let tagline = Line::from(Span::styled(
-        "multi-agent CLI usage tracker",
-        Style::default().fg(Color::DarkGray),
-    ));
+    if show_figlet {
+        let muxi_lines: Vec<Line> = MUXI_BIG
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), muxi_style)))
+            .collect();
+        f.render_widget(
+            Paragraph::new(muxi_lines).alignment(Alignment::Center),
+            chunks[3],
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(muxi_line()).alignment(Alignment::Center),
+            chunks[3],
+        );
+    }
+
     f.render_widget(
-        Paragraph::new(tagline).alignment(Alignment::Center),
-        chunks[idx],
+        Paragraph::new(tagline_line()).alignment(Alignment::Center),
+        chunks[5],
     );
 }
 
