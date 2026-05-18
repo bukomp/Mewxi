@@ -183,12 +183,27 @@ fn inspect_statusline(path: &Path, binary: &Path, no_live: bool) -> StatusLineSt
 // statusLine actions
 // ---------------------------------------------------------------------------
 
+/// Re-execute the statusLine command every N **seconds** in addition to
+/// event-driven updates. Claude Code v2.1.97+ honors this; older clients
+/// ignore unknown keys harmlessly. 5s matches the TUI poller cadence and
+/// keeps idle terminals from showing stale numbers. NOTE: the field is in
+/// seconds despite "interval" suggesting otherwise — passing milliseconds
+/// here silently turns into many-minute refreshes.
+const STATUSLINE_REFRESH_INTERVAL_SECS: u64 = 5;
+
 /// Write a `statusLine` block into `<settings_path>`, preserving any other
-/// keys. Creates parent dirs if missing. Idempotent when already wired;
-/// returns Ok(false) in that case.
+/// keys. Creates parent dirs if missing. Idempotent when already at the
+/// desired shape; returns Ok(false) in that case. If the existing block
+/// already points at our binary (by `command`) we always overwrite it —
+/// that's how we upgrade pre-`refreshInterval` wirings without forcing the
+/// user through the `force=true` path.
 pub fn wire_statusline(settings_path: &Path, binary: &Path, no_live: bool, force: bool) -> Result<bool> {
     let desired_cmd = desired_command(binary, no_live);
-    let desired = serde_json::json!({ "type": "command", "command": desired_cmd });
+    let desired = serde_json::json!({
+        "type": "command",
+        "command": desired_cmd,
+        "refreshInterval": STATUSLINE_REFRESH_INTERVAL_SECS,
+    });
 
     let mut root: serde_json::Value = if settings_path.exists() {
         let s = fs::read_to_string(settings_path)
@@ -211,6 +226,10 @@ pub fn wire_statusline(settings_path: &Path, binary: &Path, no_live: bool, force
 
     match obj.get("statusLine") {
         Some(v) if v == &desired => return Ok(false),
+        Some(v) if existing_points_at_us(v, binary, no_live) => {
+            // Same command, different/missing fields → safe to overwrite
+            // (this is the "add refreshInterval to an older wiring" path).
+        }
         Some(_) if !force => {
             return Err(anyhow!(
                 "{} has a non-claude-usage statusLine; pass force=true to overwrite",
@@ -224,6 +243,22 @@ pub fn wire_statusline(settings_path: &Path, binary: &Path, no_live: bool, force
     let serialized = serde_json::to_string_pretty(&root)? + "\n";
     atomic_write(settings_path, serialized.as_bytes())?;
     Ok(true)
+}
+
+/// True when the existing `statusLine` block already invokes our binary —
+/// tolerates either spelling of the `--no-live` flag so toggling that flag
+/// doesn't get classified as a third-party statusLine.
+fn existing_points_at_us(sl: &serde_json::Value, binary: &Path, no_live: bool) -> bool {
+    let Some(cmd) = sl.get("command").and_then(|c| c.as_str()) else {
+        return false;
+    };
+    let a = desired_command(binary, no_live);
+    let b = if no_live {
+        format!("{} status", shell_quote(binary))
+    } else {
+        format!("{} --no-live status", shell_quote(binary))
+    };
+    cmd == a || cmd == b
 }
 
 /// Remove the `statusLine` block from `<settings_path>`. No-op if the
@@ -584,13 +619,15 @@ pub fn apply_all(force: bool, no_live: bool) -> Result<ApplyOutcome> {
     let snap = inspect(no_live)?;
     for acct in snap.accounts.iter().filter(|a| !a.ignored) {
         match &acct.statusline {
-            StatusLineState::Wired => {}
             StatusLineState::OtherCommand(cmd) if !force => {
                 out.skipped.push(format!(
                     "{}: keeping existing statusLine ({})",
                     acct.account_name, cmd
                 ));
             }
+            // Wired blocks fall through so wire_statusline can upgrade them
+            // (e.g. to add refreshInterval to an older wiring). The call is
+            // idempotent — returns Ok(false) when nothing changed.
             _ => match wire_statusline(&acct.settings_path, &snap.binary, no_live, force) {
                 Ok(true) => out.wired_accounts.push(acct.account_name.clone()),
                 Ok(false) => {}
@@ -618,17 +655,18 @@ pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
     println!();
     for acct in snap.accounts.iter().filter(|a| !a.ignored) {
         match &acct.statusline {
-            StatusLineState::Wired => {
-                println!("  [{}] statusLine already wired ({})", acct.account_name, acct.settings_path.display());
-            }
             StatusLineState::OtherCommand(cmd) if !force => {
                 println!("  [{}] statusLine set to something else:", acct.account_name);
                 println!("        {cmd}");
                 println!("        re-run with --force to overwrite");
             }
+            // Wired falls through so wire_statusline can upgrade in place
+            // (e.g. fix a refreshInterval that was written with the wrong
+            // unit by an older binary). It returns Ok(false) when nothing
+            // actually changed.
             _ => match wire_statusline(&acct.settings_path, &snap.binary, no_live, force) {
                 Ok(true) => println!("  [{}] wrote statusLine to {}", acct.account_name, acct.settings_path.display()),
-                Ok(false) => println!("  [{}] statusLine already wired", acct.account_name),
+                Ok(false) => println!("  [{}] statusLine already wired ({})", acct.account_name, acct.settings_path.display()),
                 Err(e) => println!("  [{}] FAILED: {e}", acct.account_name),
             },
         }

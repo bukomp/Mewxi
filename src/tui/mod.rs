@@ -103,6 +103,16 @@ enum LiveCmd {
     Stop,
 }
 
+/// Poll cadence for the in-TUI live updater. Much shorter than the
+/// underlying `REFRESH_INTERVAL` because `fetch_or_cached` is cheap on
+/// hits — it just re-reads the cache file from disk and returns. The
+/// actual HTTP rate is still capped by `REFRESH_INTERVAL`; this tick
+/// just makes us pick up writes from the background watcher daemon (or
+/// from another TUI instance) within a few seconds, so the limits
+/// gauges keep ticking for both the active *and* the idle session
+/// without anyone having to interact with Claude Code.
+const POLLER_TICK: Duration = Duration::from_secs(5);
+
 fn spawn_live_poller(
     account: Account,
     no_live: bool,
@@ -127,7 +137,7 @@ fn spawn_live_poller(
             live: live_usage::fetch_force(&account, no_live),
         });
         loop {
-            match in_rx.recv_timeout(live_usage::REFRESH_INTERVAL) {
+            match in_rx.recv_timeout(POLLER_TICK) {
                 Ok(LiveCmd::Stop) => break,
                 Ok(LiveCmd::Refresh) | Err(_) => {
                     let live = live_usage::fetch_or_cached(&account, no_live);

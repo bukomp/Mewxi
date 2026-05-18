@@ -149,9 +149,19 @@ fn render_one_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
         })
         .unwrap_or_default();
 
-    render_gauge_row(f, rows[1], "5h",     five_h_pct,  &five_h_meta);
-    render_gauge_row(f, rows[2], "weekly", seven_d_pct, &seven_d_meta);
-    render_gauge_row(f, rows[3], "extra",  extra_pct,   &extra_meta);
+    // Fix the meta column width across all three rows so the percent
+    // column lines up vertically — otherwise per-row meta length makes
+    // the gauge column eat different widths and the percentages drift.
+    let meta_col_width = [&five_h_meta, &seven_d_meta, &extra_meta]
+        .iter()
+        .map(|m| m.chars().count() as u16)
+        .max()
+        .unwrap_or(0)
+        .min(28);
+
+    render_gauge_row(f, rows[1], "5h",     five_h_pct,  &five_h_meta,  meta_col_width);
+    render_gauge_row(f, rows[2], "weekly", seven_d_pct, &seven_d_meta, meta_col_width);
+    render_gauge_row(f, rows[3], "extra",  extra_pct,   &extra_meta,   meta_col_width);
 }
 
 fn render_account_header(f: &mut Frame, area: Rect, pa: &PerAccount) {
@@ -177,10 +187,11 @@ fn render_account_header(f: &mut Frame, area: Rect, pa: &PerAccount) {
     ];
     // Cache-age indicator — makes it obvious when the bars below are
     // out of date because the daemon stopped or the endpoint backed off.
-    if let Some(age_span) = cache_age_span(pa.live.as_ref()) {
-        spans.push(Span::raw(" · "));
-        spans.push(age_span);
-    }
+    // Always reserved as a fixed-width slot so the $ column lines up
+    // across accounts regardless of whether one is "0s ago" and another
+    // is "59s ago"; absent live data renders as blank padding.
+    spans.push(Span::raw(" · "));
+    spans.push(cache_age_span(pa.live.as_ref()));
     spans.push(Span::raw("   "));
     spans.push(Span::styled(
         format!("${:>9.2} total", pa.agg.all.cost_usd),
@@ -189,8 +200,16 @@ fn render_account_header(f: &mut Frame, area: Rect, pa: &PerAccount) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn cache_age_span(live: Option<&LiveUsage>) -> Option<Span<'static>> {
-    let lu = live?;
+/// Width of the cache-age column — right-aligned so "0s ago", "59m ago"
+/// and "23h ago" all occupy the same space. Without this, varying widths
+/// across accounts shift the $-column on the right.
+const CACHE_AGE_WIDTH: usize = 7;
+
+fn cache_age_span(live: Option<&LiveUsage>) -> Span<'static> {
+    let Some(lu) = live else {
+        // Pad so absent values don't collapse the column.
+        return Span::raw(" ".repeat(CACHE_AGE_WIDTH));
+    };
     let age = lu.age_seconds();
     let refresh = REFRESH_INTERVAL.as_secs() as i64;
     let color = if lu.is_stale() {
@@ -200,23 +219,31 @@ fn cache_age_span(live: Option<&LiveUsage>) -> Option<Span<'static>> {
     } else {
         Color::DarkGray
     };
-    let text = if age < 60 {
+    let raw = if age < 60 {
         format!("{age}s ago")
     } else if age < 3600 {
         format!("{}m ago", age / 60)
     } else {
         format!("{}h ago", age / 3600)
     };
-    Some(Span::styled(text, Style::default().fg(color)))
+    Span::styled(format!("{raw:>CACHE_AGE_WIDTH$}"), Style::default().fg(color))
 }
 
 /// Lay out a single gauge row as:
 ///   `  LABEL  [============bar============]  PCT   meta…`
-/// with fixed-width label / pct columns so multiple rows line up.
-fn render_gauge_row(f: &mut Frame, area: Rect, label: &str, pct_opt: Option<f64>, meta: &str) {
+/// with fixed-width label / pct / meta columns so multiple rows line up.
+/// `meta_col_chars` is the max meta width across rows in this account block.
+fn render_gauge_row(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    pct_opt: Option<f64>,
+    meta: &str,
+    meta_col_chars: u16,
+) {
     const LABEL_WIDTH: u16 = 10;   // "  weekly  " — fits longest label "weekly"
     const PCT_WIDTH: u16 = 8;      //  "  100.0% "
-    let meta_width = if meta.is_empty() { 0 } else { (meta.chars().count() as u16).min(28) + 2 };
+    let meta_width = if meta_col_chars == 0 { 1 } else { meta_col_chars + 2 };
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -224,7 +251,7 @@ fn render_gauge_row(f: &mut Frame, area: Rect, label: &str, pct_opt: Option<f64>
             Constraint::Length(LABEL_WIDTH),
             Constraint::Min(8),
             Constraint::Length(PCT_WIDTH),
-            Constraint::Length(meta_width.max(1)),
+            Constraint::Length(meta_width),
         ])
         .split(area);
 
