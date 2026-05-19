@@ -19,6 +19,7 @@
 
 mod view_account;
 mod view_all;
+mod view_muxi;
 mod view_session;
 mod view_setup;
 mod widgets;
@@ -78,6 +79,7 @@ enum ViewMode {
     SessionDetail,
     AccountDetail,
     Setup,
+    Muxi,
 }
 
 /// Stylised cat-face brand logos at four sizes. We pick the biggest one
@@ -669,6 +671,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                             mode = ViewMode::Setup;
                             pinned_session = None;
                         }
+                        KeyCode::Char('m') | KeyCode::Char('M') => {
+                            mode = ViewMode::Muxi;
+                            pinned_session = None;
+                        }
                         KeyCode::Char('R') if mode == ViewMode::Setup => {
                             setup_snapshot = setup::inspect(no_live).ok();
                             setup_message = Some("rescanned setup state".to_string());
@@ -719,6 +725,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_setup = (selected_setup + 1) % len;
                                 }
                             }
+                            ViewMode::Muxi => {}
                         },
                         KeyCode::BackTab => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
@@ -745,6 +752,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_setup = (selected_setup + len - 1) % len;
                                 }
                             }
+                            ViewMode::Muxi => {}
                         },
                         KeyCode::Down => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
@@ -770,6 +778,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_setup = (selected_setup + 1).min(len - 1);
                                 }
                             }
+                            ViewMode::Muxi => {}
                         },
                         KeyCode::Up => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
@@ -793,6 +802,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_setup -= 1;
                                 }
                             }
+                            ViewMode::Muxi => {}
                         },
                         KeyCode::Enter => {
                             if mode == ViewMode::AllSessions && !sessions.is_empty() {
@@ -888,6 +898,7 @@ fn render(
             }
         }
         ViewMode::Setup => view_setup::render(f, view_area, setup, selected_setup, setup_message),
+        ViewMode::Muxi => view_muxi::render(f, view_area, accounts, sessions),
     }
 }
 

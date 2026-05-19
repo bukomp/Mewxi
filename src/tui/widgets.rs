@@ -462,6 +462,8 @@ pub fn render_footer(f: &mut Frame, area: Rect, hint: &str) {
         Span::raw(" account  "),
         Span::styled(" 4 ", Style::default().fg(Color::Black).bg(Color::Gray)),
         Span::raw(" setup  "),
+        Span::styled(" m ", Style::default().fg(Color::Black).bg(Color::Magenta)),
+        Span::raw(" muxi  "),
         Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::Gray)),
         Span::raw(" next  "),
         Span::styled(" r ", Style::default().fg(Color::Black).bg(Color::Gray)),
