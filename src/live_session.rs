@@ -65,6 +65,16 @@ pub enum Activity {
     /// `<session>.awaiting` sibling of the session marker — Claude Code
     /// itself emits no transcript record when the dialog appears.
     Awaiting,
+    /// Claude Code is summarising the conversation to free up context.
+    /// No transcript record is written during summarisation — the
+    /// `/compact` invocation, the summary, and the completion stdout
+    /// are all appended at once *after* compaction finishes. So we
+    /// can't classify a single record as Compacting; instead [`scan`]
+    /// detects the in-flight window heuristically: marker is `busy`,
+    /// the tail's latest classifiable record is the previous turn's
+    /// final assistant text, and the JSONL hasn't been appended to for
+    /// several seconds.
+    Compacting,
     Tool(String),
 }
 
@@ -83,9 +93,31 @@ impl Activity {
             Activity::Delegating => "delegating".into(),
             Activity::Asking => "asking".into(),
             Activity::Awaiting => "awaiting".into(),
+            Activity::Compacting => "compacting".into(),
             Activity::Tool(n) => n.clone(),
         }
     }
+}
+
+/// Pull the human-visible text out of a user-record `content` field.
+/// Claude Code writes it either as a plain string or as an array of
+/// `{type:"text",text:"..."}` blocks; both forms collapse to a single
+/// string for substring matching.
+fn user_text(content: &serde_json::Value) -> Option<String> {
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    let arr = content.as_array()?;
+    let mut buf = String::new();
+    for ci in arr {
+        if ci.get("type").and_then(|x| x.as_str()) == Some("text") {
+            if let Some(t) = ci.get("text").and_then(|x| x.as_str()) {
+                buf.push_str(t);
+                buf.push('\n');
+            }
+        }
+    }
+    if buf.is_empty() { None } else { Some(buf) }
 }
 
 fn classify_tool(name: &str) -> Activity {
@@ -130,6 +162,28 @@ fn classify_record(j: &serde_json::Value) -> Option<Activity> {
         }
         "user" => {
             let content = j.get("message")?.get("content")?;
+            // The whole `/compact` record cluster (`<command-name>/compact</command-name>`,
+            // its `<local-command-stdout>...Compacted...` echo, and the
+            // `isCompactSummary` summary text) is written *after* compaction
+            // finishes — Claude Code emits nothing to the JSONL while it is
+            // summarising. So none of those records are in-flight signals.
+            // Treat them as inert and let the walker keep going to the
+            // pre-compaction turn record, which represents what the user was
+            // last actually doing.
+            if let Some(text) = user_text(content) {
+                if text.contains("<local-command-stdout>")
+                    && text.contains("Compacted")
+                {
+                    return None;
+                }
+                if text.contains("<command-name>/compact</command-name>") {
+                    return None;
+                }
+            }
+            // The injected post-compaction summary itself.
+            if j.get("isCompactSummary").and_then(|x| x.as_bool()) == Some(true) {
+                return None;
+            }
             if let Some(arr) = content.as_array() {
                 let has_tool_result = arr.iter().any(|ci| {
                     ci.get("type").and_then(|x| x.as_str()) == Some("tool_result")
@@ -170,6 +224,16 @@ fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Seconds since the transcript file was last modified. Used by the
+/// `/compact` heuristic in [`scan`] to distinguish the compaction window
+/// (marker busy, no JSONL writes for ~minutes) from a normal turn
+/// (records stream in within a second of the marker flipping to busy).
+fn transcript_age_seconds(path: &Path) -> Option<f64> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let mtime: DateTime<Utc> = metadata.modified().ok()?.into();
+    Some((Utc::now() - mtime).num_milliseconds() as f64 / 1000.0)
+}
+
 /// What the tail says about the session, with enough context for the
 /// caller to decide whether the marker's `idle` flag should override.
 #[derive(Debug, PartialEq, Eq)]
@@ -204,6 +268,7 @@ fn tail_activity(path: &Path) -> Option<TailKind> {
 
 fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailKind> {
     let lines: Vec<&str> = tail.lines().collect();
+
     for (idx, line) in lines.iter().enumerate().rev() {
         if line.is_empty() {
             continue;
@@ -518,12 +583,28 @@ pub fn scan(
         //  3. Otherwise honor the marker: `idle` → Waiting, `busy` →
         //     last completed tail activity (Thinking/Writing) or
         //     Starting if there's nothing yet.
+        //  4. /compact heuristic: marker is `busy` but the tail's latest
+        //     classifiable record is the *previous* turn's final text and
+        //     the JSONL hasn't been touched for several seconds. Claude
+        //     Code emits no records to the transcript while it is
+        //     summarising; this signature distinguishes that window from
+        //     a fresh prompt (which would land its user record almost
+        //     immediately and break the "stale + ends in assistant text"
+        //     match).
         let activity = if awaiting_marker.exists() {
             Activity::Awaiting
         } else {
-            match (state, transcript_exists.then(|| tail_activity(&transcript)).flatten()) {
+            let tail = transcript_exists
+                .then(|| tail_activity(&transcript))
+                .flatten();
+            match (state, tail) {
                 (_, Some(TailKind::PendingTool(a))) => a,
                 (SessionState::Idle, _) => Activity::Waiting,
+                (SessionState::Active, Some(TailKind::Completed(Activity::Writing)))
+                    if transcript_age_seconds(&transcript).is_some_and(|s| s > 5.0) =>
+                {
+                    Activity::Compacting
+                }
                 (SessionState::Active, Some(TailKind::Completed(a))) => a,
                 (SessionState::Active, None) => Activity::Starting,
             }
@@ -690,6 +771,30 @@ mod tests {
         // End of turn: assistant ends with a text block, no tool to carry.
         let tail = format!("{}\n", assistant_text());
         assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Writing)));
+    }
+
+    #[test]
+    fn post_compaction_cluster_is_inert() {
+        // Claude Code writes the entire `/compact` cluster — the boundary
+        // system record, the `isCompactSummary` summary text, the
+        // re-emitted `<command-name>/compact</command-name>` user record,
+        // and the `<local-command-stdout>...Compacted...` echo — only
+        // *after* compaction finishes. Treating any of them as an
+        // in-flight signal left the activity stuck on `compacting` long
+        // after the agent was actually idle. They must all be skipped so
+        // the walker falls through to the real pre-compaction last
+        // activity (here: Writing from the trailing assistant text).
+        let tail = format!(
+            "{}\n{}\n{}\n{}\n",
+            assistant_text(),
+            r#"{"type":"user","isCompactSummary":true,"message":{"content":[{"type":"text","text":"This session is being continued..."}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>"}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>"}]}}"#
+        );
+        assert_eq!(
+            classify_tail(&tail, now()),
+            Some(TailKind::Completed(Activity::Writing))
+        );
     }
 
     #[test]

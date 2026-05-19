@@ -507,6 +507,7 @@ fn activity_purple(a: &Activity) -> (String, Color) {
         Activity::Writing | Activity::Editing => P_HIGH,
         Activity::Reading | Activity::Searching | Activity::Fetching => P_LOW,
         Activity::Running | Activity::Delegating => P_HIGH,
+        Activity::Compacting => P_HIGH,
         Activity::Tool(_) => P_TEXT,
     };
     (a.label(), color)

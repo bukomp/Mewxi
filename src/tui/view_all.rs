@@ -447,6 +447,7 @@ fn activity_display(a: &Activity) -> (String, Color) {
         Activity::Delegating => Color::Magenta,
         Activity::Asking => Color::Yellow,
         Activity::Awaiting => Color::Red,
+        Activity::Compacting => Color::LightBlue,
         Activity::Tool(_) => Color::White,
     };
     (a.label(), color)
