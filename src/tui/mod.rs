@@ -624,8 +624,16 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
         }
 
-        // Keyboard.
-        if event::poll(Duration::from_millis(200))? {
+        // Keyboard. Muxi view animates the logo every frame, so it
+        // polls at ~60 fps for buttery-smooth gradient + bob sampling;
+        // every other view keeps the original 200ms budget — no point
+        // burning CPU on a static screen.
+        let poll_timeout = if mode == ViewMode::Muxi {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(200)
+        };
+        if event::poll(poll_timeout)? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
                     match k.code {
