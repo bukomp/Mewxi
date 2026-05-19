@@ -36,8 +36,9 @@ struct Cli {
     #[arg(long, global = true)]
     no_live: bool,
 
+    /// Subcommand. Omit to launch the interactive TUI (default).
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -125,7 +126,7 @@ fn read_status_payload_from_stdin() -> (Option<std::path::PathBuf>, Option<Strin
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let no_live = cli.no_live || std::env::var_os("MUXI_NO_LIVE").is_some_and(|v| !v.is_empty());
-    match cli.cmd {
+    match cli.cmd.unwrap_or(Cmd::Tui) {
         Cmd::Tui => tui::run(no_live),
         Cmd::Dump => {
             let view = accounts::load_accounts()?;
