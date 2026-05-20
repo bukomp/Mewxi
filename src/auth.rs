@@ -2,7 +2,7 @@
 //!
 //! Resolution order:
 //!
-//! 1. `MUXI_OAUTH_TOKEN` env var — universal escape hatch (CI,
+//! 1. `MEWXI_OAUTH_TOKEN` env var — universal escape hatch (CI,
 //!    remote shells, single-account scripts predating multi-account
 //!    support).
 //! 2. The account's [`TokenSource`][crate::accounts::TokenSource], one of:
@@ -21,10 +21,10 @@ use std::path::Path;
 pub fn read_oauth_token(account: &Account) -> Result<String> {
     let mut errs: Vec<String> = Vec::new();
 
-    match std::env::var("MUXI_OAUTH_TOKEN") {
+    match std::env::var("MEWXI_OAUTH_TOKEN") {
         Ok(v) if !v.is_empty() => return Ok(v),
-        Ok(_) => errs.push("MUXI_OAUTH_TOKEN: set but empty".into()),
-        Err(_) => errs.push("MUXI_OAUTH_TOKEN: unset".into()),
+        Ok(_) => errs.push("MEWXI_OAUTH_TOKEN: set but empty".into()),
+        Err(_) => errs.push("MEWXI_OAUTH_TOKEN: unset".into()),
     }
 
     match &account.token_source {
@@ -81,7 +81,7 @@ pub fn read_oauth_token(account: &Account) -> Result<String> {
 
     Err(anyhow!(
         "could not read Claude Code OAuth token for account '{}':\n  - {}\n\
-         pass --no-live to silence this, or set MUXI_OAUTH_TOKEN.",
+         pass --no-live to silence this, or set MEWXI_OAUTH_TOKEN.",
         account.name,
         errs.join("\n  - ")
     ))

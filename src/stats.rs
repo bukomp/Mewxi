@@ -22,7 +22,7 @@
 //! LiteLLM's public model_prices JSON and falls back to baked-in rates
 //! when offline. Per-file parse
 //! results are cached on disk keyed on `(mtime, size)` under
-//! `$XDG_CACHE_HOME/muxi/files-<slug>.json`, one file per
+//! `$XDG_CACHE_HOME/mewxi/files-<slug>.json`, one file per
 //! account so concurrent watchers don't stomp on each other.
 
 use crate::accounts::Account;
@@ -117,23 +117,23 @@ fn floor_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// Per-account on-disk file-cache path: `files-<slug>.json` under the
-/// shared `muxi` cache dir. Keeping caches per-account means
+/// shared `mewxi` cache dir. Keeping caches per-account means
 /// concurrent watchers (one per account) don't clobber each other.
 pub fn cache_path_for(account: &Account) -> Option<PathBuf> {
     dirs::cache_dir()
-        .map(|c| c.join("muxi").join(format!("files2-{}.json", account.slug())))
+        .map(|c| c.join("mewxi").join(format!("files2-{}.json", account.slug())))
 }
 
 /// Per-account on-disk statusLine output: `status-<slug>.txt`.
 pub fn status_cache_path_for(account: &Account) -> Option<PathBuf> {
     dirs::cache_dir()
-        .map(|c| c.join("muxi").join(format!("status-{}.txt", account.slug())))
+        .map(|c| c.join("mewxi").join(format!("status-{}.txt", account.slug())))
 }
 
 /// Single-file mirror of the most-recently-modified account, kept so
 /// existing statusLine hooks pointed at `status.txt` continue to work.
 pub fn status_cache_path_mirror() -> Option<PathBuf> {
-    dirs::cache_dir().map(|c| c.join("muxi").join("status.txt"))
+    dirs::cache_dir().map(|c| c.join("mewxi").join("status.txt"))
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -581,7 +581,7 @@ pub fn context_cap_for(
 
 fn extended_context_marker_path(account: &Account, session_id: &str) -> Option<std::path::PathBuf> {
     dirs::cache_dir().map(|c| {
-        c.join("muxi")
+        c.join("mewxi")
             .join("ext-ctx")
             .join(format!("{}-{}.flag", account.slug(), session_id))
     })

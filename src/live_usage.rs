@@ -158,7 +158,7 @@ struct RawLive {
 
 pub fn cache_path(account: &Account) -> Option<PathBuf> {
     dirs::cache_dir().map(|c| {
-        c.join("muxi")
+        c.join("mewxi")
             .join(format!("live-{}.json", account.slug()))
     })
 }
@@ -236,7 +236,7 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Optio
         Err(e) => {
             log_once(
                 &account.name,
-                format!("muxi: oauth token unavailable for '{}': {e}", account.name),
+                format!("mewxi: oauth token unavailable for '{}': {e}", account.name),
             );
             return cached;
         }
@@ -256,7 +256,7 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Optio
         Err(e) => {
             log_once(
                 &account.name,
-                format!("muxi: live fetch failed for '{}': {e}", account.name),
+                format!("mewxi: live fetch failed for '{}': {e}", account.name),
             );
             cached
         }

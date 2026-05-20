@@ -1,6 +1,6 @@
 # TUI guide
 
-`muxi tui` opens an interactive ratatui dashboard. It updates live as
+`mewxi tui` opens an interactive ratatui dashboard. It updates live as
 Claude Code writes JSONL.
 
 ## Views
@@ -10,7 +10,7 @@ Claude Code writes JSONL.
 | `1` | **Overview**      | Every account's 5h / weekly / extra-usage bars. Table of live sessions.     |
 | `2` | **Session**       | Drill-down on the selected session: token breakdown, chat log, context.    |
 | `3` | **Account**       | Single-account dashboard — gauges + per-model / per-project / per-day.     |
-| `4` | **Setup**         | Same actions as `muxi setup`, but with a checklist UI.                      |
+| `4` | **Setup**         | Same actions as `mewxi setup`, but with a checklist UI.                      |
 
 ## Keys
 

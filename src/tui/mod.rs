@@ -19,7 +19,7 @@
 
 mod view_account;
 mod view_all;
-mod view_muxi;
+mod view_mewxi;
 mod view_session;
 mod view_setup;
 mod widgets;
@@ -79,7 +79,7 @@ enum ViewMode {
     SessionDetail,
     AccountDetail,
     Setup,
-    Muxi,
+    Mewxi,
 }
 
 /// Stylised cat-face brand logos at four sizes. We pick the biggest one
@@ -87,25 +87,25 @@ enum ViewMode {
 /// on narrower terminals so the cat stays recognisable instead of being
 /// truncated. `_DIMS` tuples are `(rendered_height, max_line_width)`
 /// after stripping blank padding rows.
-const LOGO_LARGE: &str = include_str!("../../images/muxi.ascii");
-const LOGO_MEDIUM: &str = include_str!("../../images/muxi-medium.ascii");
-const LOGO_SMALL: &str = include_str!("../../images/muxi-small.ascii");
-const LOGO_TINY: &str = include_str!("../../images/muxi-tiny.ascii");
+const LOGO_LARGE: &str = include_str!("../../images/mewxi.ascii");
+const LOGO_MEDIUM: &str = include_str!("../../images/mewxi-medium.ascii");
+const LOGO_SMALL: &str = include_str!("../../images/mewxi-small.ascii");
+const LOGO_TINY: &str = include_str!("../../images/mewxi-tiny.ascii");
 const LOGO_LARGE_DIMS: (u16, u16) = (35, 84);
 const LOGO_MEDIUM_DIMS: (u16, u16) = (26, 64);
 const LOGO_SMALL_DIMS: (u16, u16) = (18, 44);
 const LOGO_TINY_DIMS: (u16, u16) = (12, 32);
 
-/// Big "Muxi" in standard-figlet ASCII line-art, mixed case. 24 cols ×
+/// Big "Mewxi" in standard-figlet ASCII line-art, mixed case. 24 cols ×
 /// 5 rows. Trailing whitespace on a line before `\n\` is preserved —
 /// only the source newline + leading indent after `\` is consumed.
-const MUXI_BIG: &str = " __  __               _ \n\
-                        |  \\/  | _   _ __  __(_)\n\
-                        | |\\/| || | | |\\ \\/ /| |\n\
-                        | |  | || |_| | >  < | |\n\
-                        |_|  |_| \\__,_|/_/\\_\\|_|";
-const MUXI_BIG_HEIGHT: u16 = 5;
-const MUXI_BIG_WIDTH: u16 = 24;
+const MEWXI_BIG: &str = " __  __                         _ \n\
+                        |  \\/  |  ___  __      ____  __(_)\n\
+                        | |\\/| | / _ \\ \\ \\ /\\ / /\\ \\/ /| |\n\
+                        | |  | ||  __/  \\ V  V /  >  < | |\n\
+                        |_|  |_| \\___|   \\_/\\_/  /_/\\_\\|_|";
+const MEWXI_BIG_HEIGHT: u16 = 5;
+const MEWXI_BIG_WIDTH: u16 = 34;
 
 /// Hold the splash for this long unless the user dismisses with a key.
 /// Long enough to register the brand, short enough that returning users
@@ -168,30 +168,30 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
 
     let gap_h: u16 = 1;
     let tagline_h: u16 = 1;
-    let plain_muxi_h: u16 = 1;
+    let plain_mewxi_h: u16 = 1;
 
-    let muxi_style = Style::default()
+    let mewxi_style = Style::default()
         .fg(Color::Magenta)
         .add_modifier(Modifier::BOLD);
     let tagline_style = Style::default().fg(Color::DarkGray);
 
     // Pick the biggest cat that fits together with the figlet + a
-    // one-row gap between every element (logo / muxi / tagline). The
-    // tiny cat falls back to plain-text "Muxi" instead of the figlet,
+    // one-row gap between every element (logo / mewxi / tagline). The
+    // tiny cat falls back to plain-text "Mewxi" instead of the figlet,
     // so the brand label is always present.
-    let figlet_block = MUXI_BIG_HEIGHT + gap_h + gap_h + tagline_h;
-    let plain_block = plain_muxi_h + gap_h + gap_h + tagline_h;
+    let figlet_block = MEWXI_BIG_HEIGHT + gap_h + gap_h + tagline_h;
+    let plain_block = plain_mewxi_h + gap_h + gap_h + tagline_h;
     let cat: Option<(&'static str, u16, bool)> = if area.height
         >= LOGO_LARGE_DIMS.0 + figlet_block
-        && area.width >= LOGO_LARGE_DIMS.1.max(MUXI_BIG_WIDTH)
+        && area.width >= LOGO_LARGE_DIMS.1.max(MEWXI_BIG_WIDTH)
     {
         Some((LOGO_LARGE, LOGO_LARGE_DIMS.0, true))
     } else if area.height >= LOGO_MEDIUM_DIMS.0 + figlet_block
-        && area.width >= LOGO_MEDIUM_DIMS.1.max(MUXI_BIG_WIDTH)
+        && area.width >= LOGO_MEDIUM_DIMS.1.max(MEWXI_BIG_WIDTH)
     {
         Some((LOGO_MEDIUM, LOGO_MEDIUM_DIMS.0, true))
     } else if area.height >= LOGO_SMALL_DIMS.0 + figlet_block
-        && area.width >= LOGO_SMALL_DIMS.1.max(MUXI_BIG_WIDTH)
+        && area.width >= LOGO_SMALL_DIMS.1.max(MEWXI_BIG_WIDTH)
     {
         Some((LOGO_SMALL, LOGO_SMALL_DIMS.0, true))
     } else if area.height >= LOGO_TINY_DIMS.0 + plain_block
@@ -202,7 +202,7 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
         None
     };
 
-    let muxi_line = || Line::from(Span::styled("Muxi", muxi_style));
+    let mewxi_line = || Line::from(Span::styled("Mewxi", mewxi_style));
     let tagline_line = || {
         Line::from(Span::styled(
             "multi-agent CLI usage tracker",
@@ -210,22 +210,22 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
         ))
     };
 
-    // No cat fits: plain-text "Muxi" centred, with tagline below if
+    // No cat fits: plain-text "Mewxi" centred, with tagline below if
     // there's room. Add the one-row gap when the screen can afford it.
     let Some((src, logo_h, show_figlet)) = cat else {
-        if area.height < plain_muxi_h + tagline_h {
+        if area.height < plain_mewxi_h + tagline_h {
             f.render_widget(
-                Paragraph::new(muxi_line()).alignment(Alignment::Center),
+                Paragraph::new(mewxi_line()).alignment(Alignment::Center),
                 area,
             );
             return;
         }
-        let with_gap = area.height >= plain_muxi_h + gap_h + tagline_h;
-        let total_h = plain_muxi_h + if with_gap { gap_h } else { 0 } + tagline_h;
+        let with_gap = area.height >= plain_mewxi_h + gap_h + tagline_h;
+        let total_h = plain_mewxi_h + if with_gap { gap_h } else { 0 } + tagline_h;
         let top_pad = area.height.saturating_sub(total_h) / 2;
         let mut constraints = vec![
             Constraint::Length(top_pad),
-            Constraint::Length(plain_muxi_h),
+            Constraint::Length(plain_mewxi_h),
         ];
         if with_gap {
             constraints.push(Constraint::Length(gap_h));
@@ -237,7 +237,7 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
             .constraints(constraints)
             .split(area);
         f.render_widget(
-            Paragraph::new(muxi_line()).alignment(Alignment::Center),
+            Paragraph::new(mewxi_line()).alignment(Alignment::Center),
             chunks[1],
         );
         let tagline_idx = if with_gap { 3 } else { 2 };
@@ -248,8 +248,8 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
         return;
     };
 
-    let muxi_h = if show_figlet { MUXI_BIG_HEIGHT } else { plain_muxi_h };
-    let total_h = logo_h + gap_h + muxi_h + gap_h + tagline_h;
+    let mewxi_h = if show_figlet { MEWXI_BIG_HEIGHT } else { plain_mewxi_h };
+    let total_h = logo_h + gap_h + mewxi_h + gap_h + tagline_h;
     let top_pad = area.height.saturating_sub(total_h) / 2;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -257,7 +257,7 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
             Constraint::Length(top_pad),
             Constraint::Length(logo_h),
             Constraint::Length(gap_h),
-            Constraint::Length(muxi_h),
+            Constraint::Length(mewxi_h),
             Constraint::Length(gap_h),
             Constraint::Length(tagline_h),
             Constraint::Min(0),
@@ -277,17 +277,17 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
     );
 
     if show_figlet {
-        let muxi_lines: Vec<Line> = MUXI_BIG
+        let mewxi_lines: Vec<Line> = MEWXI_BIG
             .lines()
-            .map(|l| Line::from(Span::styled(l.to_string(), muxi_style)))
+            .map(|l| Line::from(Span::styled(l.to_string(), mewxi_style)))
             .collect();
         f.render_widget(
-            Paragraph::new(muxi_lines).alignment(Alignment::Center),
+            Paragraph::new(mewxi_lines).alignment(Alignment::Center),
             chunks[3],
         );
     } else {
         f.render_widget(
-            Paragraph::new(muxi_line()).alignment(Alignment::Center),
+            Paragraph::new(mewxi_line()).alignment(Alignment::Center),
             chunks[3],
         );
     }
@@ -624,11 +624,11 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
         }
 
-        // Keyboard. Muxi view animates the logo every frame, so it
+        // Keyboard. Mewxi view animates the logo every frame, so it
         // polls at ~60 fps for buttery-smooth gradient + bob sampling;
         // every other view keeps the original 200ms budget — no point
         // burning CPU on a static screen.
-        let poll_timeout = if mode == ViewMode::Muxi {
+        let poll_timeout = if mode == ViewMode::Mewxi {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(200)
@@ -680,7 +680,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             pinned_session = None;
                         }
                         KeyCode::Char('m') | KeyCode::Char('M') => {
-                            mode = ViewMode::Muxi;
+                            mode = ViewMode::Mewxi;
                             pinned_session = None;
                         }
                         KeyCode::Char('R') if mode == ViewMode::Setup => {
@@ -733,7 +733,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_setup = (selected_setup + 1) % len;
                                 }
                             }
-                            ViewMode::Muxi => {}
+                            ViewMode::Mewxi => {}
                         },
                         KeyCode::BackTab => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
@@ -760,7 +760,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_setup = (selected_setup + len - 1) % len;
                                 }
                             }
-                            ViewMode::Muxi => {}
+                            ViewMode::Mewxi => {}
                         },
                         KeyCode::Down => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
@@ -786,7 +786,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_setup = (selected_setup + 1).min(len - 1);
                                 }
                             }
-                            ViewMode::Muxi => {}
+                            ViewMode::Mewxi => {}
                         },
                         KeyCode::Up => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
@@ -810,7 +810,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_setup -= 1;
                                 }
                             }
-                            ViewMode::Muxi => {}
+                            ViewMode::Mewxi => {}
                         },
                         KeyCode::Enter => {
                             if mode == ViewMode::AllSessions && !sessions.is_empty() {
@@ -906,7 +906,7 @@ fn render(
             }
         }
         ViewMode::Setup => view_setup::render(f, view_area, setup, selected_setup, setup_message),
-        ViewMode::Muxi => view_muxi::render(f, view_area, accounts, sessions),
+        ViewMode::Mewxi => view_mewxi::render(f, view_area, accounts, sessions),
     }
 }
 
@@ -916,7 +916,7 @@ fn render_top_header(f: &mut Frame, area: ratatui::layout::Rect) {
     use ratatui::text::{Line, Span};
     use ratatui::widgets::Paragraph;
     let line = Line::from(vec![Span::styled(
-        "Muxi",
+        "Mewxi",
         Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
     )]);
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
@@ -991,10 +991,10 @@ fn toggle_ignore_for_selected(
     let name = acct.account_name.clone();
     match accounts::toggle_ignored(&name) {
         Ok(true) => Some(format!(
-            "[{name}] now ignored — restart `muxi tui` to drop from other views"
+            "[{name}] now ignored — restart `mewxi tui` to drop from other views"
         )),
         Ok(false) => Some(format!(
-            "[{name}] un-ignored — restart `muxi tui` to see in other views"
+            "[{name}] un-ignored — restart `mewxi tui` to see in other views"
         )),
         Err(e) => Some(format!("[{name}] toggle ignore FAILED: {e}")),
     }

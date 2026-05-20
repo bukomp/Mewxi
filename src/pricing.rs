@@ -1,9 +1,9 @@
 //! Model pricing with dynamic refresh from LiteLLM's public price table.
 //!
-//! On first lookup we try to load `~/.cache/muxi/litellm_prices.json`; if
+//! On first lookup we try to load `~/.cache/mewxi/litellm_prices.json`; if
 //! it's missing or older than 24h we fetch the upstream JSON (one-shot,
 //! short timeout) and rewrite the cache. Any failure silently falls back
-//! to the hard-coded [`fallback`] rates so muxi keeps working offline.
+//! to the hard-coded [`fallback`] rates so mewxi keeps working offline.
 //!
 //! Lookup is by model *family* (`opus`/`sonnet`/`haiku`), matching how
 //! Claude Code reports the model id. We pick the bare
@@ -63,7 +63,7 @@ fn load_table() -> Table {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    dirs::cache_dir().map(|c| c.join("muxi").join("litellm_prices.json"))
+    dirs::cache_dir().map(|c| c.join("mewxi").join("litellm_prices.json"))
 }
 
 fn load_or_fetch_raw() -> Option<String> {

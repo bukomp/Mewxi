@@ -7,7 +7,7 @@
 //! them.
 //!
 //! Discovery order:
-//!  1. `~/.config/muxi/accounts.toml` — explicit, wins when present.
+//!  1. `~/.config/mewxi/accounts.toml` — explicit, wins when present.
 //!  2. Auto-discovery: every `~/.claude*` directory containing `projects/`.
 //!  3. The `CLAUDE_CONFIG_DIR` env var (when set), if it isn't already in
 //!     the discovered list.
@@ -91,7 +91,7 @@ impl Account {
     }
 }
 
-/// On-disk shape of `~/.config/muxi/accounts.toml`.
+/// On-disk shape of `~/.config/mewxi/accounts.toml`.
 #[derive(Debug, Deserialize, Default)]
 #[allow(dead_code)]
 struct AccountsConfig {
@@ -166,7 +166,7 @@ impl AccountsView {
 }
 
 /// Path to `accounts.toml`. We intentionally use the XDG-style
-/// `~/.config/muxi/` on every platform (including macOS)
+/// `~/.config/mewxi/` on every platform (including macOS)
 /// rather than `dirs::config_dir()` (which on macOS returns
 /// `~/Library/Application Support`). This matches the path documented
 /// in the README and keeps the config location predictable for
@@ -175,7 +175,7 @@ pub fn config_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
-    Some(base.join("muxi").join("accounts.toml"))
+    Some(base.join("mewxi").join("accounts.toml"))
 }
 
 /// Discover accounts; never fails just because the config file is absent.
@@ -227,7 +227,7 @@ pub fn load_accounts() -> Result<AccountsView> {
     if accounts.is_empty() {
         return Err(anyhow!(
             "no Claude config directories discovered. \
-             Either create ~/.config/muxi/accounts.toml, \
+             Either create ~/.config/mewxi/accounts.toml, \
              ensure ~/.claude (or ~/.claude-*) exists, \
              or set CLAUDE_CONFIG_DIR."
         ));

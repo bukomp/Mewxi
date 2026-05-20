@@ -1,14 +1,14 @@
 <div align="center">
 
-<img src="images/muxi.png" alt="Muxi — the digi-cat mascot" width="220" />
+<img src="images/mewxi.png" alt="Mewxi — the digi-cat mascot" width="220" />
 
-# Muxi
+# Mewxi
 
 **MCP server + TUI for real-time coding-agent usage stats.**
 
 One binary. Every account. No telemetry going anywhere but your terminal.
 
-> Today Muxi reads Claude Code. Gemini CLI and Codex are on the [roadmap](docs/roadmap.md).
+> Today Mewxi reads Claude Code. Gemini CLI and Codex are on the [roadmap](docs/roadmap.md).
 
 </div>
 
@@ -19,8 +19,8 @@ One binary. Every account. No telemetry going anywhere but your terminal.
 - [Installation](docs/installation.md) — build from source, get the binary on your PATH.
 - [Quick start](docs/quickstart.md) — five minutes from zero to a live status line.
 - [TUI guide](docs/tui.md) — the four views, keybinds, what each pane means.
-- [MCP server](docs/mcp.md) — wire Muxi into Claude Code as a read-only data source.
-- [Multi-account](docs/accounts.md) — point Muxi at every `CLAUDE_CONFIG_DIR` you have.
+- [MCP server](docs/mcp.md) — wire Mewxi into Claude Code as a read-only data source.
+- [Multi-account](docs/accounts.md) — point Mewxi at every `CLAUDE_CONFIG_DIR` you have.
 - [Architecture](docs/architecture.md) — how the pieces fit, for the curious.
 - [Roadmap](docs/roadmap.md) — what's coming next.
 
@@ -28,15 +28,15 @@ One binary. Every account. No telemetry going anywhere but your terminal.
 
 ## What is this?
 
-Muxi reads the JSONL transcripts Claude Code already writes to disk, pairs
+Mewxi reads the JSONL transcripts Claude Code already writes to disk, pairs
 them with the same live `/usage` endpoint the CLI itself uses, and gives you:
 
 - a **TUI dashboard** with 5-hour / weekly / extra-usage gauges, per-model
   and per-project breakdowns, and a live table of every running session
   across every account,
-- a one-line **statusLine** for Claude Code (`muxi status`), kept hot by a
+- a one-line **statusLine** for Claude Code (`mewxi status`), kept hot by a
   small **watcher** daemon,
-- an **MCP server** (`muxi mcp`) that exposes the same numbers as JSON-RPC
+- an **MCP server** (`mewxi mcp`) that exposes the same numbers as JSON-RPC
   tools so an agent can answer "how much have I spent today" without
   leaving the chat.
 
@@ -51,10 +51,10 @@ back to baked-in rates when offline.
 cargo install --path .
 
 # 2. Wire the statusLine + (optionally) install the watcher service
-muxi setup --service
+mewxi setup --service
 
 # 3. Open the dashboard
-muxi tui
+mewxi tui
 ```
 
 That's it — open Claude Code in another terminal and your status line will
@@ -67,13 +67,13 @@ For MCP, see [docs/mcp.md](docs/mcp.md).
 
 | Command       | What it does                                                   |
 | ------------- | -------------------------------------------------------------- |
-| `muxi tui`    | Interactive ratatui dashboard.                                 |
-| `muxi status` | Print one-line statusLine string (reads JSON from stdin).      |
-| `muxi watch`  | Background daemon that keeps the status cache hot.             |
-| `muxi mcp`    | JSON-RPC MCP server over stdio.                                |
-| `muxi dump`   | Aggregate + live snapshot as JSON. Handy for scripts.          |
-| `muxi setup`  | Wire statusLine into every discovered account, install service.|
-| `muxi stop`   | Stop (and optionally disable) the watcher service.             |
+| `mewxi tui`    | Interactive ratatui dashboard.                                 |
+| `mewxi status` | Print one-line statusLine string (reads JSON from stdin).      |
+| `mewxi watch`  | Background daemon that keeps the status cache hot.             |
+| `mewxi mcp`    | JSON-RPC MCP server over stdio.                                |
+| `mewxi dump`   | Aggregate + live snapshot as JSON. Handy for scripts.          |
+| `mewxi setup`  | Wire statusLine into every discovered account, install service.|
+| `mewxi stop`   | Stop (and optionally disable) the watcher service.             |
 
 ---
 
@@ -81,7 +81,7 @@ For MCP, see [docs/mcp.md](docs/mcp.md).
 
 ### 🐾 fun fact
 
-> Muxi is a **digi-cat**. She has as many lives as you have agents open,
+> Mewxi is a **digi-cat**. She has as many lives as you have agents open,
 > and unlike other cats, she lives them all at once.
 
 </div>

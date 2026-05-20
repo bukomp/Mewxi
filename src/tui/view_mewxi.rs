@@ -1,6 +1,6 @@
-//! View 5 — full-screen Muxi splash with minified account + agent data.
+//! View 5 — full-screen Mewxi splash with minified account + agent data.
 //!
-//! Left: largest Muxi ASCII art that fits, rendered in a purple scale.
+//! Left: largest Mewxi ASCII art that fits, rendered in a purple scale.
 //! Right: stacked condensed panels —
 //!   - Accounts: name + 5h / weekly / extra mini-bars with percentages.
 //!   - Agents: per-session state, status, ctx%.
@@ -173,7 +173,7 @@ pub fn render(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(P_MID))
         .title(Span::styled(
-            " Muxi ",
+            " Mewxi ",
             Style::default().fg(P_HOT).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);

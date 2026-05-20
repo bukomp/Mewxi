@@ -1,11 +1,11 @@
 [package]
-name = "muxi"
+name = "mewxi"
 version = "0.1.0"
 edition = "2021"
 description = "MCP server + TUI for real-time coding-agent usage stats"
 
 [[bin]]
-name = "muxi"
+name = "mewxi"
 path = "src/main.rs"
 
 [dependencies]

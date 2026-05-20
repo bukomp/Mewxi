@@ -26,7 +26,7 @@ use std::process::Command;
 
 #[derive(Clone, Debug)]
 pub enum StatusLineState {
-    /// The block matches our `muxi status` invocation.
+    /// The block matches our `mewxi status` invocation.
     Wired,
     /// A `statusLine` block exists but points elsewhere.
     OtherCommand(String),
@@ -262,7 +262,7 @@ pub fn wire_statusline(settings_path: &Path, binary: &Path, no_live: bool, force
         }
         Some(_) if !force => {
             return Err(anyhow!(
-                "{} has a non-muxi statusLine; pass force=true to overwrite",
+                "{} has a non-mewxi statusLine; pass force=true to overwrite",
                 settings_path.display()
             ));
         }
@@ -492,12 +492,12 @@ pub fn unwire_statusline(settings_path: &Path) -> Result<bool> {
 
 #[cfg(target_os = "macos")]
 fn watcher_plist_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join("Library/LaunchAgents/com.muxi.watch.plist"))
+    dirs::home_dir().map(|h| h.join("Library/LaunchAgents/com.mewxi.watch.plist"))
 }
 
 #[cfg(target_os = "linux")]
 fn watcher_unit_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".config/systemd/user/muxi-watch.service"))
+    dirs::home_dir().map(|h| h.join(".config/systemd/user/mewxi-watch.service"))
 }
 
 #[cfg(target_os = "macos")]
@@ -510,7 +510,7 @@ fn inspect_watcher() -> WatcherState {
     }
     // `launchctl list <label>` exits 0 when the agent is loaded.
     match Command::new("launchctl")
-        .args(["list", "com.muxi.watch"])
+        .args(["list", "com.mewxi.watch"])
         .output()
     {
         Ok(o) if o.status.success() => WatcherState::Running,
@@ -528,7 +528,7 @@ fn inspect_watcher() -> WatcherState {
         return WatcherState::NotInstalled;
     }
     match Command::new("systemctl")
-        .args(["--user", "is-active", "muxi-watch.service"])
+        .args(["--user", "is-active", "mewxi-watch.service"])
         .output()
     {
         Ok(o) if o.status.success() => WatcherState::Running,
@@ -564,7 +564,7 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.muxi.watch</string>
+    <string>com.mewxi.watch</string>
     <key>ProgramArguments</key>
     <array>
 {args_xml}    </array>
@@ -608,7 +608,7 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
     };
     let unit = format!(
         "[Unit]\n\
-         Description=muxi status watcher\n\
+         Description=mewxi status watcher\n\
          After=default.target\n\
          \n\
          [Service]\n\
@@ -624,7 +624,7 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
     run_cmd("systemctl", &["--user", "daemon-reload"])?;
     run_cmd(
         "systemctl",
-        &["--user", "enable", "--now", "muxi-watch.service"],
+        &["--user", "enable", "--now", "mewxi-watch.service"],
     )?;
     Ok(())
 }
@@ -660,7 +660,7 @@ pub fn stop_watcher_now() -> Result<()> {
     if !unit_path.exists() {
         return Ok(());
     }
-    run_cmd("systemctl", &["--user", "stop", "muxi-watch.service"])
+    run_cmd("systemctl", &["--user", "stop", "mewxi-watch.service"])
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -687,7 +687,7 @@ pub fn uninstall_watcher() -> Result<()> {
     if !unit_path.exists() {
         return Ok(());
     }
-    let _ = run_cmd("systemctl", &["--user", "disable", "--now", "muxi-watch.service"]);
+    let _ = run_cmd("systemctl", &["--user", "disable", "--now", "mewxi-watch.service"]);
     fs::remove_file(&unit_path).ok();
     let _ = run_cmd("systemctl", &["--user", "daemon-reload"]);
     Ok(())
@@ -719,7 +719,7 @@ fn running_watcher_pid() -> Option<u32> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     stdout
         .lines()
-        .find(|l| l.ends_with("com.muxi.watch"))
+        .find(|l| l.ends_with("com.mewxi.watch"))
         .and_then(|l| l.split_whitespace().next())
         .and_then(|s| s.parse().ok())
 }
@@ -864,7 +864,7 @@ pub fn apply_all(force: bool, no_live: bool) -> Result<ApplyOutcome> {
 pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
     let snap = inspect(no_live)?;
     let view = accounts::load_accounts()?;
-    println!("muxi setup");
+    println!("mewxi setup");
     println!("  binary:   {}", snap.binary.display());
     println!();
     for acct in snap.accounts.iter().filter(|a| !a.ignored) {
@@ -912,7 +912,7 @@ pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
     } else {
         println!();
         println!("To keep the status fresh, re-run with --service to install a user service unit,");
-        println!("or run `muxi watch` yourself.");
+        println!("or run `mewxi watch` yourself.");
     }
     println!();
     println!("Done. Reload Claude Code (or start a new session) to see the status line.");
@@ -920,7 +920,7 @@ pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
 }
 
 pub fn stop(disable: bool) -> Result<()> {
-    println!("muxi stop");
+    println!("mewxi stop");
     if disable {
         match uninstall_watcher() {
             Ok(()) => println!("  service:  uninstalled"),

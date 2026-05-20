@@ -1,13 +1,13 @@
 # MCP server
 
-`muxi mcp` is a JSON-RPC 2.0 MCP server (protocol `2024-11-05`) that
+`mewxi mcp` is a JSON-RPC 2.0 MCP server (protocol `2024-11-05`) that
 runs over stdio. Read-only — it can't change your config, send tokens,
 or modify transcripts.
 
 ## Wire it in
 
 ```bash
-claude mcp add muxi -- muxi mcp
+claude mcp add mewxi -- mewxi mcp
 ```
 
 Or hand-edit your `~/.claude.json` (or per-account equivalent):
@@ -15,7 +15,7 @@ Or hand-edit your `~/.claude.json` (or per-account equivalent):
 ```json
 {
   "mcpServers": {
-    "muxi": { "command": "muxi", "args": ["mcp"] }
+    "mewxi": { "command": "mewxi", "args": ["mcp"] }
   }
 }
 ```
@@ -27,7 +27,7 @@ to aggregate across every discovered account.
 
 | Tool                  | What it returns                                                      |
 | --------------------- | -------------------------------------------------------------------- |
-| `list_accounts`       | Every account Muxi knows about, with directory + default flag.       |
+| `list_accounts`       | Every account Mewxi knows about, with directory + default flag.       |
 | `list_live_sessions`  | Currently-active Claude Code conversations.                          |
 | `get_totals`          | All-time / today / this week / this month, with USD cost.            |
 | `get_today`           | Today only — same shape as `get_totals`.                             |
@@ -41,7 +41,7 @@ to aggregate across every discovered account.
 
 Ask Claude:
 
-> "Using the Muxi MCP, summarise my Claude spend this week and tell me
+> "Using the Mewxi MCP, summarise my Claude spend this week and tell me
 > which project ate the most tokens."
 
 It will call `get_totals`, `get_by_project`, and respond in plain

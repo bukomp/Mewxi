@@ -13,7 +13,7 @@ See [installation.md](installation.md) for prerequisites.
 ## 2. Wire it in
 
 ```bash
-muxi setup --service
+mewxi setup --service
 ```
 
 This does two things:
@@ -23,13 +23,13 @@ This does two things:
 - Installs and starts a user-scope watcher service that keeps the status
   cache hot.
 
-Re-run any time — it's idempotent. `--force` overwrites a non-muxi
+Re-run any time — it's idempotent. `--force` overwrites a non-mewxi
 statusLine. Drop `--service` if you only want the wiring.
 
 ## 3. Open the dashboard
 
 ```bash
-muxi tui
+mewxi tui
 ```
 
 Keys: `1` overview, `2` session detail, `3` account detail, `4` setup,
@@ -38,7 +38,7 @@ Keys: `1` overview, `2` session detail, `3` account detail, `4` setup,
 ## 4. (Optional) wire MCP
 
 ```bash
-claude mcp add muxi -- muxi mcp
+claude mcp add mewxi -- mewxi mcp
 ```
 
 Now ask Claude things like *"what's my 5-hour usage right now?"* — see
@@ -46,8 +46,8 @@ Now ask Claude things like *"what's my 5-hour usage right now?"* — see
 
 ## Sanity checks
 
-- `muxi dump` — prints the full aggregate as JSON. If this works,
+- `mewxi dump` — prints the full aggregate as JSON. If this works,
   everything else will.
-- `muxi status < /dev/null` — prints the same line your statusLine shows.
-- `muxi setup` with no flags — re-runs setup and tells you what's wired
+- `mewxi status < /dev/null` — prints the same line your statusLine shows.
+- `mewxi setup` with no flags — re-runs setup and tells you what's wired
   and what isn't.

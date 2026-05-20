@@ -1,13 +1,13 @@
 # Multi-account
 
-An "account" in Muxi is one `CLAUDE_CONFIG_DIR` — a directory with its
+An "account" in Mewxi is one `CLAUDE_CONFIG_DIR` — a directory with its
 own `projects/` JSONL subtree and its own credentials. People with a
 work/personal split (`claude-work`, `claude-priv`) point each shell at a
-different dir; Muxi sees all of them at once.
+different dir; Mewxi sees all of them at once.
 
 ## Discovery order
 
-1. **`~/.config/muxi/accounts.toml`** — explicit config, wins when present.
+1. **`~/.config/mewxi/accounts.toml`** — explicit config, wins when present.
 2. **Auto-discovery** — every `~/.claude*` directory containing `projects/`.
 3. **`CLAUDE_CONFIG_DIR` env var** — added if not already in the list.
 
@@ -28,13 +28,13 @@ dir  = "/Users/me/.claude-priv"
 ```
 
 If you set up Claude Code the normal way (single `~/.claude`) you don't
-need this file. Muxi finds it automatically.
+need this file. Mewxi finds it automatically.
 
 ## Auth
 
 Per account, in order:
 
-1. `MUXI_OAUTH_TOKEN` env var — universal escape hatch.
+1. `MEWXI_OAUTH_TOKEN` env var — universal escape hatch.
 2. Account's configured `TokenSource`: env var, macOS keychain, or file.
 
 If every source fails, the error message lists exactly what was tried —

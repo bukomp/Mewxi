@@ -6,7 +6,7 @@
 //! ```json
 //! {"pid": 56869,
 //!  "sessionId": "f2323e13-...",
-//!  "cwd": "/Users/.../muxi",
+//!  "cwd": "/Users/.../mewxi",
 //!  "status": "busy" | "idle",
 //!  ...}
 //! ```
@@ -563,7 +563,7 @@ pub fn scan(
             SessionState::Idle
         };
 
-        // Sidechannel marker written by the `muxi hook awaiting-set`
+        // Sidechannel marker written by the `mewxi hook awaiting-set`
         // command we install into each account's `settings.json` —
         // present means a permission dialog is currently up. Claude Code
         // itself emits nothing to the transcript while the dialog is

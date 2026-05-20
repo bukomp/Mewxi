@@ -7,7 +7,7 @@ A short tour of the codebase for anyone who wants to hack on it.
 - **JSONL transcripts** — Claude Code writes one line per assistant
   message under `<CLAUDE_CONFIG_DIR>/projects/<project>/<session>.jsonl`.
   Source of truth for historical usage. Parsed and cached on disk by
-  `(mtime, size)` in `$XDG_CACHE_HOME/muxi/`.
+  `(mtime, size)` in `$XDG_CACHE_HOME/mewxi/`.
 - **OAuth `/usage` endpoint** — the same undocumented endpoint Claude
   Code uses for its in-CLI `/usage` command. Source of truth for the
   authoritative 5h / weekly bars.
@@ -45,6 +45,6 @@ server uses tokio because it's a stdio JSON-RPC loop.
 
 ## Caching
 
-Per-file parse results live in `$XDG_CACHE_HOME/muxi/files-<slug>.json`,
+Per-file parse results live in `$XDG_CACHE_HOME/mewxi/files-<slug>.json`,
 one cache per account. Invalidated on `(mtime, size)` mismatch. Pricing
 cache is in the same dir, refreshed every 24h.

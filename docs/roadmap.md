@@ -1,10 +1,10 @@
 # Roadmap
 
-Where Muxi is headed. Order is rough — not a commitment.
+Where Mewxi is headed. Order is rough — not a commitment.
 
 ## Multi-CLI support
 
-Today Muxi is Claude-Code-shaped: it reads JSONL from `~/.claude*`,
+Today Mewxi is Claude-Code-shaped: it reads JSONL from `~/.claude*`,
 talks to Anthropic's `/usage` endpoint, and wires into Claude Code's
 `statusLine`. The plan is to broaden the data layer so the same TUI /
 MCP / status surface works across every major coding agent.
@@ -22,7 +22,7 @@ gain a provider tag.
 
 ## Single entry point: agent-teams orchestrator + builder
 
-Beyond observability, Muxi will grow a launcher for multi-agent
+Beyond observability, Mewxi will grow a launcher for multi-agent
 workflows:
 
 - **Orchestrator** — one command that spawns a coordinated team of
