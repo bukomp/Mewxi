@@ -17,6 +17,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod accounts;
+mod agent_control;
 mod auth;
 mod chat_log;
 mod live_session;
@@ -67,6 +68,26 @@ enum Cmd {
         /// Also disable the service so it does not start again on login.
         #[arg(long)]
         disable: bool,
+    },
+    /// Spawn an interactive `claude` session that mewxi owns (PTY-backed),
+    /// type the given prompt into it, wait for the response, then print
+    /// the resulting transcript. End-to-end smoke test for the agent-
+    /// control plumbing before TUI integration.
+    Drive {
+        /// Account name as shown in `mewxi dump` (`claude`, `claude-priv`, …).
+        /// Defaults to the configured default account.
+        #[arg(long)]
+        account: Option<String>,
+        /// Working directory for the spawned session. Defaults to $PWD.
+        #[arg(long)]
+        cwd: Option<std::path::PathBuf>,
+        /// Prompt text to type into the session.
+        #[arg(long)]
+        prompt: String,
+        /// How long to wait after sending the prompt before reading the
+        /// transcript and killing the child.
+        #[arg(long, default_value_t = 30)]
+        listen_secs: u64,
     },
     /// Internal: hook handler invoked by Claude Code's settings.json hooks.
     /// Reads the hook payload JSON from stdin, extracts session_id, and
@@ -168,7 +189,137 @@ fn main() -> Result<()> {
             rt.block_on(mcp::run(no_live))
         }
         Cmd::Hook { action } => run_hook(action),
+        Cmd::Drive {
+            account,
+            cwd,
+            prompt,
+            listen_secs,
+        } => run_drive(account, cwd, prompt, listen_secs),
     }
+}
+
+fn run_drive(
+    account_name: Option<String>,
+    cwd_arg: Option<std::path::PathBuf>,
+    prompt: String,
+    listen_secs: u64,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let view = accounts::load_accounts()?;
+    let account = view
+        .pick(account_name.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("no matching account; check `mewxi dump`"))?;
+
+    let cwd = match cwd_arg {
+        Some(p) => p,
+        None => std::env::current_dir()?,
+    };
+    let claude_bin = agent_control::resolve_claude_bin(account);
+
+    // Snapshot the live-session set BEFORE spawning so we can identify
+    // the new session marker by diffing it.
+    let alive_before = live_session::alive_pids();
+    let before: std::collections::HashSet<String> =
+        live_session::scan(account, &alive_before, &[])
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+
+    eprintln!(
+        "→ spawning `{}` under PTY (account={}, cwd={})",
+        claude_bin.display(),
+        account.name,
+        cwd.display()
+    );
+    let mut session = agent_control::PtySession::spawn(account, cwd.clone(), claude_bin)?;
+
+    // Give the TUI time to render its welcome screen and arm the
+    // input box. 1.5s is enough on this machine; if the child exits
+    // early we bail out with whatever it wrote.
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(50));
+        if let Some(code) = session.try_wait()? {
+            return Err(anyhow::anyhow!(
+                "claude exited before prompt was sent ({}). Tail of pty:\n{}",
+                code,
+                String::from_utf8_lossy(&session.ring_snapshot())
+            ));
+        }
+    }
+
+    eprintln!("→ typing prompt: {prompt}");
+    let mut keys = prompt.into_bytes();
+    keys.push(b'\r');
+    session.send_keys(&keys)?;
+
+    // Locate the new session marker (and from it, the JSONL transcript).
+    eprintln!("→ waiting for new session marker …");
+    let deadline = Instant::now() + Duration::from_secs(listen_secs);
+    let mut new_session_id: Option<String> = None;
+    while Instant::now() < deadline {
+        let alive = live_session::alive_pids();
+        for s in live_session::scan(account, &alive, &[]) {
+            if !before.contains(&s.session_id) {
+                eprintln!("  session_id={} transcript={}", s.session_id, s.transcript_path.display());
+                new_session_id = Some(s.session_id);
+                break;
+            }
+        }
+        if new_session_id.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let Some(_sid) = new_session_id.clone() else {
+        let _ = session.kill();
+        return Err(anyhow::anyhow!(
+            "no new session marker appeared under {} within {}s. PTY tail:\n{}",
+            account.dir.join("sessions").display(),
+            listen_secs,
+            String::from_utf8_lossy(&session.ring_snapshot())
+        ));
+    };
+
+    // Hold the session alive while it works through the prompt.
+    eprintln!("→ holding session alive until deadline ({listen_secs}s) …");
+    while Instant::now() < deadline {
+        if session.try_wait()?.is_some() {
+            eprintln!("  child exited early");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // Re-scan once to refresh the transcript path; the marker is the
+    // canonical pointer to the JSONL.
+    let alive = live_session::alive_pids();
+    let transcript = live_session::scan(account, &alive, &[])
+        .into_iter()
+        .find(|s| Some(&s.session_id) == new_session_id.as_ref())
+        .map(|s| s.transcript_path);
+
+    // Tear down the child before reading — claude flushes some records
+    // on exit (TUI shutdown writes a final "system" line).
+    let _ = session.kill();
+
+    if let Some(path) = transcript {
+        eprintln!("→ transcript at {}", path.display());
+        for entry in chat_log::read(&path) {
+            let tag = match entry.kind {
+                chat_log::EntryKind::User => "user",
+                chat_log::EntryKind::Assistant => "assistant",
+                chat_log::EntryKind::Thinking => "thinking",
+                chat_log::EntryKind::ToolUse { .. } => "tool_use",
+                chat_log::EntryKind::ToolResult { .. } => "tool_result",
+                chat_log::EntryKind::System => "system",
+            };
+            println!("[{tag}] {}", entry.text);
+        }
+    } else {
+        eprintln!("(no transcript found; child wrote nothing)");
+    }
+    Ok(())
 }
 
 /// Read Claude Code's hook payload from stdin and pull `session_id`.

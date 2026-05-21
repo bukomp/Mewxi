@@ -376,6 +376,10 @@ pub struct LiveSession {
     /// when the marker is idle; otherwise derived from the tail of the
     /// transcript (last `tool_use`, `thinking`, `text`, or `tool_result`).
     pub activity: Activity,
+    /// Public Managed Agents session id (`session_…`) when the process
+    /// was started with `--remote-control`. `Some` means mewxi can drive
+    /// this session via the bridge API.
+    pub bridge_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -391,6 +395,10 @@ struct SessionMarker {
     /// but hasn't sent the first prompt).
     updated_at_ms: Option<i64>,
     started_at_ms: Option<i64>,
+    /// Public Managed Agents session id (`session_…`) when the process
+    /// was started with `--remote-control`. Present only on RC-enabled
+    /// sessions; the field exposes those to mewxi's agent-control path.
+    bridge_session_id: Option<String>,
 }
 
 /// Snapshot the currently-alive PIDs once per scan wave so we don't
@@ -450,6 +458,10 @@ fn read_markers(account: &Account, alive: &HashSet<u32>) -> Vec<SessionMarker> {
             .to_string();
         let updated_at_ms = v.get("updatedAt").and_then(|x| x.as_i64());
         let started_at_ms = v.get("startedAt").and_then(|x| x.as_i64());
+        let bridge_session_id = v
+            .get("bridgeSessionId")
+            .and_then(|s| s.as_str())
+            .map(String::from);
         let (Some(pid), Some(session_id), Some(cwd)) = (pid, session_id, cwd) else {
             continue;
         };
@@ -465,6 +477,7 @@ fn read_markers(account: &Account, alive: &HashSet<u32>) -> Vec<SessionMarker> {
             status,
             updated_at_ms,
             started_at_ms,
+            bridge_session_id,
         });
     }
     out
@@ -651,6 +664,7 @@ pub fn scan(
             context_cap,
             state,
             activity,
+            bridge_session_id: marker.bridge_session_id.clone(),
         });
     }
 
