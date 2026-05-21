@@ -26,13 +26,15 @@ mod view_setup;
 mod widgets;
 
 use crate::accounts::{self, Account, AccountsView};
+use crate::agent_control::{self, PtySession};
 use crate::live_session::{self, LiveSession, SessionState};
 use crate::live_usage::{self, LiveUsage};
 use crate::setup::{self, SetupSnapshot};
 use crate::stats::{self, Aggregate, UsageTotals};
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -43,7 +45,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Frame;
 use ratatui::Terminal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -75,6 +77,18 @@ pub struct SessionRef {
     pub context_cap: Option<u64>,
     pub state: SessionState,
     pub activity: crate::live_session::Activity,
+}
+
+/// A `claude` child mewxi spawned whose session marker hasn't appeared
+/// yet. Each frame we diff that account's live sessions against the
+/// snapshot taken at spawn time; the first new session_id becomes the
+/// driver's identity, and the [`PtySession`] graduates to the live
+/// `drivers` registry keyed by `(account_name, session_id)`.
+struct PendingSpawn {
+    account_name: String,
+    snapshot_session_ids: HashSet<String>,
+    pty: PtySession,
+    started_at: Instant,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -475,6 +489,15 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut error_shown: Option<(String, Instant)> = None;
     let mut error_dismissed = false;
 
+    // Agent-control: sessions mewxi itself spawned and owns the PTY
+    // for, plus the in-flight spawns waiting for a session-marker file
+    // to appear so we can pin them by session_id.
+    let mut drivers: HashMap<(String, String), PtySession> = HashMap::new();
+    let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
+    let mut driver_input: String = String::new();
+    let mut driver_input_focused: bool = false;
+    let mut driver_status: Option<(String, Instant)> = None;
+
     // Refresh the launchd watcher if it's still running the previous
     // binary in memory — otherwise it will keep overwriting our cache
     // files with stale-account data. install_watcher does unload+load
@@ -591,6 +614,101 @@ fn run_loop<B: ratatui::backend::Backend>(
         let mut detail_rect: Option<Rect> = None;
         let mut sessions_rect: Option<Rect> = None;
         let mut setup_rect: Option<Rect> = None;
+
+        // Promote any pending spawn whose session marker has appeared
+        // since the last frame. Identify the new session by diffing the
+        // account's current `live_sessions` against the snapshot taken
+        // at spawn time. Sessions whose marker hasn't appeared after a
+        // generous timeout are abandoned (child probably crashed).
+        let mut promotions: Vec<(usize, String)> = Vec::new();
+        for (i, ps) in pending_spawns.iter().enumerate() {
+            if let Some(pa) = per_account.iter().find(|p| p.account.name == ps.account_name) {
+                let new = pa
+                    .live_sessions
+                    .iter()
+                    .find(|s| !ps.snapshot_session_ids.contains(&s.session_id));
+                if let Some(s) = new {
+                    promotions.push((i, s.session_id.clone()));
+                }
+            }
+        }
+        // Apply promotions in reverse index order so swap_remove indices
+        // remain valid.
+        for (i, sid) in promotions.into_iter().rev() {
+            let ps = pending_spawns.swap_remove(i);
+            let key = (ps.account_name.clone(), sid.clone());
+            drivers.insert(key.clone(), ps.pty);
+            // Auto-pin to the freshly-spawned session so the user sees
+            // their work appear without having to navigate.
+            mode = ViewMode::SessionDetail;
+            pinned_session = Some(key);
+            driver_status = Some((
+                format!("driving new session {} ({})", short_sid(&sid), ps.account_name),
+                Instant::now(),
+            ));
+        }
+        // Drop pending spawns that took too long to register a marker
+        // (most likely the child crashed before writing one).
+        let now = Instant::now();
+        pending_spawns.retain(|ps| {
+            let too_old = now.duration_since(ps.started_at) > Duration::from_secs(15);
+            if too_old {
+                driver_status = Some((
+                    format!(
+                        "drive: no session marker appeared under {} within 15s — child crashed?",
+                        ps.account_name
+                    ),
+                    Instant::now(),
+                ));
+            }
+            !too_old
+        });
+
+        // Reap drivers whose claude child exited (user hit Ctrl-D, or
+        // session ended). Drop the entry so the input row disappears.
+        let exited: Vec<(String, String)> = drivers
+            .iter_mut()
+            .filter_map(|(k, pty)| match pty.try_wait().ok().flatten() {
+                Some(_) => Some(k.clone()),
+                None => None,
+            })
+            .collect();
+        for k in &exited {
+            drivers.remove(k);
+            driver_status = Some((
+                format!("driven session {} ended", short_sid(&k.1)),
+                Instant::now(),
+            ));
+            if pinned_session.as_ref() == Some(k) {
+                driver_input.clear();
+                driver_input_focused = false;
+            }
+        }
+
+        // Compute the driver pane state to hand to view_session.
+        let is_driven = mode == ViewMode::SessionDetail
+            && pinned_session
+                .as_ref()
+                .is_some_and(|k| drivers.contains_key(k));
+        let driver_pane = if is_driven {
+            Some(view_session::DriverPane {
+                input: driver_input.as_str(),
+                focused: driver_input_focused,
+            })
+        } else {
+            // Unfocus if the pinned session is no longer driven.
+            driver_input_focused = false;
+            None
+        };
+
+        // Combine setup_message with driver_status into one transient
+        // banner string for the existing setup-message slot.
+        let combined_message: Option<String> = match (&driver_status, &setup_message) {
+            (Some((m, t)), _) if t.elapsed() < Duration::from_secs(8) => Some(m.clone()),
+            (_, Some(m)) => Some(m.clone()),
+            _ => None,
+        };
+
         terminal.draw(|f| {
             render(
                 f,
@@ -611,10 +729,34 @@ fn run_loop<B: ratatui::backend::Backend>(
                 selected_account,
                 selected_setup,
                 setup_snapshot.as_ref(),
-                setup_message.as_deref(),
+                combined_message.as_deref(),
                 live_error,
+                driver_pane.as_ref(),
             )
         })?;
+
+        // Capture the spawn inputs we'd need on `n` into owned values
+        // here, *before* we release the visible_accounts borrow. The
+        // data-reload block below needs `per_account.iter_mut()`, which
+        // the borrow checker won't allow while visible_accounts (which
+        // borrows from per_account) is still alive in the key handler.
+        let spawn_candidate_account: Option<Account> = visible_accounts
+            .get(selected_account)
+            .or_else(|| visible_accounts.first())
+            .map(|pa| pa.account.clone());
+        let spawn_candidate_snapshot: HashSet<String> = spawn_candidate_account
+            .as_ref()
+            .and_then(|a| {
+                visible_accounts
+                    .iter()
+                    .find(|p| p.account.name == a.name)
+                    .map(|p| p.live_sessions.iter().map(|s| s.session_id.clone()).collect())
+            })
+            .unwrap_or_default();
+        drop(visible_accounts);
+        // `visible_sessions` borrows from `sessions` (owned, local to
+        // this frame), not from `per_account` — so we keep it alive for
+        // the keyboard handler's navigation logic.
 
         // Drain live updates from every poller.
         for (rx, _) in &live_pollers {
@@ -706,6 +848,60 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
             if let Event::Key(k) = evt {
                 if k.kind == KeyEventKind::Press {
+                    // Driver input mode owns the keyboard exclusively: chars
+                    // become PTY keystrokes, Enter submits, Esc unfocuses,
+                    // Ctrl-D ends the session, Ctrl-C clears the buffer.
+                    if driver_input_focused {
+                        if let Some(key) = pinned_session.clone() {
+                            if let Some(pty) = drivers.get_mut(&key) {
+                                match (k.code, k.modifiers) {
+                                    (KeyCode::Esc, _) => {
+                                        driver_input_focused = false;
+                                    }
+                                    (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                                        driver_input.clear();
+                                    }
+                                    (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
+                                        let _ = pty.kill();
+                                        driver_input.clear();
+                                        driver_input_focused = false;
+                                    }
+                                    (KeyCode::Enter, _) => {
+                                        if !driver_input.is_empty() {
+                                            let mut bytes = driver_input.as_bytes().to_vec();
+                                            bytes.push(b'\r');
+                                            match pty.send_keys(&bytes) {
+                                                Ok(_) => {
+                                                    driver_input.clear();
+                                                    driver_status = Some((
+                                                        "prompt sent".into(),
+                                                        Instant::now(),
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    driver_status = Some((
+                                                        format!("send failed: {e}"),
+                                                        Instant::now(),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    (KeyCode::Backspace, _) => {
+                                        driver_input.pop();
+                                    }
+                                    (KeyCode::Char(c), _) => {
+                                        driver_input.push(c);
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+                        }
+                        // Pinned session was reaped while focused — drop focus
+                        // so the next keypress hits the global handler.
+                        driver_input_focused = false;
+                    }
                     match k.code {
                         KeyCode::Char('q') => {
                             for (_, cmd_tx) in &live_pollers {
@@ -944,13 +1140,86 @@ fn run_loop<B: ratatui::backend::Backend>(
                         KeyCode::Char('J') if mode == ViewMode::SessionDetail => {
                             detail_scroll = detail_scroll.saturating_add(1);
                         }
+                        KeyCode::Char('n') | KeyCode::Char('N') => {
+                            if let Some(account) = spawn_candidate_account.clone() {
+                                let cwd = std::env::current_dir()
+                                    .unwrap_or_else(|_| PathBuf::from("."));
+                                let bin = agent_control::resolve_claude_bin(&account);
+                                match PtySession::spawn(&account, cwd, bin) {
+                                    Ok(pty) => {
+                                        driver_status = Some((
+                                            format!(
+                                                "spawning claude under {} (waiting for marker …)",
+                                                account.name
+                                            ),
+                                            Instant::now(),
+                                        ));
+                                        pending_spawns.push(PendingSpawn {
+                                            account_name: account.name,
+                                            snapshot_session_ids: spawn_candidate_snapshot.clone(),
+                                            pty,
+                                            started_at: Instant::now(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        driver_status = Some((
+                                            format!("spawn failed: {e}"),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                driver_status = Some((
+                                    "no account available to spawn under".into(),
+                                    Instant::now(),
+                                ));
+                            }
+                        }
+                        KeyCode::Char('i')
+                            if mode == ViewMode::SessionDetail
+                                && pinned_session
+                                    .as_ref()
+                                    .is_some_and(|k| drivers.contains_key(k)) =>
+                        {
+                            driver_input_focused = true;
+                        }
+                        KeyCode::Char('d')
+                            if k.modifiers.contains(KeyModifiers::CONTROL)
+                                && mode == ViewMode::SessionDetail =>
+                        {
+                            if let Some(key) = pinned_session.clone() {
+                                if let Some(pty) = drivers.get_mut(&key) {
+                                    let _ = pty.kill();
+                                    driver_status = Some((
+                                        format!("ending driven session {}", short_sid(&key.1)),
+                                        Instant::now(),
+                                    ));
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
         }
     }
+
+    // Tear down every driven session before we surrender the TUI. Kill
+    // pending spawns too — their child may have rendered but never made
+    // it onto the registry. PtySession::Drop also kills, but explicit
+    // here so a noisy log is easier to chase.
+    for (_, mut pty) in drivers.drain() {
+        let _ = pty.kill();
+    }
+    for mut ps in pending_spawns.drain(..) {
+        let _ = ps.pty.kill();
+    }
     Ok(())
+}
+
+/// Short, table-friendly form of a session-id UUID (first 8 chars).
+fn short_sid(sid: &str) -> String {
+    sid.chars().take(8).collect()
 }
 
 fn hit(rect: Option<Rect>, col: u16, row: u16) -> bool {
@@ -1059,6 +1328,7 @@ fn render(
     setup: Option<&SetupSnapshot>,
     setup_message: Option<&str>,
     live_error: Option<&str>,
+    driver: Option<&view_session::DriverPane<'_>>,
 ) {
     let area = f.area();
     let needs_setup = setup.is_some_and(|s| !s.fully_ok());
@@ -1117,6 +1387,7 @@ fn render(
             chat_rect,
             actions_rect,
             detail_rect,
+            driver,
         ),
         ViewMode::AccountDetail => {
             if let Some(pa) = accounts.get(selected_account) {

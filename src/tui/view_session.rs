@@ -19,6 +19,18 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
+/// Driver pane state passed in from [`super::run_loop`] when the
+/// currently-pinned session is one mewxi spawned and owns the PTY for.
+/// `None` means the session is just being observed; the input row is
+/// not rendered in that case.
+pub struct DriverPane<'a> {
+    /// What the user has typed but not yet submitted.
+    pub input: &'a str,
+    /// True while the input row has keyboard focus. Renders a bright
+    /// cursor; otherwise the row is dim with an `i to type` hint.
+    pub focused: bool,
+}
+
 pub fn render(
     f: &mut Frame,
     area: Rect,
@@ -31,6 +43,7 @@ pub fn render(
     chat_rect: &mut Option<Rect>,
     actions_rect: &mut Option<Rect>,
     detail_rect: &mut Option<Rect>,
+    driver: Option<&DriverPane<'_>>,
 ) {
     let Some(session) = session else {
         let p = Paragraph::new(Line::from(Span::styled(
@@ -43,16 +56,21 @@ pub fn render(
     };
     let parent = accounts.iter().find(|a| a.account.name == session.account_name);
 
+    let mut constraints = vec![
+        Constraint::Length(3), // header
+        Constraint::Length(4), // 3 gauges
+        Constraint::Length(8), // session breakdown
+        Constraint::Length(3), // meta
+        Constraint::Min(4),    // chat log
+    ];
+    if driver.is_some() {
+        // 3-row input pane: borders + one row of text.
+        constraints.push(Constraint::Length(3));
+    }
+    constraints.push(Constraint::Length(1)); // keybind footer
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // header
-            Constraint::Length(4), // 3 gauges
-            Constraint::Length(8), // session breakdown
-            Constraint::Length(3), // meta
-            Constraint::Min(4),    // chat log
-            Constraint::Length(1), // footer
-        ])
+        .constraints(constraints)
         .split(area);
 
     render_header(f, rows[0], session);
@@ -85,11 +103,62 @@ pub fn render(
         actions_rect,
         detail_rect,
     );
-    widgets::render_footer(
-        f,
-        rows[5],
-        "2",
-        "↑/↓ Tab switch session · PgUp/PgDn chat · j/k actions · J/K detail · End re-tail · Esc back",
+    let default_hint =
+        "↑/↓ Tab switch session · PgUp/PgDn chat · j/k actions · J/K detail · End re-tail · Esc back";
+    let footer_hint = match driver {
+        Some(d) if d.focused => {
+            "Enter send  Esc unfocus  Ctrl-D end session  Ctrl-C cancel input"
+        }
+        Some(_) => "i type prompt  Ctrl-D end session  1 all  3 account  PgUp/PgDn scroll",
+        None => default_hint,
+    };
+    if let Some(d) = driver {
+        render_driver_input(f, rows[5], d);
+        widgets::render_footer(f, rows[6], "2", footer_hint);
+    } else {
+        widgets::render_footer(f, rows[5], "2", footer_hint);
+    }
+}
+
+fn render_driver_input(f: &mut Frame, area: Rect, d: &DriverPane<'_>) {
+    let (border_color, title) = if d.focused {
+        (Color::Green, " Drive (focused) ")
+    } else {
+        (Color::DarkGray, " Drive ")
+    };
+    let mut spans: Vec<Span> = vec![Span::styled(
+        "> ",
+        Style::default().fg(if d.focused { Color::Green } else { Color::DarkGray }),
+    )];
+    if d.input.is_empty() {
+        if d.focused {
+            spans.push(Span::styled(
+                "█",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "(press i to type a prompt and Enter to send)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    } else {
+        spans.push(Span::raw(d.input.to_string()));
+        if d.focused {
+            spans.push(Span::styled(
+                "█",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(border_color)),
+        ),
+        area,
     );
 }
 
