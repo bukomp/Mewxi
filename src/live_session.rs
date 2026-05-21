@@ -353,6 +353,10 @@ fn is_tool_activity(a: &Activity) -> bool {
 pub struct LiveSession {
     pub account_name: String,
     pub session_id: String,
+    /// Process id of the running `claude` instance. Surfaced so the TUI
+    /// can target it for kill — both for sessions mewxi spawned itself
+    /// and for ones started in another terminal.
+    pub pid: u32,
     pub project: String,
     pub cwd: PathBuf,
     pub transcript_path: PathBuf,
@@ -384,7 +388,6 @@ pub struct LiveSession {
 
 #[derive(Clone, Debug)]
 struct SessionMarker {
-    #[allow(dead_code)]
     pid: u32,
     session_id: String,
     cwd: PathBuf,
@@ -653,6 +656,7 @@ pub fn scan(
         out.push(LiveSession {
             account_name: account.name.clone(),
             session_id: marker.session_id.clone(),
+            pid: marker.pid,
             project,
             cwd: marker.cwd.clone(),
             transcript_path: transcript,

@@ -64,6 +64,7 @@ pub struct PerAccount {
 pub struct SessionRef {
     pub account_name: String,
     pub session_id: String,
+    pub pid: u32,
     pub project: String,
     pub cwd: PathBuf,
     pub transcript_path: PathBuf,
@@ -347,6 +348,12 @@ const POLLER_TICK: Duration = Duration::from_secs(5);
 /// dashboard doesn't leave a stale highlight pinned to an arbitrary row.
 const SELECTION_VISIBLE: Duration = Duration::from_secs(5);
 
+/// How long the user has between the first `K` (arms the confirmation
+/// banner) and the second `K` (executes the kill). Long enough to read
+/// the banner, short enough that the armed state doesn't outlive the
+/// user's attention.
+const KILL_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
+
 /// How long a live-fetch error stays in the footer before it auto-hides.
 /// The user can also dismiss it earlier with `x`.
 const ERROR_VISIBLE: Duration = Duration::from_secs(10);
@@ -497,6 +504,12 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut driver_input: String = String::new();
     let mut driver_input_focused: bool = false;
     let mut driver_status: Option<(String, Instant)> = None;
+
+    // Two-press confirmation for `K`-to-kill. First press captures the
+    // target; second press within KILL_CONFIRM_WINDOW executes. Killing
+    // someone else's claude is destructive (loses any unsaved /compact
+    // work, prompts in progress) so we don't do it on a single keypress.
+    let mut pending_kill: Option<(String, String, u32, Instant)> = None;
 
     // Refresh the launchd watcher if it's still running the previous
     // binary in memory — otherwise it will keep overwriting our cache
@@ -701,12 +714,32 @@ fn run_loop<B: ratatui::backend::Backend>(
             None
         };
 
-        // Combine setup_message with driver_status into one transient
-        // banner string for the existing setup-message slot.
-        let combined_message: Option<String> = match (&driver_status, &setup_message) {
-            (Some((m, t)), _) if t.elapsed() < Duration::from_secs(8) => Some(m.clone()),
-            (_, Some(m)) => Some(m.clone()),
-            _ => None,
+        // Expire pending-kill confirmation if the user didn't press K
+        // again in time. Keeping it armed past its window would be
+        // surprising — a stray K minutes later shouldn't kill a session.
+        if let Some((_, _, _, armed_at)) = &pending_kill {
+            if armed_at.elapsed() > KILL_CONFIRM_WINDOW {
+                pending_kill = None;
+            }
+        }
+
+        // Build the transient banner. Pending-kill takes priority since
+        // it's actionable; then driver status; then setup message.
+        let combined_message: Option<String> = if let Some((_, sid, pid, armed_at)) = &pending_kill {
+            let remaining = KILL_CONFIRM_WINDOW
+                .saturating_sub(armed_at.elapsed())
+                .as_secs()
+                + 1;
+            Some(format!(
+                "kill claude pid {pid} (session {})? press K again within {remaining}s to confirm",
+                short_sid(sid),
+            ))
+        } else {
+            match (&driver_status, &setup_message) {
+                (Some((m, t)), _) if t.elapsed() < Duration::from_secs(8) => Some(m.clone()),
+                (_, Some(m)) => Some(m.clone()),
+                _ => None,
+            }
         };
 
         terminal.draw(|f| {
@@ -1197,6 +1230,84 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
+                        // Capital K only — lowercase k is reserved for
+                        // future navigation use, and case sensitivity
+                        // matches the muscle-memory "destructive action
+                        // wants Shift" rule (Vim's D vs d, etc.).
+                        KeyCode::Char('K') => {
+                            // Resolve the target: in view 2 it's the
+                            // pinned session; in view 1 the highlighted
+                            // row. Other views: no target.
+                            let target: Option<(String, String, u32)> = match mode {
+                                ViewMode::SessionDetail => pinned_session
+                                    .as_ref()
+                                    .and_then(|(acct, sid)| {
+                                        visible_sessions
+                                            .iter()
+                                            .find(|s| s.account_name == *acct && s.session_id == *sid)
+                                            .map(|s| (s.account_name.clone(), s.session_id.clone(), s.pid))
+                                    }),
+                                ViewMode::AllSessions => visible_sessions
+                                    .get(selected_session)
+                                    .map(|s| (s.account_name.clone(), s.session_id.clone(), s.pid)),
+                                _ => None,
+                            };
+                            let Some((acct, sid, pid)) = target else {
+                                driver_status = Some((
+                                    "no session selected to kill".into(),
+                                    Instant::now(),
+                                ));
+                                continue;
+                            };
+                            match &pending_kill {
+                                // Second press on the same session within
+                                // the window: do the kill.
+                                Some((p_acct, p_sid, p_pid, armed_at))
+                                    if p_acct == &acct
+                                        && p_sid == &sid
+                                        && armed_at.elapsed() <= KILL_CONFIRM_WINDOW =>
+                                {
+                                    let key = (acct.clone(), sid.clone());
+                                    // If mewxi owns the PTY, kill through
+                                    // PtySession so the registry stays
+                                    // consistent. Otherwise SIGTERM the
+                                    // pid directly.
+                                    let msg = if let Some(mut pty) = drivers.remove(&key) {
+                                        let _ = pty.kill();
+                                        format!(
+                                            "killed driven session {} (pid {})",
+                                            short_sid(&sid),
+                                            p_pid
+                                        )
+                                    } else {
+                                        match std::process::Command::new("kill")
+                                            .arg(p_pid.to_string())
+                                            .status()
+                                        {
+                                            Ok(s) if s.success() => format!(
+                                                "sent SIGTERM to {} (pid {})",
+                                                short_sid(&sid),
+                                                p_pid
+                                            ),
+                                            Ok(s) => format!(
+                                                "kill {p_pid} exited {}",
+                                                s.code()
+                                                    .map(|c| c.to_string())
+                                                    .unwrap_or_else(|| "signal".into())
+                                            ),
+                                            Err(e) => format!("kill {p_pid} failed: {e}"),
+                                        }
+                                    };
+                                    driver_status = Some((msg, Instant::now()));
+                                    pending_kill = None;
+                                }
+                                // First press, or armed on a different
+                                // session: arm the confirmation.
+                                _ => {
+                                    pending_kill = Some((acct, sid, pid, Instant::now()));
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1576,6 +1687,7 @@ fn flatten_sessions(accounts: &[PerAccount]) -> Vec<SessionRef> {
             pa.live_sessions.iter().map(move |ls| SessionRef {
                 account_name: ls.account_name.clone(),
                 session_id: ls.session_id.clone(),
+                pid: ls.pid,
                 project: ls.project.clone(),
                 cwd: ls.cwd.clone(),
                 transcript_path: ls.transcript_path.clone(),

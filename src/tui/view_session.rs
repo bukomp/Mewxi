@@ -104,12 +104,12 @@ pub fn render(
         detail_rect,
     );
     let default_hint =
-        "↑/↓ Tab switch session · PgUp/PgDn chat · j/k actions · J/K detail · End re-tail · Esc back";
+        "↑/↓ Tab switch · PgUp/PgDn chat · j/k actions · J/K detail · K kill (2×) · Esc back";
     let footer_hint = match driver {
         Some(d) if d.focused => {
             "Enter send  Esc unfocus  Ctrl-D end session  Ctrl-C cancel input"
         }
-        Some(_) => "i type prompt  Ctrl-D end session  1 all  3 account  PgUp/PgDn scroll",
+        Some(_) => "i type prompt  Ctrl-D end session  K kill (2×)  1 all  PgUp/PgDn",
         None => default_hint,
     };
     if let Some(d) = driver {
