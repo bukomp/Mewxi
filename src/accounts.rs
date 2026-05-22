@@ -110,6 +110,11 @@ struct AccountsConfig {
     /// setup view can show them as "ignored" and offer to un-ignore.
     #[serde(default)]
     ignored: Vec<String>,
+    /// Starting folder for the new-session modal. `~` is expanded.
+    /// Env override: `MEWXI_DEFAULT_NEW_SESSION_DIR`. Falls back to
+    /// `$HOME` when neither is set.
+    #[serde(default)]
+    default_new_session_dir: Option<String>,
     #[serde(default)]
     accounts: Vec<AccountEntry>,
 }
@@ -133,6 +138,9 @@ pub struct AccountsView {
     /// active accounts so the user can toggle them back on.
     pub ignored: Vec<Account>,
     pub default_account: Option<String>,
+    /// Starting folder for the new-session modal (config-supplied,
+    /// pre-tilde-expansion not applied — see [`default_new_session_dir`]).
+    pub default_new_session_dir: Option<PathBuf>,
 }
 
 impl AccountsView {
@@ -183,6 +191,7 @@ pub fn load_accounts() -> Result<AccountsView> {
     let mut accounts: Vec<Account> = Vec::new();
     let mut default_account: Option<String> = None;
     let mut ignored_names: Vec<String> = Vec::new();
+    let mut default_new_session_dir: Option<PathBuf> = None;
 
     if let Some(cfg_path) = config_path() {
         if cfg_path.exists() {
@@ -192,6 +201,7 @@ pub fn load_accounts() -> Result<AccountsView> {
                 .with_context(|| format!("parse {}", cfg_path.display()))?;
             default_account = cfg.default_account;
             ignored_names = cfg.ignored;
+            default_new_session_dir = cfg.default_new_session_dir.map(|s| expand_tilde(&s));
             for entry in cfg.accounts {
                 accounts.push(Account {
                     name: entry.name,
@@ -244,7 +254,28 @@ pub fn load_accounts() -> Result<AccountsView> {
         accounts: active,
         ignored: ignored_vec,
         default_account,
+        default_new_session_dir,
     })
+}
+
+/// Resolve the directory the new-session modal should open in.
+///
+/// Order: `MEWXI_DEFAULT_NEW_SESSION_DIR` env var (if it points to an
+/// existing directory) → `default_new_session_dir` in
+/// `accounts.toml` → `$HOME` → `/`.
+pub fn resolve_default_new_session_dir(view: &AccountsView) -> PathBuf {
+    if let Some(env) = std::env::var_os("MEWXI_DEFAULT_NEW_SESSION_DIR") {
+        let p = expand_tilde(&env.to_string_lossy());
+        if p.is_dir() {
+            return p;
+        }
+    }
+    if let Some(p) = view.default_new_session_dir.as_ref() {
+        if p.is_dir() {
+            return p.clone();
+        }
+    }
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Write the `ignored = [...]` field to `accounts.toml`, preserving

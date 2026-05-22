@@ -18,12 +18,15 @@
 //!    reloads to ≥500ms per account, and rescan live sessions.
 
 mod markdown;
+mod new_session_modal;
 mod view_account;
 mod view_all;
 mod view_mewxi;
 mod view_session;
 mod view_setup;
 mod widgets;
+
+use new_session_modal::{ModalOutcome, NewSessionModal};
 
 use crate::accounts::{self, Account, AccountsView};
 use crate::agent_control::{self, PtySession};
@@ -90,7 +93,19 @@ struct PendingSpawn {
     snapshot_session_ids: HashSet<String>,
     pty: PtySession,
     started_at: Instant,
+    /// Where the child was spawned. Shown in the "starting…" placeholder.
+    cwd: PathBuf,
+    /// Synthetic `(account, "__pending:<id>")` key under which this
+    /// spawn is pinned in `pinned_session` *before* its real session_id
+    /// appears. The promotion step matches on this to swap pins to the
+    /// real key without changing view mode.
+    placeholder_key: (String, String),
 }
+
+/// Marker prefix used to distinguish a synthetic placeholder
+/// session_id from a real UUID. Real session ids are UUIDs, so this
+/// prefix cannot collide.
+const PLACEHOLDER_PREFIX: &str = "__pending:";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ViewMode {
@@ -505,6 +520,13 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut driver_input_focused: bool = false;
     let mut driver_status: Option<(String, Instant)> = None;
 
+    // New-session modal state. Some(_) while it's open and intercepting
+    // every keystroke; None otherwise. `next_spawn_id` produces the
+    // synthetic session_id under which a pending spawn is pinned before
+    // its real session_id becomes known.
+    let mut new_session_modal: Option<NewSessionModal> = None;
+    let mut next_spawn_id: u64 = 0;
+
     // Two-press confirmation for `K`-to-kill. First press captures the
     // target; second press within KILL_CONFIRM_WINDOW executes. Killing
     // someone else's claude is destructive (loses any unsaved /compact
@@ -651,10 +673,18 @@ fn run_loop<B: ratatui::backend::Backend>(
             let ps = pending_spawns.swap_remove(i);
             let key = (ps.account_name.clone(), sid.clone());
             drivers.insert(key.clone(), ps.pty);
-            // Auto-pin to the freshly-spawned session so the user sees
-            // their work appear without having to navigate.
-            mode = ViewMode::SessionDetail;
-            pinned_session = Some(key);
+            // If this spawn's placeholder is currently pinned, swap
+            // the pin to the real key without changing view mode — the
+            // user is already looking at the "starting…" pane.
+            // Otherwise (e.g. user navigated away), still auto-pin so
+            // the freshly-spawned session is what they see when they
+            // come back.
+            if pinned_session.as_ref() == Some(&ps.placeholder_key) {
+                pinned_session = Some(key);
+            } else {
+                mode = ViewMode::SessionDetail;
+                pinned_session = Some(key);
+            }
             driver_status = Some((
                 format!("driving new session {} ({})", short_sid(&sid), ps.account_name),
                 Instant::now(),
@@ -663,9 +693,11 @@ fn run_loop<B: ratatui::backend::Backend>(
         // Drop pending spawns that took too long to register a marker
         // (most likely the child crashed before writing one).
         let now = Instant::now();
+        let mut expired_placeholders: Vec<(String, String)> = Vec::new();
         pending_spawns.retain(|ps| {
             let too_old = now.duration_since(ps.started_at) > Duration::from_secs(15);
             if too_old {
+                expired_placeholders.push(ps.placeholder_key.clone());
                 driver_status = Some((
                     format!(
                         "drive: no session marker appeared under {} within 15s — child crashed?",
@@ -676,6 +708,14 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
             !too_old
         });
+        // Bounce the user back to the all-sessions view if the
+        // placeholder they were watching just expired.
+        for k in &expired_placeholders {
+            if pinned_session.as_ref() == Some(k) {
+                pinned_session = None;
+                mode = ViewMode::AllSessions;
+            }
+        }
 
         // Reap drivers whose claude child exited (user hit Ctrl-D, or
         // session ended). Drop the entry so the input row disappears.
@@ -713,6 +753,30 @@ fn run_loop<B: ratatui::backend::Backend>(
             driver_input_focused = false;
             None
         };
+
+        // If the pinned session is a `__pending:` placeholder, look up
+        // its `PendingSpawn` so view_session can render a "starting…"
+        // pane instead of the usual chat log. The last few bytes of
+        // ring output are useful when claude errors out before writing
+        // a session marker.
+        let pending_pane: Option<view_session::PendingPane> = pinned_session
+            .as_ref()
+            .filter(|k| k.1.starts_with(PLACEHOLDER_PREFIX))
+            .and_then(|k| {
+                pending_spawns
+                    .iter_mut()
+                    .find(|ps| ps.placeholder_key == *k)
+                    .map(|ps| {
+                        let snapshot = ps.pty.ring_snapshot();
+                        let tail = ansi_strip_tail(&snapshot, 400);
+                        view_session::PendingPane {
+                            account_name: ps.account_name.clone(),
+                            cwd: ps.cwd.clone(),
+                            elapsed: ps.started_at.elapsed(),
+                            last_output: tail,
+                        }
+                    })
+            });
 
         // Expire pending-kill confirmation if the user didn't press K
         // again in time. Keeping it armed past its window would be
@@ -765,7 +829,13 @@ fn run_loop<B: ratatui::backend::Backend>(
                 combined_message.as_deref(),
                 live_error,
                 driver_pane.as_ref(),
-            )
+                pending_pane.as_ref(),
+            );
+            // Modal overlays everything else when open. Render last so
+            // it sits on top with Clear + its own border.
+            if let Some(modal) = new_session_modal.as_ref() {
+                modal.render(f, f.area());
+            }
         })?;
 
         // Capture the spawn inputs we'd need on `n` into owned values
@@ -777,15 +847,6 @@ fn run_loop<B: ratatui::backend::Backend>(
             .get(selected_account)
             .or_else(|| visible_accounts.first())
             .map(|pa| pa.account.clone());
-        let spawn_candidate_snapshot: HashSet<String> = spawn_candidate_account
-            .as_ref()
-            .and_then(|a| {
-                visible_accounts
-                    .iter()
-                    .find(|p| p.account.name == a.name)
-                    .map(|p| p.live_sessions.iter().map(|s| s.session_id.clone()).collect())
-            })
-            .unwrap_or_default();
         drop(visible_accounts);
         // `visible_sessions` borrows from `sessions` (owned, local to
         // this frame), not from `per_account` — so we keep it alive for
@@ -881,6 +942,74 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
             if let Event::Key(k) = evt {
                 if k.kind == KeyEventKind::Press {
+                    // New-session modal owns every keystroke while open.
+                    // We dispatch first, before driver input or global
+                    // shortcuts, so that the modal's own Esc/Tab/typing
+                    // can never fall through and quit mewxi or move
+                    // navigation in the underlying view.
+                    if let Some(modal) = new_session_modal.as_mut() {
+                        match modal.handle_key(k) {
+                            ModalOutcome::Stay => {}
+                            ModalOutcome::Cancel => {
+                                new_session_modal = None;
+                            }
+                            ModalOutcome::Confirm { account, cwd } => {
+                                new_session_modal = None;
+                                let snapshot: HashSet<String> = per_account
+                                    .iter()
+                                    .find(|p| p.account.name == account.name)
+                                    .map(|p| {
+                                        p.live_sessions
+                                            .iter()
+                                            .map(|s| s.session_id.clone())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let bin = agent_control::resolve_claude_bin(&account);
+                                match PtySession::spawn(&account, cwd.clone(), bin) {
+                                    Ok(pty) => {
+                                        let spawn_id = next_spawn_id;
+                                        next_spawn_id += 1;
+                                        let placeholder_key = (
+                                            account.name.clone(),
+                                            format!("{}{}", PLACEHOLDER_PREFIX, spawn_id),
+                                        );
+                                        // Instant pin: switch to the
+                                        // session detail view with a
+                                        // placeholder pinned. The
+                                        // promotion loop swaps it for
+                                        // the real session_id once the
+                                        // marker file appears.
+                                        mode = ViewMode::SessionDetail;
+                                        pinned_session = Some(placeholder_key.clone());
+                                        driver_status = Some((
+                                            format!(
+                                                "spawning claude under {} in {}",
+                                                account.name,
+                                                cwd.display()
+                                            ),
+                                            Instant::now(),
+                                        ));
+                                        pending_spawns.push(PendingSpawn {
+                                            account_name: account.name.clone(),
+                                            snapshot_session_ids: snapshot,
+                                            pty,
+                                            started_at: Instant::now(),
+                                            cwd,
+                                            placeholder_key,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        driver_status = Some((
+                                            format!("spawn failed: {e}"),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     // Driver input mode owns the keyboard exclusively: chars
                     // become PTY keystrokes, Enter submits, Esc unfocuses,
                     // Ctrl-D ends the session, Ctrl-C clears the buffer.
@@ -1174,37 +1303,36 @@ fn run_loop<B: ratatui::backend::Backend>(
                             detail_scroll = detail_scroll.saturating_add(1);
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') => {
-                            if let Some(account) = spawn_candidate_account.clone() {
-                                let cwd = std::env::current_dir()
-                                    .unwrap_or_else(|_| PathBuf::from("."));
-                                let bin = agent_control::resolve_claude_bin(&account);
-                                match PtySession::spawn(&account, cwd, bin) {
-                                    Ok(pty) => {
-                                        driver_status = Some((
-                                            format!(
-                                                "spawning claude under {} (waiting for marker …)",
-                                                account.name
-                                            ),
-                                            Instant::now(),
-                                        ));
-                                        pending_spawns.push(PendingSpawn {
-                                            account_name: account.name,
-                                            snapshot_session_ids: spawn_candidate_snapshot.clone(),
-                                            pty,
-                                            started_at: Instant::now(),
-                                        });
-                                    }
-                                    Err(e) => {
-                                        driver_status = Some((
-                                            format!("spawn failed: {e}"),
-                                            Instant::now(),
-                                        ));
-                                    }
-                                }
-                            } else {
+                            // Open the picker. The actual spawn happens
+                            // on `ModalOutcome::Confirm` above; from
+                            // there the instant-pin path takes over so
+                            // the user sees the session detail view
+                            // before the marker has even been written.
+                            let accounts_snapshot: Vec<Account> = per_account
+                                .iter()
+                                .filter(|p| !ignored.contains(&p.account.name))
+                                .map(|p| p.account.clone())
+                                .collect();
+                            if accounts_snapshot.is_empty() {
                                 driver_status = Some((
-                                    "no account available to spawn under".into(),
+                                    "no accounts available to spawn under".into(),
                                     Instant::now(),
+                                ));
+                            } else {
+                                let initial_idx = accounts_snapshot
+                                    .iter()
+                                    .position(|a| {
+                                        spawn_candidate_account
+                                            .as_ref()
+                                            .is_some_and(|c| c.name == a.name)
+                                    })
+                                    .unwrap_or(0);
+                                let initial_dir =
+                                    accounts::resolve_default_new_session_dir(&view);
+                                new_session_modal = Some(NewSessionModal::new(
+                                    accounts_snapshot,
+                                    initial_idx,
+                                    initial_dir,
                                 ));
                             }
                         }
@@ -1417,6 +1545,58 @@ fn handle_scroll(
     }
 }
 
+/// Cheap ANSI strip — drops CSI escape sequences and most C0 control
+/// codes (keeping `\n`). Used to surface the last bytes of PTY output
+/// in the "starting…" placeholder when a child errors out before
+/// writing a session marker. Returns the last `max_bytes` characters
+/// of the cleaned text, or `None` if nothing is left.
+fn ansi_strip_tail(bytes: &[u8], max_bytes: usize) -> Option<String> {
+    let s = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip CSI / OSC / single-char escapes. Eat until we hit a
+            // terminating letter (0x40..0x7e for CSI) or a BEL/ST for OSC.
+            if let Some(&next) = chars.peek() {
+                if next == '[' {
+                    chars.next();
+                    for nc in chars.by_ref() {
+                        if nc.is_ascii_alphabetic() || nc == '~' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if next == ']' {
+                    chars.next();
+                    for nc in chars.by_ref() {
+                        if nc == '\x07' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                // Two-char escape like ESC ( B; skip one char.
+                chars.next();
+                continue;
+            }
+        }
+        if c == '\n' || c == '\t' || !c.is_control() {
+            out.push(c);
+        }
+    }
+    let trimmed = out.trim_end_matches(['\n', ' ']).to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() <= max_bytes {
+        return Some(trimmed);
+    }
+    let start = trimmed.chars().count() - max_bytes;
+    Some(trimmed.chars().skip(start).collect())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render(
     f: &mut Frame,
@@ -1440,6 +1620,7 @@ fn render(
     setup_message: Option<&str>,
     live_error: Option<&str>,
     driver: Option<&view_session::DriverPane<'_>>,
+    pending: Option<&view_session::PendingPane>,
 ) {
     let area = f.area();
     let needs_setup = setup.is_some_and(|s| !s.fully_ok());
@@ -1499,6 +1680,7 @@ fn render(
             actions_rect,
             detail_rect,
             driver,
+            pending,
         ),
         ViewMode::AccountDetail => {
             if let Some(pa) = accounts.get(selected_account) {

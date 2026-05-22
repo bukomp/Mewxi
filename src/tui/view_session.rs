@@ -17,7 +17,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 /// Driver pane state passed in from [`super::run_loop`] when the
 /// currently-pinned session is one mewxi spawned and owns the PTY for.
@@ -29,6 +29,17 @@ pub struct DriverPane<'a> {
     /// True while the input row has keyboard focus. Renders a bright
     /// cursor; otherwise the row is dim with an `i to type` hint.
     pub focused: bool,
+}
+
+/// Placeholder pane for a session mewxi spawned but whose JSONL
+/// session marker has not yet appeared. Shown immediately after `n`
+/// so the keypress feels instant — the real chat log takes over once
+/// the marker promotion runs in the parent event loop.
+pub struct PendingPane {
+    pub account_name: String,
+    pub cwd: std::path::PathBuf,
+    pub elapsed: std::time::Duration,
+    pub last_output: Option<String>,
 }
 
 pub fn render(
@@ -44,7 +55,12 @@ pub fn render(
     actions_rect: &mut Option<Rect>,
     detail_rect: &mut Option<Rect>,
     driver: Option<&DriverPane<'_>>,
+    pending: Option<&PendingPane>,
 ) {
+    if let Some(p) = pending {
+        render_pending(f, area, accounts, p);
+        return;
+    }
     let Some(session) = session else {
         let p = Paragraph::new(Line::from(Span::styled(
             "no session selected — switch to view 1 (press 1) and pick one with ↑/↓ then Enter",
@@ -59,7 +75,7 @@ pub fn render(
     let mut constraints = vec![
         Constraint::Length(3), // header
         Constraint::Length(4), // 3 gauges
-        Constraint::Length(8), // session breakdown
+        Constraint::Length(3), // compact session totals
         Constraint::Length(3), // meta
         Constraint::Min(4),    // chat log
     ];
@@ -118,6 +134,111 @@ pub fn render(
     } else {
         widgets::render_footer(f, rows[5], "2", footer_hint);
     }
+}
+
+fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &PendingPane) {
+    let parent = accounts.iter().find(|a| a.account.name == p.account_name);
+    let mut rows = vec![
+        Constraint::Length(3), // header
+        Constraint::Length(4), // gauges (optional, shown if parent found)
+        Constraint::Min(4),    // pending box
+        Constraint::Length(1), // footer
+    ];
+    if parent.is_none() {
+        rows.remove(1);
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(rows.clone())
+        .split(area);
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!("[{}]", p.account_name),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            "starting claude…",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(Block::default().borders(Borders::ALL).title("Session detail"));
+    f.render_widget(header, chunks[0]);
+
+    let mut idx = 1;
+    if let Some(pa) = parent {
+        let gauge_row = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+            ])
+            .split(chunks[idx]);
+        widgets::render_5h_gauge(f, gauge_row[0], &pa.agg, pa.live.as_ref());
+        widgets::render_7d_gauge(f, gauge_row[1], pa.live.as_ref());
+        widgets::render_extra_gauge(f, gauge_row[2], pa.live.as_ref());
+        idx += 1;
+    }
+
+    let secs = p.elapsed.as_secs();
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(vec![
+            Span::styled("starting ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "claude",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" under ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                p.account_name.clone(),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("({}s)", secs),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("folder   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                p.cwd.to_string_lossy().into_owned(),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "waiting for the session marker to appear …",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        )),
+    ];
+    if let Some(tail) = &p.last_output {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "── child output (tail) ──",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for ln in tail.lines() {
+            lines.push(Line::from(Span::styled(
+                ln.to_string(),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Spawning ")
+        .border_style(Style::default().fg(Color::Yellow));
+    f.render_widget(Paragraph::new(lines).block(block), chunks[idx]);
+    idx += 1;
+    widgets::render_footer(
+        f,
+        chunks[idx],
+        "2",
+        "Esc cancel via K  ·  1 back to all sessions",
+    );
 }
 
 fn render_driver_input(f: &mut Frame, area: Rect, d: &DriverPane<'_>) {
@@ -191,22 +312,40 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
 }
 
 fn render_session_table(f: &mut Frame, area: Rect, s: &SessionRef) {
-    let totals = &s.totals;
-    let rows = vec![
-        kv_row("messages", fmt_num(totals.messages)),
-        kv_row("input tokens", fmt_num(totals.input)),
-        kv_row("output tokens", fmt_num(totals.output)),
-        kv_row("cache read", fmt_num(totals.cache_read)),
-        kv_row("cache write 5m", fmt_num(totals.cache_write_5m)),
-        kv_row("cache write 1h", fmt_num(totals.cache_write_1h)),
-        kv_row("cost", format!("${:.4}", totals.cost_usd)),
-    ];
-    let table = Table::new(
-        rows,
-        [Constraint::Length(18), Constraint::Min(10)],
-    )
-    .block(Block::default().borders(Borders::ALL).title("Tokens this session"));
-    f.render_widget(table, area);
+    let t = &s.totals;
+    let label = |k: &'static str| Span::styled(k, Style::default().fg(Color::DarkGray));
+    let val = |v: String| {
+        Span::styled(
+            v,
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )
+    };
+    let sep = || Span::styled("  ·  ", Style::default().fg(Color::DarkGray));
+    let line = Line::from(vec![
+        label("msgs "),
+        val(fmt_num(t.messages)),
+        sep(),
+        label("in "),
+        val(fmt_tokens_compact(t.input)),
+        sep(),
+        label("out "),
+        val(fmt_tokens_compact(t.output)),
+        sep(),
+        label("cache r/w "),
+        val(format!(
+            "{}/{}",
+            fmt_tokens_compact(t.cache_read),
+            fmt_tokens_compact(t.cache_write_5m + t.cache_write_1h)
+        )),
+        sep(),
+        label("cost "),
+        val(format!("${:.4}", t.cost_usd)),
+    ]);
+    f.render_widget(
+        Paragraph::new(line)
+            .block(Block::default().borders(Borders::ALL).title("Tokens this session")),
+        area,
+    );
 }
 
 fn render_meta_panel(f: &mut Frame, area: Rect, s: &SessionRef) {
@@ -1064,13 +1203,6 @@ fn chunk_chars(word: &str, width: usize) -> Vec<String> {
         .chunks(width)
         .map(|c| c.iter().collect::<String>())
         .collect()
-}
-
-fn kv_row(k: &str, v: impl Into<String>) -> Row<'static> {
-    Row::new(vec![
-        Cell::from(k.to_string()).style(Style::default().fg(Color::DarkGray)),
-        Cell::from(v.into()).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-    ])
 }
 
 fn fmt_age(secs: i64) -> String {
