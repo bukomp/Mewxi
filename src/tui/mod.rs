@@ -1102,13 +1102,24 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     (KeyCode::Backspace, _) => {
                                         driver_input.pop();
                                     }
+                                    // Shift-Tab. crossterm reports it
+                                    // as either `BackTab` (legacy
+                                    // terminals) or `(Tab, SHIFT)`
+                                    // (terminals that have negotiated
+                                    // a disambiguating keyboard
+                                    // protocol). Both forms cycle
+                                    // claude's permission mode by
+                                    // forwarding ANSI CSI Z to the
+                                    // PTY. The next transcript scan
+                                    // picks the new mode up.
                                     (KeyCode::BackTab, _) => {
-                                        // ANSI CSI Z — claude code's
-                                        // keybind for "cycle permission
-                                        // mode". Forward verbatim and
-                                        // let claude update its state;
-                                        // the next transcript scan
-                                        // picks the new mode up.
+                                        let _ = pty.send_keys(b"\x1b[Z");
+                                        driver_status = Some((
+                                            "cycled permission mode".into(),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                    (KeyCode::Tab, m) if m.contains(KeyModifiers::SHIFT) => {
                                         let _ = pty.send_keys(b"\x1b[Z");
                                         driver_status = Some((
                                             "cycled permission mode".into(),
@@ -1126,6 +1137,54 @@ fn run_loop<B: ratatui::backend::Backend>(
                         // Pinned session was reaped while focused — drop focus
                         // so the next keypress hits the global handler.
                         driver_input_focused = false;
+                    }
+                    // Shift-Tab handled here regardless of `k.code`
+                    // form because terminals disagree: some send
+                    // `BackTab`, others `(Tab, SHIFT)`. We unify
+                    // before falling into the `match k.code` arms
+                    // below, which would otherwise route a
+                    // `(Tab, SHIFT)` into the forward-cycle Tab arm
+                    // and do the opposite of what the user wanted.
+                    if matches!(k.code, KeyCode::BackTab)
+                        || (matches!(k.code, KeyCode::Tab)
+                            && k.modifiers.contains(KeyModifiers::SHIFT))
+                    {
+                        let driven = mode == ViewMode::SessionDetail
+                            && pinned_session
+                                .as_ref()
+                                .is_some_and(|k| drivers.contains_key(k));
+                        if driven {
+                            if let Some(key) = pinned_session.clone() {
+                                if let Some(pty) = drivers.get_mut(&key) {
+                                    let _ = pty.send_keys(b"\x1b[Z");
+                                    driver_status = Some((
+                                        "cycled permission mode".into(),
+                                        Instant::now(),
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                        // Not driven — fall through to the existing
+                        // BackTab arm in the match below (prev-session
+                        // cycle). Rewrite the code so the match sees
+                        // the canonical `BackTab` form rather than
+                        // having to handle both there too.
+                        // (We can't mutate `k`; the BackTab arm
+                        // already runs for both shapes thanks to the
+                        // existing match arm — for `(Tab, SHIFT)` we
+                        // call into the same logic directly here.)
+                        if matches!(k.code, KeyCode::Tab) && !sessions.is_empty() {
+                            selected_session =
+                                (selected_session + sessions.len() - 1) % sessions.len();
+                            last_session_select = Instant::now();
+                            if mode == ViewMode::SessionDetail {
+                                pinned_session = visible_sessions
+                                    .get(selected_session)
+                                    .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                            }
+                            continue;
+                        }
                     }
                     match k.code {
                         KeyCode::Char('q') => {
@@ -1264,29 +1323,13 @@ fn run_loop<B: ratatui::backend::Backend>(
                             ViewMode::Mewxi => {}
                         },
                         KeyCode::BackTab => match mode {
+                            // Driven SessionDetail Shift-Tab is
+                            // intercepted ahead of this match (forwards
+                            // to claude's PTY). This arm only sees the
+                            // observe-only case, so prev-session cycle
+                            // is the right behaviour.
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
-                                // In a driven SessionDetail, Shift-Tab
-                                // forwards to the child PTY to cycle
-                                // claude's permission mode (matching
-                                // the focused-input behaviour). The
-                                // prev-session cycle is still
-                                // reachable in view 1 or in an
-                                // observe-only SessionDetail.
-                                let driven = mode == ViewMode::SessionDetail
-                                    && pinned_session
-                                        .as_ref()
-                                        .is_some_and(|k| drivers.contains_key(k));
-                                if driven {
-                                    if let Some(key) = pinned_session.clone() {
-                                        if let Some(pty) = drivers.get_mut(&key) {
-                                            let _ = pty.send_keys(b"\x1b[Z");
-                                            driver_status = Some((
-                                                "cycled permission mode".into(),
-                                                Instant::now(),
-                                            ));
-                                        }
-                                    }
-                                } else if !sessions.is_empty() {
+                                if !sessions.is_empty() {
                                     selected_session = (selected_session + sessions.len() - 1)
                                         % sessions.len();
                                     last_session_select = Instant::now();
