@@ -1126,21 +1126,41 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         bytes.push(b'\r');
                                         match pty.send_keys(&bytes) {
                                             Ok(_) => {
-                                                let baseline = per_account
+                                                let ls = per_account
                                                     .iter()
                                                     .find(|p| p.account.name == key.0)
                                                     .and_then(|p| {
                                                         p.live_sessions
                                                             .iter()
                                                             .find(|s| s.session_id == key.1)
-                                                            .map(|s| s.model.clone())
-                                                    })
+                                                    });
+                                                let model_baseline = ls
+                                                    .map(|s| s.model.clone())
                                                     .unwrap_or_default();
+                                                let transcript_mode =
+                                                    ls.and_then(|s| s.permission_mode.clone());
                                                 let opt = driver_optimistic
                                                     .entry(key.clone())
                                                     .or_default();
+                                                let prior_mode = opt
+                                                    .mode
+                                                    .clone()
+                                                    .or_else(|| transcript_mode.clone());
                                                 opt.model = Some(slug.clone());
-                                                opt.model_baseline = Some(baseline);
+                                                opt.model_baseline = Some(model_baseline);
+                                                // Mirror claude's
+                                                // auto-downgrade so a
+                                                // stale "auto" doesn't
+                                                // resurface when the
+                                                // user later switches
+                                                // back to a model that
+                                                // does support it.
+                                                if prior_mode.as_deref() == Some("auto")
+                                                    && !model_supports_auto(&slug)
+                                                {
+                                                    opt.mode = Some("default".into());
+                                                    opt.mode_baseline = transcript_mode;
+                                                }
                                                 driver_status = Some((
                                                     format!("model → {slug}"),
                                                     Instant::now(),
@@ -2204,6 +2224,18 @@ fn flatten_sessions(
                 let permission_mode = opt
                     .and_then(|o| o.mode.clone())
                     .or_else(|| ls.permission_mode.clone());
+                // Claude itself disables auto when the model can't run
+                // it (Haiku rejects with "auto mode unavailable for this
+                // model"), but the transcript only catches up on the
+                // next prompt. Downgrade `auto` → `default` here so the
+                // badge reflects what claude's internal state already
+                // is the moment the user picks an unsupported model.
+                let permission_mode = match permission_mode.as_deref() {
+                    Some("auto") if !model_supports_auto(&model) => {
+                        Some("default".into())
+                    }
+                    _ => permission_mode,
+                };
                 SessionRef {
                     account_name: ls.account_name.clone(),
                     session_id: ls.session_id.clone(),
