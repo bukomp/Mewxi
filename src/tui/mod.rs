@@ -937,6 +937,13 @@ fn run_loop<B: ratatui::backend::Backend>(
         } else {
             None
         };
+        // Account config dir for the active overlay session, used to
+        // surface plan content from `<dir>/plans/` for plan-mode pickers.
+        let overlay_account_dir: Option<std::path::PathBuf> = overlay_screen
+            .as_ref()
+            .and(pinned_session.as_ref())
+            .and_then(|k| per_account.iter().find(|p| p.account.name == k.0))
+            .map(|p| p.account.dir.clone());
         let overlay_active_here = pinned_session
             .as_ref()
             .is_some_and(|k| overlay_open.contains(k));
@@ -1037,7 +1044,7 @@ fn run_loop<B: ratatui::backend::Backend>(
             // render fn auto-sizes a small box around just the popup
             // region — it does not take over the full mewxi view.
             if let Some(screen) = overlay_screen.as_ref() {
-                terminal_overlay::render(f, f.area(), screen);
+                terminal_overlay::render(f, f.area(), screen, overlay_account_dir.as_deref());
             }
             // Modal overlays everything else when open. Render last so
             // it sits on top with Clear + its own border.

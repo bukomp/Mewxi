@@ -15,10 +15,11 @@
 //! we hit a box-corner or blank row.
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use std::path::Path;
 use vt100::Screen;
 
 /// Substring markers that strongly suggest claude has popped a TUI
@@ -131,12 +132,54 @@ fn is_horizontal_separator(line: &str) -> bool {
 /// Keystrokes always pass through to the PTY regardless of render
 /// path; for the native picker the user's ↑↓ move claude's real
 /// cursor, we re-parse next frame, and the modal stays in sync.
-pub fn render(frame: &mut Frame, area: Rect, screen: &Screen) {
+///
+/// `account_dir` is the driving account's `CLAUDE_CONFIG_DIR` and is
+/// used to surface plan content from `<dir>/plans/` when the picker is
+/// claude's plan-acceptance dialog — the plan text only exists on
+/// disk, not in the PTY screen's popup region.
+pub fn render(frame: &mut Frame, area: Rect, screen: &Screen, account_dir: Option<&Path>) {
     if let Some(picker) = parse_picker(screen) {
-        render_native_picker(frame, area, &picker);
+        let plan_content = if is_plan_picker(&picker) {
+            account_dir.and_then(read_most_recent_plan_file)
+        } else {
+            None
+        };
+        render_native_picker(frame, area, &picker, plan_content.as_deref());
     } else {
         render_pty_crop(frame, area, screen);
     }
+}
+
+fn is_plan_picker(picker: &PickerContent) -> bool {
+    let haystack = picker
+        .title
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        + " "
+        + &picker
+            .body
+            .iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+    haystack.contains("plan") && (haystack.contains("execute") || haystack.contains("proceed"))
+}
+
+/// Read the most recently modified `*.md` file under `<account_dir>/plans/`.
+/// Returns None if the directory doesn't exist or has no markdown files.
+/// The freshest file wins — claude always Writes the plan immediately
+/// before the acceptance picker fires, so the newest file is the one
+/// the picker is asking about.
+fn read_most_recent_plan_file(account_dir: &Path) -> Option<String> {
+    let plans_dir = account_dir.join("plans");
+    let entries = std::fs::read_dir(&plans_dir).ok()?;
+    let newest = entries
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
+        .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, e.path())))
+        .max_by_key(|(t, _)| *t)?;
+    std::fs::read_to_string(newest.1).ok()
 }
 
 fn render_pty_crop(frame: &mut Frame, area: Rect, screen: &Screen) {
@@ -168,29 +211,110 @@ fn render_pty_crop(frame: &mut Frame, area: Rect, screen: &Screen) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_native_picker(frame: &mut Frame, area: Rect, picker: &PickerContent) {
-    let title_text = picker
-        .title
-        .clone()
-        .unwrap_or_else(|| "claude is asking".to_string());
-    let title = format!(
-        " {} — ↑↓ navigate · Enter confirm · Ctrl-] cancel ",
-        title_text
-    );
+fn render_native_picker(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &PickerContent,
+    plan_content: Option<&str>,
+) {
+    // Border title stays short + stable so it never overflows on
+    // narrow screens; the actual question is rendered prominently
+    // inside the modal body.
+    let border_title = " claude is asking — Ctrl-] dismiss ";
 
-    // 1-row padding top + bottom inside the borders, blank row between
-    // body and options (if any body), and blank row above the hint.
-    let blank_between_body_and_options: usize = if picker.body.is_empty() { 0 } else { 1 };
-    let inner_h = picker.body.len() + blank_between_body_and_options + picker.options.len() + 2;
-    let inner_w = std::iter::once(title.chars().count())
+    // Modal size: cap at ~90 % of the available area so we keep a
+    // visual margin from the surrounding mewxi UI, and clamp width to
+    // 96 cols max so very wide screens don't get one giant overlay.
+    let max_w = (((area.width.saturating_sub(4)) as u32 * 9) / 10).min(96) as u16;
+    let max_h = (((area.height.saturating_sub(2)) as u32 * 9) / 10) as u16;
+
+    let longest_line = picker
+        .title
+        .iter()
+        .map(|s| s.chars().count())
         .chain(picker.body.iter().map(|s| s.chars().count()))
         .chain(picker.options.iter().map(|o| o.chars().count() + 4))
         .max()
-        .unwrap_or(40)
-        + 2;
+        .unwrap_or(40);
+    let w = ((longest_line as u16) + 6)
+        .clamp(40, max_w.max(40))
+        .min(area.width);
 
-    let h = (inner_h as u16 + 2).min(area.height);
-    let w = (inner_w as u16 + 2).min(area.width);
+    let mut content_lines: Vec<Line<'static>> = Vec::new();
+    if let Some(q) = picker.title.as_deref() {
+        content_lines.push(Line::from(Span::styled(
+            q.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+    for body in &picker.body {
+        content_lines.push(Line::from(Span::styled(
+            body.clone(),
+            Style::default().fg(Color::Gray),
+        )));
+    }
+    if let Some(plan) = plan_content {
+        if !content_lines.is_empty() {
+            content_lines.push(Line::raw(""));
+        }
+        content_lines.push(Line::from(Span::styled(
+            "── plan ──".to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for plan_line in plan.lines() {
+            content_lines.push(Line::from(Span::styled(
+                plan_line.to_string(),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+    }
+
+    let option_lines: Vec<Line<'static>> = picker
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            let selected = i == picker.selected;
+            let (cursor, style) = if selected {
+                (
+                    " ▶ ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("   ", Style::default().fg(Color::White))
+            };
+            Line::from(vec![
+                Span::styled(cursor, style),
+                Span::styled(opt.clone(), style),
+            ])
+        })
+        .collect();
+
+    // Estimate content height: each line wraps to ceil(len / inner_w).
+    let inner_w = w.saturating_sub(2).max(1) as usize;
+    let est_content_h: usize = content_lines
+        .iter()
+        .map(|line| {
+            let len = line
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+                .max(1);
+            len.div_ceil(inner_w).max(1)
+        })
+        .sum();
+    let options_h = option_lines.len() as u16;
+    let want_h = est_content_h as u16 + options_h + 2; // +2 borders
+    let min_h = options_h + 4;
+    let h = want_h.clamp(min_h, max_h.max(min_h)).min(area.height);
+
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let outer = Rect { x, y, width: w, height: h };
@@ -204,7 +328,7 @@ fn render_native_picker(frame: &mut Frame, area: Rect, picker: &PickerContent) {
                 .add_modifier(Modifier::BOLD),
         )
         .title(Span::styled(
-            title,
+            border_title,
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -212,35 +336,18 @@ fn render_native_picker(frame: &mut Frame, area: Rect, picker: &PickerContent) {
     let inner = block.inner(outer);
     frame.render_widget(block, outer);
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner_h);
-    lines.push(Line::raw("")); // top padding
-    for line in &picker.body {
-        lines.push(Line::from(Span::styled(
-            format!(" {}", line),
-            Style::default().fg(Color::Gray),
-        )));
-    }
-    if !picker.body.is_empty() {
-        lines.push(Line::raw(""));
-    }
-    for (i, opt) in picker.options.iter().enumerate() {
-        let selected = i == picker.selected;
-        let (cursor, style) = if selected {
-            (
-                " ▶ ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            ("   ", Style::default().fg(Color::White))
-        };
-        lines.push(Line::from(vec![
-            Span::styled(cursor, style),
-            Span::styled(opt.clone(), style),
-        ]));
-    }
-    frame.render_widget(Paragraph::new(lines), inner);
+    // Split inner: content (wrapping) on top, options fixed at bottom.
+    let content_h = inner.height.saturating_sub(options_h);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(content_h), Constraint::Length(options_h)])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(content_lines).wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+    frame.render_widget(Paragraph::new(option_lines), chunks[1]);
 }
 
 /// Structured view of a numbered picker pulled off the PTY screen.
@@ -672,6 +779,42 @@ mod tests {
         // render, not the native picker.
         let p = parse(b"\x1b[2JEdit foo.rs? [y/N]");
         assert!(parse_picker(p.screen()).is_none());
+    }
+
+    #[test]
+    fn plan_picker_detected_by_keywords() {
+        let p = PickerContent {
+            title: Some("Claude has written up a plan and is ready to execute. Would you like to proceed?".into()),
+            body: vec![],
+            options: vec!["Yes, auto-accept edits".into(), "No".into()],
+            selected: 0,
+        };
+        assert!(is_plan_picker(&p));
+    }
+
+    #[test]
+    fn non_plan_picker_not_detected() {
+        let p = PickerContent {
+            title: Some("Switch model?".into()),
+            body: vec![],
+            options: vec!["Yes".into(), "No".into()],
+            selected: 0,
+        };
+        assert!(!is_plan_picker(&p));
+    }
+
+    #[test]
+    fn reads_newest_plan_file() {
+        let tmp = std::env::temp_dir().join(format!("mewxi-test-plans-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("plans")).unwrap();
+        std::fs::write(tmp.join("plans/old.md"), "stale plan content").unwrap();
+        // Sleep to ensure mtime ordering.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(tmp.join("plans/new.md"), "# fresh plan\n\nstep one").unwrap();
+        let content = read_most_recent_plan_file(&tmp).expect("plan file read");
+        assert!(content.contains("fresh plan"), "got {content:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
