@@ -18,6 +18,7 @@
 //!    reloads to ≥500ms per account, and rescan live sessions.
 
 mod markdown;
+mod model_picker_modal;
 mod new_session_modal;
 mod view_account;
 mod view_all;
@@ -26,6 +27,7 @@ mod view_session;
 mod view_setup;
 mod widgets;
 
+use model_picker_modal::{ModelOutcome, ModelPickerModal};
 use new_session_modal::{ModalOutcome, NewSessionModal};
 
 use crate::accounts::{self, Account, AccountsView};
@@ -81,6 +83,9 @@ pub struct SessionRef {
     pub context_cap: Option<u64>,
     pub state: SessionState,
     pub activity: crate::live_session::Activity,
+    /// Latest permission mode from the transcript (`default`, `auto`,
+    /// `acceptEdits`, `plan`). `None` until a record exposes one.
+    pub permission_mode: Option<String>,
 }
 
 /// A `claude` child mewxi spawned whose session marker hasn't appeared
@@ -527,6 +532,11 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut new_session_modal: Option<NewSessionModal> = None;
     let mut next_spawn_id: u64 = 0;
 
+    // Model-picker modal state. Owns every keystroke while open. The
+    // chosen slug is sent to the driven session's PTY as `/model <slug>\r`
+    // when the user confirms. Opened with `m` in driven-session scope.
+    let mut model_picker: Option<ModelPickerModal> = None;
+
     // Two-press confirmation for `K`-to-kill. First press captures the
     // target; second press within KILL_CONFIRM_WINDOW executes. Killing
     // someone else's claude is destructive (loses any unsaved /compact
@@ -836,6 +846,9 @@ fn run_loop<B: ratatui::backend::Backend>(
             if let Some(modal) = new_session_modal.as_ref() {
                 modal.render(f, f.area());
             }
+            if let Some(modal) = model_picker.as_ref() {
+                modal.render(f, f.area());
+            }
         })?;
 
         // Capture the spawn inputs we'd need on `n` into owned values
@@ -942,6 +955,43 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
             if let Event::Key(k) = evt {
                 if k.kind == KeyEventKind::Press {
+                    // Model picker owns every keystroke while open.
+                    // Dispatched ahead of the new-session modal,
+                    // driver input, and globals — the two modals are
+                    // mutually exclusive but this ordering documents
+                    // the precedence.
+                    if let Some(modal) = model_picker.as_mut() {
+                        match modal.handle_key(k) {
+                            ModelOutcome::Stay => {}
+                            ModelOutcome::Cancel => {
+                                model_picker = None;
+                            }
+                            ModelOutcome::Confirm(slug) => {
+                                model_picker = None;
+                                if let Some(key) = pinned_session.clone() {
+                                    if let Some(pty) = drivers.get_mut(&key) {
+                                        let mut bytes = format!("/model {slug}").into_bytes();
+                                        bytes.push(b'\r');
+                                        match pty.send_keys(&bytes) {
+                                            Ok(_) => {
+                                                driver_status = Some((
+                                                    format!("sent /model {slug}"),
+                                                    Instant::now(),
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                driver_status = Some((
+                                                    format!("model send failed: {e}"),
+                                                    Instant::now(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     // New-session modal owns every keystroke while open.
                     // We dispatch first, before driver input or global
                     // shortcuts, so that the modal's own Esc/Tab/typing
@@ -1052,6 +1102,19 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     (KeyCode::Backspace, _) => {
                                         driver_input.pop();
                                     }
+                                    (KeyCode::BackTab, _) => {
+                                        // ANSI CSI Z — claude code's
+                                        // keybind for "cycle permission
+                                        // mode". Forward verbatim and
+                                        // let claude update its state;
+                                        // the next transcript scan
+                                        // picks the new mode up.
+                                        let _ = pty.send_keys(b"\x1b[Z");
+                                        driver_status = Some((
+                                            "cycled permission mode".into(),
+                                            Instant::now(),
+                                        ));
+                                    }
                                     (KeyCode::Char(c), _) => {
                                         driver_input.push(c);
                                     }
@@ -1119,8 +1182,34 @@ fn run_loop<B: ratatui::backend::Backend>(
                             pinned_session = None;
                         }
                         KeyCode::Char('m') | KeyCode::Char('M') => {
-                            mode = ViewMode::Mewxi;
-                            pinned_session = None;
+                            // In a driven session, `m` opens the model
+                            // picker. Elsewhere it stays the
+                            // shortcut to the Mewxi splash view.
+                            let driven = mode == ViewMode::SessionDetail
+                                && pinned_session
+                                    .as_ref()
+                                    .is_some_and(|k| drivers.contains_key(k));
+                            if driven {
+                                let current = pinned_session
+                                    .as_ref()
+                                    .and_then(|k| {
+                                        per_account
+                                            .iter()
+                                            .find(|p| p.account.name == k.0)
+                                            .and_then(|p| {
+                                                p.live_sessions
+                                                    .iter()
+                                                    .find(|s| s.session_id == k.1)
+                                                    .map(|s| s.model.clone())
+                                            })
+                                    });
+                                model_picker = Some(ModelPickerModal::new(
+                                    current.as_deref(),
+                                ));
+                            } else {
+                                mode = ViewMode::Mewxi;
+                                pinned_session = None;
+                            }
                         }
                         KeyCode::Char('R') if mode == ViewMode::Setup => {
                             setup_snapshot = setup::inspect(no_live).ok();
@@ -1176,7 +1265,28 @@ fn run_loop<B: ratatui::backend::Backend>(
                         },
                         KeyCode::BackTab => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
-                                if !sessions.is_empty() {
+                                // In a driven SessionDetail, Shift-Tab
+                                // forwards to the child PTY to cycle
+                                // claude's permission mode (matching
+                                // the focused-input behaviour). The
+                                // prev-session cycle is still
+                                // reachable in view 1 or in an
+                                // observe-only SessionDetail.
+                                let driven = mode == ViewMode::SessionDetail
+                                    && pinned_session
+                                        .as_ref()
+                                        .is_some_and(|k| drivers.contains_key(k));
+                                if driven {
+                                    if let Some(key) = pinned_session.clone() {
+                                        if let Some(pty) = drivers.get_mut(&key) {
+                                            let _ = pty.send_keys(b"\x1b[Z");
+                                            driver_status = Some((
+                                                "cycled permission mode".into(),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                    }
+                                } else if !sessions.is_empty() {
                                     selected_session = (selected_session + sessions.len() - 1)
                                         % sessions.len();
                                     last_session_select = Instant::now();
@@ -1883,6 +1993,7 @@ fn flatten_sessions(accounts: &[PerAccount]) -> Vec<SessionRef> {
                 context_cap: ls.context_cap,
                 state: ls.state,
                 activity: ls.activity.clone(),
+                permission_mode: ls.permission_mode.clone(),
             })
         })
         .collect();

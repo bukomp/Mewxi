@@ -266,6 +266,37 @@ fn tail_activity(path: &Path) -> Option<TailKind> {
     classify_tail(&tail, Utc::now())
 }
 
+/// Walk the tail of a transcript backwards looking for the most recent
+/// permission mode. Returns the raw transcript string (`default`,
+/// `auto`, `acceptEdits`, `plan`) or None if no record in the window
+/// exposes one.
+///
+/// Two record shapes carry the mode:
+///  - `{"type":"permission-mode","permissionMode":"…"}` — written at
+///    session start and on every Shift-Tab cycle. Authoritative.
+///  - Regular `user` records carry a top-level `"permissionMode"`
+///    field reflecting the mode active when the prompt was submitted.
+///    Fallback for sessions whose initial dedicated record is outside
+///    the tail window.
+fn tail_permission_mode(path: &Path) -> Option<String> {
+    let tail = read_tail(path, 256 * 1024)?;
+    for line in tail.lines().rev() {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if v.get("type").and_then(|x| x.as_str()) == Some("permission-mode") {
+            if let Some(m) = v.get("permissionMode").and_then(|x| x.as_str()) {
+                return Some(m.to_string());
+            }
+        }
+        if let Some(m) = v.get("permissionMode").and_then(|x| x.as_str()) {
+            return Some(m.to_string());
+        }
+    }
+    None
+}
+
 fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailKind> {
     let lines: Vec<&str> = tail.lines().collect();
 
@@ -384,6 +415,11 @@ pub struct LiveSession {
     /// was started with `--remote-control`. `Some` means mewxi can drive
     /// this session via the bridge API.
     pub bridge_session_id: Option<String>,
+    /// Latest permission mode from the transcript: `default`, `auto`,
+    /// `acceptEdits`, or `plan`. `None` means no record exposing one
+    /// has been seen yet. The raw transcript value — display layer maps
+    /// `default` → `manual`.
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -653,6 +689,12 @@ pub fn scan(
             None => last_activity,
         };
 
+        let permission_mode = if transcript_exists {
+            tail_permission_mode(&transcript)
+        } else {
+            None
+        };
+
         out.push(LiveSession {
             account_name: account.name.clone(),
             session_id: marker.session_id.clone(),
@@ -669,6 +711,7 @@ pub fn scan(
             state,
             activity,
             bridge_session_id: marker.bridge_session_id.clone(),
+            permission_mode,
         });
     }
 

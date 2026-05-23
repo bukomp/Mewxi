@@ -123,9 +123,11 @@ pub fn render(
         "↑/↓ Tab switch · PgUp/PgDn chat · j/k actions · J/K detail · K kill (2×) · Esc back";
     let footer_hint = match driver {
         Some(d) if d.focused => {
-            "Enter send  Esc unfocus  Ctrl-D end session  Ctrl-C cancel input"
+            "Enter send  Shift-Tab cycle mode  Esc unfocus  Ctrl-D end  Ctrl-C cancel"
         }
-        Some(_) => "i type prompt  Ctrl-D end session  K kill (2×)  1 all  PgUp/PgDn",
+        Some(_) => {
+            "i type  m model  Shift-Tab cycle mode  Ctrl-D end  K kill (2×)  1 all"
+        }
         None => default_hint,
     };
     if let Some(d) = driver {
@@ -306,6 +308,19 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &DriverPane<'_>) {
     );
 }
 
+/// Map a raw permission-mode string from the transcript to the badge
+/// label + colour shown in the header. `default` reads as "manual"
+/// because that's how Claude Code presents it to users.
+fn mode_badge(raw: &str) -> (&'static str, Color) {
+    match raw {
+        "default" => ("manual", Color::DarkGray),
+        "auto" => ("auto", Color::Yellow),
+        "acceptEdits" => ("accept edits", Color::Cyan),
+        "plan" => ("plan", Color::Magenta),
+        _ => ("?", Color::DarkGray),
+    }
+}
+
 fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
     let mut spans = vec![
         Span::styled(
@@ -319,6 +334,14 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
         Span::raw("  "),
         Span::styled(s.model.clone(), Style::default().fg(Color::Green)),
     ];
+    if let Some(mode_raw) = s.permission_mode.as_deref() {
+        let (label, color) = mode_badge(mode_raw);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("[mode: {label}]"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
     if s.state == SessionState::Idle {
         let mins = (Utc::now() - s.state_since).num_minutes().max(0);
         spans.push(Span::raw("  "));
