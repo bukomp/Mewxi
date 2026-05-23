@@ -89,6 +89,84 @@ pub struct SessionRef {
     pub permission_mode: Option<String>,
 }
 
+/// Optimistic per-driver state for things mewxi just commanded but
+/// hasn't seen reflected in the transcript yet. The badge would
+/// otherwise lag by however long claude takes to flush its next
+/// permission-mode / assistant record — for Shift-Tab cycles that can
+/// be never (no record gets written until the next user prompt), and
+/// for `/model X` it's at least one round-trip.
+///
+/// We snapshot the transcript's value at the moment we set the optimistic
+/// guess in `*_baseline`. Each scan compares the latest transcript value
+/// against that baseline: as soon as they differ, claude has caught up
+/// and we drop the optimistic guess so the transcript is authoritative
+/// again. If they match (transcript hasn't moved), we keep showing what
+/// the user just commanded.
+#[derive(Default, Clone)]
+struct DriverOptimistic {
+    mode: Option<String>,
+    mode_baseline: Option<String>,
+    model: Option<String>,
+    model_baseline: Option<String>,
+}
+
+/// Cycle order matches Claude Code's Shift-Tab handler. `auto` only
+/// appears when the account has opted into auto-mode-by-default via
+/// `skipAutoPermissionPrompt`; otherwise the cycle is three modes long.
+fn cycle_mode(current: &str, auto_available: bool) -> &'static str {
+    let cycle: &[&str] = if auto_available {
+        &["default", "auto", "acceptEdits", "plan"]
+    } else {
+        &["default", "acceptEdits", "plan"]
+    };
+    let idx = cycle.iter().position(|m| *m == current).unwrap_or(0);
+    cycle[(idx + 1) % cycle.len()]
+}
+
+/// Human label shown in the status banner — mirrors the rendered badge.
+fn mode_label(raw: &str) -> &'static str {
+    match raw {
+        "default" => "manual",
+        "auto" => "auto",
+        "acceptEdits" => "accept edits",
+        "plan" => "plan",
+        _ => "?",
+    }
+}
+
+/// Send Shift-Tab to the driven PTY and immediately cycle our local
+/// optimistic mode so the badge reacts in the same frame. Reconcile runs
+/// after the next transcript scan and snaps to claude's reality if our
+/// prediction was off.
+fn cycle_mode_via_pty(
+    pty: &mut PtySession,
+    key: &(String, String),
+    per_account: &[PerAccount],
+    optimistic: &mut HashMap<(String, String), DriverOptimistic>,
+    status: &mut Option<(String, Instant)>,
+) {
+    if pty.send_keys(b"\x1b[Z").is_err() {
+        *status = Some(("mode cycle FAILED — pty write error".into(), Instant::now()));
+        return;
+    }
+    let pa = per_account.iter().find(|p| p.account.name == key.0);
+    let auto_available = pa
+        .map(|p| p.account.default_permission_mode() == "auto")
+        .unwrap_or(false);
+    let ls = pa.and_then(|p| p.live_sessions.iter().find(|s| s.session_id == key.1));
+    let transcript_mode = ls.and_then(|s| s.permission_mode.clone());
+    let opt = optimistic.entry(key.clone()).or_default();
+    let current = opt
+        .mode
+        .clone()
+        .or_else(|| transcript_mode.clone())
+        .unwrap_or_else(|| "default".into());
+    let next = cycle_mode(&current, auto_available).to_string();
+    opt.mode_baseline = transcript_mode;
+    opt.mode = Some(next.clone());
+    *status = Some((format!("mode → {}", mode_label(&next)), Instant::now()));
+}
+
 /// A `claude` child mewxi spawned whose session marker hasn't appeared
 /// yet. Each frame we diff that account's live sessions against the
 /// snapshot taken at spawn time; the first new session_id becomes the
@@ -542,6 +620,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut driver_input: String = String::new();
     let mut driver_input_focused: bool = false;
     let mut driver_status: Option<(String, Instant)> = None;
+    let mut driver_optimistic: HashMap<(String, String), DriverOptimistic> = HashMap::new();
 
     // New-session modal state. Some(_) while it's open and intercepting
     // every keystroke; None otherwise. `next_spawn_id` produces the
@@ -579,7 +658,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     }
 
     loop {
-        let sessions = flatten_sessions(&per_account);
+        let sessions = flatten_sessions(&per_account, &driver_optimistic);
         if selected_session >= sessions.len() && !sessions.is_empty() {
             selected_session = sessions.len() - 1;
         }
@@ -707,6 +786,9 @@ fn run_loop<B: ratatui::backend::Backend>(
             // Otherwise (e.g. user navigated away), still auto-pin so
             // the freshly-spawned session is what they see when they
             // come back.
+            if let Some(opt) = driver_optimistic.remove(&ps.placeholder_key) {
+                driver_optimistic.insert(key.clone(), opt);
+            }
             if pinned_session.as_ref() == Some(&ps.placeholder_key) {
                 pinned_session = Some(key);
             } else {
@@ -739,6 +821,7 @@ fn run_loop<B: ratatui::backend::Backend>(
         // Bounce the user back to the all-sessions view if the
         // placeholder they were watching just expired.
         for k in &expired_placeholders {
+            driver_optimistic.remove(k);
             if pinned_session.as_ref() == Some(k) {
                 pinned_session = None;
                 mode = ViewMode::AllSessions;
@@ -756,6 +839,7 @@ fn run_loop<B: ratatui::backend::Backend>(
             .collect();
         for k in &exited {
             drivers.remove(k);
+            driver_optimistic.remove(k);
             driver_status = Some((
                 format!("driven session {} ended", short_sid(&k.1)),
                 Instant::now(),
@@ -927,6 +1011,28 @@ fn run_loop<B: ratatui::backend::Backend>(
             if force_tick {
                 last_full_tick = Instant::now();
             }
+            // Reconcile optimistic state: once the transcript moves past
+            // the baseline snapshotted at command time, claude has caught
+            // up and the optimistic guess is obsolete.
+            driver_optimistic.retain(|key, opt| {
+                let ls = per_account
+                    .iter()
+                    .find(|p| p.account.name == key.0)
+                    .and_then(|p| p.live_sessions.iter().find(|s| s.session_id == key.1));
+                if let Some(ls) = ls {
+                    if opt.mode.is_some()
+                        && opt.mode_baseline.as_deref() != ls.permission_mode.as_deref()
+                    {
+                        opt.mode = None;
+                        opt.mode_baseline = None;
+                    }
+                    if opt.model.is_some() && opt.model_baseline.as_ref() != Some(&ls.model) {
+                        opt.model = None;
+                        opt.model_baseline = None;
+                    }
+                }
+                opt.mode.is_some() || opt.model.is_some()
+            });
         }
 
         // Keyboard. Mewxi view animates the logo every frame, so it
@@ -973,26 +1079,6 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
             if let Event::Key(k) = evt {
                 if k.kind == KeyEventKind::Press {
-                    if std::env::var("MEWXI_KEY_LOG").is_ok() {
-                        use std::io::Write as _;
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open("/tmp/mewxi-keys.log")
-                        {
-                            let _ = writeln!(
-                                f,
-                                "[{:?}] code={:?} mods={:?} focused={} driven={}",
-                                std::time::SystemTime::now(),
-                                k.code,
-                                k.modifiers,
-                                driver_input_focused,
-                                pinned_session
-                                    .as_ref()
-                                    .is_some_and(|x| drivers.contains_key(x))
-                            );
-                        }
-                    }
                     // Model picker owns every keystroke while open.
                     // Dispatched ahead of the new-session modal,
                     // driver input, and globals — the two modals are
@@ -1012,8 +1098,23 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         bytes.push(b'\r');
                                         match pty.send_keys(&bytes) {
                                             Ok(_) => {
+                                                let baseline = per_account
+                                                    .iter()
+                                                    .find(|p| p.account.name == key.0)
+                                                    .and_then(|p| {
+                                                        p.live_sessions
+                                                            .iter()
+                                                            .find(|s| s.session_id == key.1)
+                                                            .map(|s| s.model.clone())
+                                                    })
+                                                    .unwrap_or_default();
+                                                let opt = driver_optimistic
+                                                    .entry(key.clone())
+                                                    .or_default();
+                                                opt.model = Some(slug.clone());
+                                                opt.model_baseline = Some(baseline);
                                                 driver_status = Some((
-                                                    format!("sent /model {slug}"),
+                                                    format!("model → {slug}"),
                                                     Instant::now(),
                                                 ));
                                             }
@@ -1151,18 +1252,22 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     // PTY. The next transcript scan
                                     // picks the new mode up.
                                     (KeyCode::BackTab, _) => {
-                                        let r = pty.send_keys(b"\x1b[Z");
-                                        driver_status = Some((
-                                            format!("sent \\x1b[Z to pty ({:?})", r.is_ok()),
-                                            Instant::now(),
-                                        ));
+                                        cycle_mode_via_pty(
+                                            pty,
+                                            &key,
+                                            &per_account,
+                                            &mut driver_optimistic,
+                                            &mut driver_status,
+                                        );
                                     }
                                     (KeyCode::Tab, m) if m.contains(KeyModifiers::SHIFT) => {
-                                        let r = pty.send_keys(b"\x1b[Z");
-                                        driver_status = Some((
-                                            format!("sent \\x1b[Z to pty ({:?})", r.is_ok()),
-                                            Instant::now(),
-                                        ));
+                                        cycle_mode_via_pty(
+                                            pty,
+                                            &key,
+                                            &per_account,
+                                            &mut driver_optimistic,
+                                            &mut driver_status,
+                                        );
                                     }
                                     (KeyCode::Char(c), _) => {
                                         driver_input.push(c);
@@ -1194,24 +1299,13 @@ fn run_loop<B: ratatui::backend::Backend>(
                         if driven {
                             if let Some(key) = pinned_session.clone() {
                                 if let Some(pty) = drivers.get_mut(&key) {
-                                    let r = pty.send_keys(b"\x1b[Z");
-                                    if std::env::var("MEWXI_KEY_LOG").is_ok() {
-                                        use std::io::Write as _;
-                                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                                            .create(true).append(true)
-                                            .open("/tmp/mewxi-keys.log")
-                                        {
-                                            let _ = writeln!(
-                                                f,
-                                                "  -> [unfocused] pty.send_keys(\\x1b[Z) = {:?}",
-                                                r
-                                            );
-                                        }
-                                    }
-                                    driver_status = Some((
-                                        format!("sent \\x1b[Z to pty ({:?})", r.is_ok()),
-                                        Instant::now(),
-                                    ));
+                                    cycle_mode_via_pty(
+                                        pty,
+                                        &key,
+                                        &per_account,
+                                        &mut driver_optimistic,
+                                        &mut driver_status,
+                                    );
                                     continue;
                                 }
                             }
@@ -2066,28 +2160,41 @@ fn apply_all_action(no_live: bool) -> String {
     }
 }
 
-fn flatten_sessions(accounts: &[PerAccount]) -> Vec<SessionRef> {
+fn flatten_sessions(
+    accounts: &[PerAccount],
+    optimistic: &HashMap<(String, String), DriverOptimistic>,
+) -> Vec<SessionRef> {
     let mut out: Vec<SessionRef> = accounts
         .iter()
         .flat_map(|pa| {
-            pa.live_sessions.iter().map(move |ls| SessionRef {
-                account_name: ls.account_name.clone(),
-                session_id: ls.session_id.clone(),
-                pid: ls.pid,
-                project: ls.project.clone(),
-                cwd: ls.cwd.clone(),
-                transcript_path: ls.transcript_path.clone(),
-                last_activity: ls.last_activity,
-                state_since: ls.state_since,
-                model: ls.model.clone(),
-                tokens: ls.session_tokens.total_tokens(),
-                cost_usd: ls.session_tokens.cost_usd,
-                totals: ls.session_tokens.clone(),
-                current_context: ls.current_context,
-                context_cap: ls.context_cap,
-                state: ls.state,
-                activity: ls.activity.clone(),
-                permission_mode: ls.permission_mode.clone(),
+            pa.live_sessions.iter().map(move |ls| {
+                let key = (ls.account_name.clone(), ls.session_id.clone());
+                let opt = optimistic.get(&key);
+                let model = opt
+                    .and_then(|o| o.model.clone())
+                    .unwrap_or_else(|| ls.model.clone());
+                let permission_mode = opt
+                    .and_then(|o| o.mode.clone())
+                    .or_else(|| ls.permission_mode.clone());
+                SessionRef {
+                    account_name: ls.account_name.clone(),
+                    session_id: ls.session_id.clone(),
+                    pid: ls.pid,
+                    project: ls.project.clone(),
+                    cwd: ls.cwd.clone(),
+                    transcript_path: ls.transcript_path.clone(),
+                    last_activity: ls.last_activity,
+                    state_since: ls.state_since,
+                    model,
+                    tokens: ls.session_tokens.total_tokens(),
+                    cost_usd: ls.session_tokens.cost_usd,
+                    totals: ls.session_tokens.clone(),
+                    current_context: ls.current_context,
+                    context_cap: ls.context_cap,
+                    state: ls.state,
+                    activity: ls.activity.clone(),
+                    permission_mode,
+                }
             })
         })
         .collect();
@@ -2108,4 +2215,30 @@ fn flatten_sessions(accounts: &[PerAccount]) -> Vec<SessionRef> {
             .then_with(|| b.last_activity.cmp(&a.last_activity))
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cycle_mode;
+
+    #[test]
+    fn cycle_mode_three_step_without_auto() {
+        assert_eq!(cycle_mode("default", false), "acceptEdits");
+        assert_eq!(cycle_mode("acceptEdits", false), "plan");
+        assert_eq!(cycle_mode("plan", false), "default");
+    }
+
+    #[test]
+    fn cycle_mode_four_step_with_auto() {
+        assert_eq!(cycle_mode("default", true), "auto");
+        assert_eq!(cycle_mode("auto", true), "acceptEdits");
+        assert_eq!(cycle_mode("acceptEdits", true), "plan");
+        assert_eq!(cycle_mode("plan", true), "default");
+    }
+
+    #[test]
+    fn cycle_mode_unknown_starts_from_default() {
+        assert_eq!(cycle_mode("garbage", false), "acceptEdits");
+        assert_eq!(cycle_mode("", true), "auto");
+    }
 }
