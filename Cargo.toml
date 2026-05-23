@@ -24,6 +24,7 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "time"] }
 toml = "0.8"
 ureq = { version = "2", features = ["json"] }
+vt100 = "0.16"
 walkdir = "2"
 
 [profile.release]

@@ -29,6 +29,9 @@ pub struct DriverPane<'a> {
     /// True while the input row has keyboard focus. Renders a bright
     /// cursor; otherwise the row is dim with an `i to type` hint.
     pub focused: bool,
+    /// True when the terminal overlay (claude's PTY screen) is up. The
+    /// footer hint switches to advertise passthrough + Ctrl-] dismiss.
+    pub overlay_active: bool,
 }
 
 /// Placeholder pane for a session mewxi spawned but whose JSONL
@@ -122,6 +125,9 @@ pub fn render(
     let default_hint =
         "↑/↓ Tab switch · PgUp/PgDn chat · j/k actions · J/K detail · K kill (2×) · Esc back";
     let footer_hint = match driver {
+        Some(d) if d.overlay_active => {
+            "claude is asking — keys pass through  ·  Ctrl-] dismiss"
+        }
         Some(d) if d.focused => {
             "Enter send  Shift-Tab cycle mode  Esc unfocus  Ctrl-D end  Ctrl-C cancel"
         }

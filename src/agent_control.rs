@@ -15,6 +15,7 @@
 //! Unix offers no native primitive for cross-process stdin injection.
 
 use anyhow::{anyhow, Result};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -23,6 +24,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::accounts::Account;
+
+pub const PTY_ROWS: u16 = 40;
+pub const PTY_COLS: u16 = 120;
 
 /// A running interactive `claude` child whose PTY mewxi owns.
 pub struct PtySession {
@@ -35,6 +39,10 @@ pub struct PtySession {
     /// yet?" checks and ANSI-stripped error reports. Bounded; the drain
     /// thread trims to [`PTY_RING_BYTES`].
     ring: Arc<Mutex<Vec<u8>>>,
+    /// vt100 parser fed in parallel with the ring. Maintains the
+    /// authoritative 40×120 screen grid so the TUI can render claude's
+    /// terminal overlays (prompts, pickers) when needed.
+    parser: Arc<Mutex<vt100::Parser>>,
 }
 
 const PTY_RING_BYTES: usize = 64 * 1024;
@@ -47,8 +55,8 @@ impl PtySession {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
-                rows: 40,
-                cols: 120,
+                rows: PTY_ROWS,
+                cols: PTY_COLS,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -86,14 +94,17 @@ impl PtySession {
             .map_err(|e| anyhow!("try_clone_reader: {e}"))?;
 
         let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::with_capacity(PTY_RING_BYTES)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(PTY_ROWS, PTY_COLS, 0)));
         {
             let ring = Arc::clone(&ring);
+            let parser = Arc::clone(&parser);
             thread::spawn(move || {
                 let mut buf = [0u8; 4096];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
+                            parser.lock().expect("parser poisoned").process(&buf[..n]);
                             let mut r = ring.lock().expect("ring poisoned");
                             r.extend_from_slice(&buf[..n]);
                             if r.len() > PTY_RING_BYTES {
@@ -107,7 +118,12 @@ impl PtySession {
             });
         }
 
-        Ok(Self { writer, child, ring })
+        Ok(Self {
+            writer,
+            child,
+            ring,
+            parser,
+        })
     }
 
     /// Write raw bytes to the PTY master. Used for keystrokes (a final
@@ -123,6 +139,25 @@ impl PtySession {
     /// Snapshot of the child's recent output (raw, ANSI-laden).
     pub fn ring_snapshot(&self) -> Vec<u8> {
         self.ring.lock().expect("ring poisoned").clone()
+    }
+
+    /// Snapshot of the vt100 screen state. Cloning is cheap (flat cell
+    /// array + a few counters) so callers can take a snapshot per render
+    /// tick without holding the parser lock across the render.
+    pub fn screen_snapshot(&self) -> vt100::Screen {
+        self.parser.lock().expect("parser poisoned").screen().clone()
+    }
+
+    /// Forward a crossterm KeyEvent to the PTY as the byte sequence
+    /// claude expects. Centralises key→bytes conversion so the overlay
+    /// passthrough and the existing driver-input path share one
+    /// implementation.
+    pub fn send_key_event(&mut self, key: KeyEvent) -> Result<()> {
+        let bytes = key_event_to_bytes(key);
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.send_keys(&bytes)
     }
 
     /// Has the child exited?
@@ -160,6 +195,116 @@ impl Drop for PtySession {
 fn is_default_claude_dir(dir: &std::path::Path) -> bool {
     let Some(home) = std::env::var_os("HOME") else { return false };
     PathBuf::from(home).join(".claude") == dir
+}
+
+/// Convert a crossterm `KeyEvent` to the byte sequence claude (and most
+/// xterm-like terminals) expect on stdin. Returns an empty Vec for keys
+/// that have no meaningful PTY representation (function keys we don't
+/// map, modifier-only events, etc.).
+pub fn key_event_to_bytes(key: KeyEvent) -> Vec<u8> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let mut out: Vec<u8> = Vec::with_capacity(8);
+    if alt {
+        out.push(0x1b);
+    }
+    match key.code {
+        KeyCode::Char(c) => {
+            if ctrl {
+                let upper = c.to_ascii_uppercase() as u32;
+                if (b'@' as u32..=b'_' as u32).contains(&upper) {
+                    out.push((upper - b'@' as u32) as u8);
+                } else if c == ' ' {
+                    out.push(0);
+                } else if c == '?' {
+                    out.push(0x7f);
+                } else {
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                }
+            } else {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+        KeyCode::Enter => out.push(b'\r'),
+        KeyCode::Backspace => out.push(0x7f),
+        KeyCode::Tab => out.push(b'\t'),
+        KeyCode::BackTab => out.extend_from_slice(b"\x1b[Z"),
+        KeyCode::Esc => out.push(0x1b),
+        KeyCode::Up => out.extend_from_slice(b"\x1b[A"),
+        KeyCode::Down => out.extend_from_slice(b"\x1b[B"),
+        KeyCode::Right => out.extend_from_slice(b"\x1b[C"),
+        KeyCode::Left => out.extend_from_slice(b"\x1b[D"),
+        KeyCode::Home => out.extend_from_slice(b"\x1b[H"),
+        KeyCode::End => out.extend_from_slice(b"\x1b[F"),
+        KeyCode::PageUp => out.extend_from_slice(b"\x1b[5~"),
+        KeyCode::PageDown => out.extend_from_slice(b"\x1b[6~"),
+        KeyCode::Delete => out.extend_from_slice(b"\x1b[3~"),
+        KeyCode::Insert => out.extend_from_slice(b"\x1b[2~"),
+        _ => {
+            if alt {
+                out.pop();
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn k(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    fn ck(code: KeyCode, m: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, m)
+    }
+
+    #[test]
+    fn plain_char_is_utf8() {
+        assert_eq!(key_event_to_bytes(k(KeyCode::Char('y'))), b"y".to_vec());
+    }
+
+    #[test]
+    fn enter_is_carriage_return() {
+        assert_eq!(key_event_to_bytes(k(KeyCode::Enter)), b"\r".to_vec());
+    }
+
+    #[test]
+    fn back_tab_is_csi_z() {
+        assert_eq!(
+            key_event_to_bytes(k(KeyCode::BackTab)),
+            b"\x1b[Z".to_vec()
+        );
+    }
+
+    #[test]
+    fn arrows_are_csi_letters() {
+        assert_eq!(key_event_to_bytes(k(KeyCode::Up)), b"\x1b[A".to_vec());
+        assert_eq!(key_event_to_bytes(k(KeyCode::Down)), b"\x1b[B".to_vec());
+        assert_eq!(key_event_to_bytes(k(KeyCode::Right)), b"\x1b[C".to_vec());
+        assert_eq!(key_event_to_bytes(k(KeyCode::Left)), b"\x1b[D".to_vec());
+    }
+
+    #[test]
+    fn ctrl_letter_is_control_byte() {
+        assert_eq!(
+            key_event_to_bytes(ck(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            vec![0x01]
+        );
+        // Ctrl-] = 0x1d, our reserved escape from terminal-overlay passthrough.
+        assert_eq!(
+            key_event_to_bytes(ck(KeyCode::Char(']'), KeyModifiers::CONTROL)),
+            vec![0x1d]
+        );
+    }
+
+    #[test]
+    fn backspace_is_del_byte() {
+        assert_eq!(key_event_to_bytes(k(KeyCode::Backspace)), vec![0x7f]);
+    }
 }
 
 /// Resolve the `claude` binary to spawn. Honours `MEWXI_CLAUDE_BIN`

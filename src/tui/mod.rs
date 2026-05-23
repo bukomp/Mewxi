@@ -20,6 +20,7 @@
 mod markdown;
 mod model_picker_modal;
 mod new_session_modal;
+mod terminal_overlay;
 mod view_account;
 mod view_all;
 mod view_mewxi;
@@ -650,6 +651,15 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut driver_status: Option<(String, Instant)> = None;
     let mut driver_optimistic: HashMap<(String, String), DriverOptimistic> = HashMap::new();
 
+    // Terminal overlay: when claude pops a TUI prompt (model-switch
+    // continue, multiselect, accept-edit y/N), surface its rendered PTY
+    // screen on top of the chat-log view and route keystrokes straight
+    // to the PTY. The hysteresis map gives Ctrl-] a 2-second window
+    // before re-detection can reopen the overlay, so a dismissed overlay
+    // doesn't immediately re-pop.
+    let mut overlay_open: HashSet<(String, String)> = HashSet::new();
+    let mut overlay_manual_close_until: HashMap<(String, String), Instant> = HashMap::new();
+
     // New-session modal state. Some(_) while it's open and intercepting
     // every keystroke; None otherwise. `next_spawn_id` produces the
     // synthetic session_id under which a pending spawn is pinned before
@@ -850,6 +860,8 @@ fn run_loop<B: ratatui::backend::Backend>(
         // placeholder they were watching just expired.
         for k in &expired_placeholders {
             driver_optimistic.remove(k);
+            overlay_open.remove(k);
+            overlay_manual_close_until.remove(k);
             if pinned_session.as_ref() == Some(k) {
                 pinned_session = None;
                 mode = ViewMode::AllSessions;
@@ -868,6 +880,8 @@ fn run_loop<B: ratatui::backend::Backend>(
         for k in &exited {
             drivers.remove(k);
             driver_optimistic.remove(k);
+            overlay_open.remove(k);
+            overlay_manual_close_until.remove(k);
             driver_status = Some((
                 format!("driven session {} ended", short_sid(&k.1)),
                 Instant::now(),
@@ -878,15 +892,58 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
         }
 
+        // Terminal-overlay detection. Sweep every driven session's vt100
+        // screen looking for prompt markers; auto-open the overlay when
+        // claude is asking for input, auto-close when the prompt clears.
+        // The hysteresis map keeps the overlay closed for 2 s after a
+        // manual Ctrl-] dismiss so the heuristic can't immediately
+        // re-pop on the same screen state.
+        for (key, pty) in drivers.iter() {
+            let in_cooldown = overlay_manual_close_until
+                .get(key)
+                .is_some_and(|t| Instant::now() < *t);
+            let awaiting = per_account
+                .iter()
+                .find(|p| p.account.name == key.0)
+                .and_then(|p| p.live_sessions.iter().find(|s| s.session_id == key.1))
+                .is_some_and(|s| matches!(s.activity, live_session::Activity::Awaiting));
+            let screen = pty.screen_snapshot();
+            let visible = terminal_overlay::prompt_visible(&screen, awaiting);
+            if visible && !in_cooldown {
+                overlay_open.insert(key.clone());
+            } else if !visible {
+                overlay_open.remove(key);
+            }
+        }
+        // Trim expired cooldown entries so the map doesn't grow without
+        // bound across the session lifetime.
+        let now_inst = Instant::now();
+        overlay_manual_close_until.retain(|_, t| now_inst < *t);
+
         // Compute the driver pane state to hand to view_session.
         let is_driven = mode == ViewMode::SessionDetail
             && pinned_session
                 .as_ref()
                 .is_some_and(|k| drivers.contains_key(k));
+        // Snapshot of the overlay screen for this frame's render, if the
+        // pinned session has an active overlay. Computed here so the
+        // render closure can borrow it without re-locking the parser.
+        let overlay_screen: Option<vt100::Screen> = if is_driven {
+            pinned_session
+                .as_ref()
+                .filter(|k| overlay_open.contains(*k))
+                .and_then(|k| drivers.get(k))
+                .map(|pty| pty.screen_snapshot())
+        } else {
+            None
+        };
         let driver_pane = if is_driven {
             Some(view_session::DriverPane {
                 input: driver_input.as_str(),
                 focused: driver_input_focused,
+                overlay_active: pinned_session
+                    .as_ref()
+                    .is_some_and(|k| overlay_open.contains(k)),
             })
         } else {
             // Unfocus if the pinned session is no longer driven.
@@ -971,6 +1028,23 @@ fn run_loop<B: ratatui::backend::Backend>(
                 driver_pane.as_ref(),
                 pending_pane.as_ref(),
             );
+            // Terminal overlay (claude's PTY screen) renders before the
+            // mewxi modals so an open modal still wins, but after the
+            // base view so it visibly covers the chat-log.
+            if let Some(screen) = overlay_screen.as_ref() {
+                let area = f.area();
+                // Centre the overlay with a small margin so it reads as
+                // an overlay rather than a full-screen takeover.
+                let pad_x = (area.width / 16).min(4);
+                let pad_y = (area.height / 12).min(2);
+                let overlay_area = ratatui::layout::Rect {
+                    x: area.x + pad_x,
+                    y: area.y + pad_y,
+                    width: area.width.saturating_sub(pad_x * 2),
+                    height: area.height.saturating_sub(pad_y * 2),
+                };
+                terminal_overlay::render(f, overlay_area, screen);
+            }
             // Modal overlays everything else when open. Render last so
             // it sits on top with Clear + its own border.
             if let Some(modal) = new_session_modal.as_ref() {
@@ -1107,6 +1181,36 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
             if let Event::Key(k) = evt {
                 if k.kind == KeyEventKind::Press {
+                    // Terminal overlay: when an overlay is open for the
+                    // currently-pinned driven session, every keystroke
+                    // goes verbatim to the PTY so the user can answer
+                    // claude's prompt naturally (y/n, arrows, Enter).
+                    // The only mewxi-reserved key is Ctrl-], which
+                    // dismisses the overlay and starts a 2 s cooldown
+                    // before re-detection can re-pop it.
+                    if mode == ViewMode::SessionDetail {
+                        if let Some(key) = pinned_session
+                            .as_ref()
+                            .filter(|k| overlay_open.contains(*k))
+                            .cloned()
+                        {
+                            let is_dismiss = matches!(k.code, KeyCode::Char(']'))
+                                && k.modifiers.contains(KeyModifiers::CONTROL);
+                            if is_dismiss {
+                                overlay_open.remove(&key);
+                                overlay_manual_close_until.insert(
+                                    key,
+                                    Instant::now() + Duration::from_secs(2),
+                                );
+                            } else if let Some(pty) = drivers.get_mut(&key) {
+                                if let Err(e) = pty.send_key_event(k) {
+                                    driver_status =
+                                        Some((format!("overlay send failed: {e}"), Instant::now()));
+                                }
+                            }
+                            continue;
+                        }
+                    }
                     // Model picker owns every keystroke while open.
                     // Dispatched ahead of the new-session modal,
                     // driver input, and globals — the two modals are
