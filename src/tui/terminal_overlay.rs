@@ -21,14 +21,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use vt100::Screen;
 
-/// Markers that strongly suggest claude has popped a TUI overlay and is
-/// waiting for input. Pattern-based and intentionally easy to extend —
-/// false positives are recoverable with Ctrl-]. Anything added here
-/// **must not** appear in claude's normal chat input box, otherwise the
-/// overlay triggers on every keystroke. Notably `❯` is *not* included:
-/// claude uses it as its input-prompt char, so it matches always.
-/// Picker UIs (where `❯` is the option cursor) need a stricter
-/// row-context check — to be added when a real picker case shows up.
+/// Substring markers that strongly suggest claude has popped a TUI
+/// overlay (y/N prompts, accept-edit, continue dialog). Pattern-based
+/// and intentionally easy to extend — false positives are recoverable
+/// with Ctrl-]. Anything added here **must not** appear in claude's
+/// normal chat input box, otherwise the overlay triggers on every
+/// keystroke. Picker UIs (numbered options with a cursor) are detected
+/// structurally by [`is_picker_option_row`] — never name a cursor char
+/// here, claude uses one of several and reusing the input-prompt
+/// glyph would re-introduce the every-keystroke false positive.
 const PROMPT_MARKERS: &[&str] = &[
     "[y/N]",
     "[Y/n]",
@@ -55,38 +56,37 @@ pub fn prompt_visible(screen: &Screen, awaiting_marker: bool) -> bool {
     find_marker_row(screen).is_some()
 }
 
-/// Cursor characters claude uses for the "selected" row in a picker UI.
-/// Excludes `>` and `)` which would false-positive on user command echoes
-/// like `> /model`.
-fn is_picker_cursor(c: char) -> bool {
-    matches!(c, '❯' | '›' | '▶' | '▷' | '⟩')
-}
-
-/// True when `row` looks like one entry in a numbered picker — either
-/// the selected row (`❯ 1. Option`) or an unselected sibling
-/// (`  2. Option`). Doesn't confirm pickerness alone; pair with a
-/// nearby-sibling check.
+/// True when `row` looks like one entry in a numbered picker. We
+/// deliberately match by structure (a digit-period anchor) rather than
+/// by cursor character, so we don't conflate the input box's prompt
+/// glyph with picker cursors. Two shapes count:
+///   - unselected: `   1. Option`           (whitespace, then digit + `.`)
+///   - selected:   `<cursor> 1. Option`     (one non-digit char + space + digit + `.`)
+///
+/// Pair with a nearby-sibling check before treating any single row as
+/// a picker — a stray "1. foo" in chat shouldn't trigger.
 fn is_picker_option_row(screen: &Screen, row: u16, cols: u16) -> bool {
     let line = row_text(screen, row, cols);
     let trimmed = line.trim_start();
     let mut chars = trimmed.chars();
-    let first = match chars.next() {
-        Some(c) => c,
-        None => return false,
+    let Some(first) = chars.next() else {
+        return false;
     };
-    let (digit, sep) = if is_picker_cursor(first) {
+    let sep = if first.is_ascii_digit() {
+        chars.next()
+    } else {
         if chars.next() != Some(' ') {
             return false;
         }
-        let d = chars.next();
-        let s = chars.next();
-        (d, s)
-    } else if first.is_ascii_digit() {
-        (Some(first), chars.next())
-    } else {
-        return false;
+        let Some(d) = chars.next() else {
+            return false;
+        };
+        if !d.is_ascii_digit() {
+            return false;
+        }
+        chars.next()
     };
-    digit.is_some_and(|c| c.is_ascii_digit()) && matches!(sep, Some('.') | Some(')'))
+    matches!(sep, Some('.') | Some(')'))
 }
 
 /// Find the bottom-most row that looks like a prompt or picker. Used by
