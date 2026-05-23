@@ -39,7 +39,8 @@ use crate::stats::{self, Aggregate, UsageTotals};
 use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -161,12 +162,29 @@ pub fn run(no_live: bool) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Opt into the kitty keyboard protocol so crossterm parses
+    // Shift+Tab (and other modified keys) correctly on terminals like
+    // ghostty / kitty / foot that have it always-on. Without this,
+    // such terminals deliver Shift+Tab as the raw byte sequence
+    // `\x1b[9;2u` and crossterm reports it as a string of unrelated
+    // keypresses, so our Shift-Tab handler never fires. Terminals
+    // that don't support the protocol silently ignore the push.
+    // DISAMBIGUATE_ESCAPE_CODES is the minimum flag needed for
+    // unambiguous BackTab; the matching Pop on exit restores the
+    // terminal's prior state.
+    let _ = execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        )
+    );
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let _ = show_splash(&mut terminal, SPLASH_DURATION);
     let result = run_loop(&mut terminal, no_live);
 
+    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -955,6 +973,26 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
             if let Event::Key(k) = evt {
                 if k.kind == KeyEventKind::Press {
+                    if std::env::var("MEWXI_KEY_LOG").is_ok() {
+                        use std::io::Write as _;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open("/tmp/mewxi-keys.log")
+                        {
+                            let _ = writeln!(
+                                f,
+                                "[{:?}] code={:?} mods={:?} focused={} driven={}",
+                                std::time::SystemTime::now(),
+                                k.code,
+                                k.modifiers,
+                                driver_input_focused,
+                                pinned_session
+                                    .as_ref()
+                                    .is_some_and(|x| drivers.contains_key(x))
+                            );
+                        }
+                    }
                     // Model picker owns every keystroke while open.
                     // Dispatched ahead of the new-session modal,
                     // driver input, and globals — the two modals are
@@ -1113,16 +1151,16 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     // PTY. The next transcript scan
                                     // picks the new mode up.
                                     (KeyCode::BackTab, _) => {
-                                        let _ = pty.send_keys(b"\x1b[Z");
+                                        let r = pty.send_keys(b"\x1b[Z");
                                         driver_status = Some((
-                                            "cycled permission mode".into(),
+                                            format!("sent \\x1b[Z to pty ({:?})", r.is_ok()),
                                             Instant::now(),
                                         ));
                                     }
                                     (KeyCode::Tab, m) if m.contains(KeyModifiers::SHIFT) => {
-                                        let _ = pty.send_keys(b"\x1b[Z");
+                                        let r = pty.send_keys(b"\x1b[Z");
                                         driver_status = Some((
-                                            "cycled permission mode".into(),
+                                            format!("sent \\x1b[Z to pty ({:?})", r.is_ok()),
                                             Instant::now(),
                                         ));
                                     }
@@ -1156,9 +1194,22 @@ fn run_loop<B: ratatui::backend::Backend>(
                         if driven {
                             if let Some(key) = pinned_session.clone() {
                                 if let Some(pty) = drivers.get_mut(&key) {
-                                    let _ = pty.send_keys(b"\x1b[Z");
+                                    let r = pty.send_keys(b"\x1b[Z");
+                                    if std::env::var("MEWXI_KEY_LOG").is_ok() {
+                                        use std::io::Write as _;
+                                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                                            .create(true).append(true)
+                                            .open("/tmp/mewxi-keys.log")
+                                        {
+                                            let _ = writeln!(
+                                                f,
+                                                "  -> [unfocused] pty.send_keys(\\x1b[Z) = {:?}",
+                                                r
+                                            );
+                                        }
+                                    }
                                     driver_status = Some((
-                                        "cycled permission mode".into(),
+                                        format!("sent \\x1b[Z to pty ({:?})", r.is_ok()),
                                         Instant::now(),
                                     ));
                                     continue;
