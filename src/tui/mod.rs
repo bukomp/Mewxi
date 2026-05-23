@@ -111,8 +111,14 @@ struct DriverOptimistic {
 }
 
 /// Cycle order matches Claude Code's Shift-Tab handler. `auto` only
-/// appears when the account has opted into auto-mode-by-default via
-/// `skipAutoPermissionPrompt`; otherwise the cycle is three modes long.
+/// appears when both:
+///   * the account has opted into auto-mode-by-default via
+///     `skipAutoPermissionPrompt`, and
+///   * the current model is one claude itself allows auto on (Opus and
+///     Sonnet; Haiku is explicitly rejected by claude with "auto mode
+///     unavailable for this model").
+/// When either gate fails the cycle is three modes long, matching what
+/// claude's own UI would land on.
 fn cycle_mode(current: &str, auto_available: bool) -> &'static str {
     let cycle: &[&str] = if auto_available {
         &["default", "auto", "acceptEdits", "plan"]
@@ -121,6 +127,22 @@ fn cycle_mode(current: &str, auto_available: bool) -> &'static str {
     };
     let idx = cycle.iter().position(|m| *m == current).unwrap_or(0);
     cycle[(idx + 1) % cycle.len()]
+}
+
+/// True when claude would accept auto mode on this model. Mirrors
+/// claude's own gate ("auto mode unavailable for this model"): Haiku is
+/// out; Opus and Sonnet are in. An empty / `default` slug is treated as
+/// "probably supported" so the cycle includes auto on a freshly-spawned
+/// session before the first assistant record lands the real model name.
+fn model_supports_auto(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    if m.is_empty() || m == "default" {
+        return true;
+    }
+    if m.contains("haiku") {
+        return false;
+    }
+    m.contains("opus") || m.contains("sonnet")
 }
 
 /// Human label shown in the status banner — mirrors the rendered badge.
@@ -150,12 +172,18 @@ fn cycle_mode_via_pty(
         return;
     }
     let pa = per_account.iter().find(|p| p.account.name == key.0);
-    let auto_available = pa
+    let account_opt_in = pa
         .map(|p| p.account.default_permission_mode() == "auto")
         .unwrap_or(false);
     let ls = pa.and_then(|p| p.live_sessions.iter().find(|s| s.session_id == key.1));
     let transcript_mode = ls.and_then(|s| s.permission_mode.clone());
     let opt = optimistic.entry(key.clone()).or_default();
+    let effective_model = opt
+        .model
+        .clone()
+        .or_else(|| ls.map(|s| s.model.clone()))
+        .unwrap_or_default();
+    let auto_available = account_opt_in && model_supports_auto(&effective_model);
     let current = opt
         .mode
         .clone()
@@ -2219,7 +2247,7 @@ fn flatten_sessions(
 
 #[cfg(test)]
 mod tests {
-    use super::cycle_mode;
+    use super::{cycle_mode, model_supports_auto};
 
     #[test]
     fn cycle_mode_three_step_without_auto() {
@@ -2240,5 +2268,28 @@ mod tests {
     fn cycle_mode_unknown_starts_from_default() {
         assert_eq!(cycle_mode("garbage", false), "acceptEdits");
         assert_eq!(cycle_mode("", true), "auto");
+    }
+
+    #[test]
+    fn auto_supported_on_opus_and_sonnet() {
+        assert!(model_supports_auto("opus"));
+        assert!(model_supports_auto("sonnet"));
+        assert!(model_supports_auto("claude-opus-4-7"));
+        assert!(model_supports_auto("claude-sonnet-4-6"));
+        assert!(model_supports_auto("Claude-Opus-4-7"));
+    }
+
+    #[test]
+    fn auto_blocked_on_haiku() {
+        assert!(!model_supports_auto("haiku"));
+        assert!(!model_supports_auto("claude-haiku-4-5"));
+        assert!(!model_supports_auto("CLAUDE-HAIKU-4-5-20251001"));
+    }
+
+    #[test]
+    fn auto_assumed_on_unknown_or_default() {
+        assert!(model_supports_auto(""));
+        assert!(model_supports_auto("default"));
+        assert!(model_supports_auto("  default  "));
     }
 }
