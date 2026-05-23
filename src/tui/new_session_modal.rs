@@ -9,12 +9,16 @@
 //!
 //! Layout:
 //!  - Left pane: account list.
-//!  - Right pane (vertical stack): editable path bar, fuzzy filter
-//!    input, then the filtered list of subdirectories of the path bar.
+//!  - Right pane: combined editable path bar + filtered list of
+//!    subdirectories. The path bar doubles as the fuzzy filter — text
+//!    up to the last `/` is the directory we list, and the tail after
+//!    the last `/` is the live fuzzy filter applied to that directory's
+//!    entries. Pressing Enter on the path bar drills into the
+//!    highlighted entry (or spawns when there is no tail to complete).
 //!
-//! Focus rotates Accounts → PathBar → Filter → EntryList (Tab forward,
-//! Shift-Tab backward). Confirm with `.` from the EntryList focus to
-//! spawn under the highlighted account in the path-bar directory.
+//! Focus rotates Accounts → PathBar → EntryList (Tab forward,
+//! Shift-Tab backward). `.` from any focus confirms and spawns under
+//! the currently-resolved directory.
 
 use crate::accounts::Account;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -29,18 +33,20 @@ use std::path::{Path, PathBuf};
 enum ModalFocus {
     Accounts,
     PathBar,
-    Filter,
     EntryList,
 }
 
 pub struct NewSessionModal {
     accounts: Vec<Account>,
     account_idx: usize,
-    /// Editable text mirror of the directory the entries list is
-    /// reading from. Diverges from `browse_cwd` while the user types
-    /// in the path bar; an Enter in the path bar reconciles them.
+    /// Editable text. The leading part up to the last `/` is the
+    /// directory whose contents `entries` was built from; the trailing
+    /// fragment after the last `/` is the live fuzzy filter applied
+    /// over `entries`.
     path_input: String,
     /// Resolved directory whose contents `entries` was built from.
+    /// Stays in sync with [`Self::derived_dir`]; updated by
+    /// [`Self::refresh_entries_if_dir_changed`].
     browse_cwd: PathBuf,
     /// Inline error from a failed path-bar resolution or read_dir; one
     /// line, cleared on the next successful navigation.
@@ -48,9 +54,8 @@ pub struct NewSessionModal {
     /// Directory entries of `browse_cwd` (just `..` plus subdirs).
     /// Dotfiles included.
     entries: Vec<PathBuf>,
-    /// Fuzzy filter applied over `entries`. Index into the *filtered*
-    /// list, not `entries`.
-    filter: String,
+    /// Index into the *filtered* entry list (the live fuzzy match over
+    /// `entries`).
     entry_idx: usize,
     focus: ModalFocus,
 }
@@ -76,7 +81,13 @@ impl NewSessionModal {
                 (fallback, entries, Some(format!("{}: {}", initial_dir.display(), e)))
             }
         };
-        let path_input = browse_cwd.to_string_lossy().into_owned();
+        // Trailing slash on the path input keeps the dir/tail split
+        // well-defined: the tail is empty (no filter), and any chars
+        // the user types next become the filter for `browse_cwd`.
+        let mut path_input = browse_cwd.to_string_lossy().into_owned();
+        if !path_input.ends_with('/') {
+            path_input.push('/');
+        }
         Self {
             accounts,
             account_idx,
@@ -84,25 +95,44 @@ impl NewSessionModal {
             browse_cwd,
             error,
             entries,
-            filter: String::new(),
             entry_idx: 0,
             // Start on the path bar — the cursor is visibly there so
-            // the user immediately knows where typing goes. From here
-            // Tab → Filter → EntryList → Accounts → PathBar.
+            // the user immediately knows where typing goes.
             focus: ModalFocus::PathBar,
         }
     }
 
-    /// Indices of `entries` that match the fuzzy `filter`. When `filter`
-    /// is empty, every entry passes through.
+    /// Directory portion of `path_input` — everything up to and
+    /// including the last `/`. `~` is expanded.
+    fn derived_dir(&self) -> PathBuf {
+        let cut = self.path_input.rfind('/').map(|i| i + 1).unwrap_or(0);
+        expand_tilde(&self.path_input[..cut])
+    }
+
+    /// Fragment after the last `/` of `path_input`. This is the live
+    /// fuzzy filter applied to the entries of [`Self::derived_dir`].
+    fn derived_filter(&self) -> &str {
+        let cut = self.path_input.rfind('/').map(|i| i + 1).unwrap_or(0);
+        &self.path_input[cut..]
+    }
+
+    /// Indices of `entries` that match the live fuzzy filter
+    /// ([`Self::derived_filter`]). Empty filter passes every entry.
     fn filtered_indices(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
+        let filter = self.derived_filter();
+        if filter.is_empty() {
             return (0..self.entries.len()).collect();
         }
-        let q: Vec<char> = self.filter.chars().flat_map(|c| c.to_lowercase()).collect();
+        let q: Vec<char> = filter.chars().flat_map(|c| c.to_lowercase()).collect();
         let mut scored: Vec<(usize, usize)> = Vec::new();
         for (i, e) in self.entries.iter().enumerate() {
             let name = entry_label(e);
+            // `..` should never match a typed filter — listing the
+            // parent dir while the user is narrowing on a name is
+            // surprising. Skip it whenever the filter is non-empty.
+            if name == ".." {
+                continue;
+            }
             if let Some(score) = fuzzy_score(&q, &name) {
                 scored.push((i, score));
             }
@@ -111,38 +141,81 @@ impl NewSessionModal {
         scored.into_iter().map(|(i, _)| i).collect()
     }
 
-    fn reload_entries(&mut self) {
-        match read_dirs(&self.browse_cwd) {
+    /// If the dir portion of `path_input` differs from `browse_cwd`,
+    /// re-read entries and reset the highlight. Called after every
+    /// path_input mutation so the entry list always reflects the
+    /// currently-typed prefix.
+    fn refresh_entries_if_dir_changed(&mut self) {
+        let new_dir = self.derived_dir();
+        if new_dir == self.browse_cwd {
+            // Same dir, only the filter changed — keep entries, just
+            // reset highlight so the top filtered match is selected.
+            self.entry_idx = 0;
+            return;
+        }
+        match read_dirs(&new_dir) {
             Ok(es) => {
+                self.browse_cwd = new_dir;
                 self.entries = es;
                 self.error = None;
             }
             Err(e) => {
-                self.entries = Vec::new();
-                self.error = Some(format!("read {}: {}", self.browse_cwd.display(), e));
+                // Keep the old browse_cwd/entries around so the list
+                // doesn't blank out mid-typing on a not-yet-valid
+                // prefix. Surface the failure only when the user
+                // actively tries to navigate (Enter).
+                self.error = Some(format!("read {}: {}", new_dir.display(), e));
             }
         }
-        self.filter.clear();
         self.entry_idx = 0;
     }
 
-    fn navigate_to(&mut self, path: PathBuf) {
-        self.browse_cwd = path;
-        self.path_input = self.browse_cwd.to_string_lossy().into_owned();
-        self.reload_entries();
+    /// Replace the path_input with `dir`'s display string + trailing
+    /// `/`, then refresh entries.
+    fn navigate_to(&mut self, dir: PathBuf) {
+        let canonical = dir.canonicalize().unwrap_or(dir);
+        let mut s = canonical.to_string_lossy().into_owned();
+        if !s.ends_with('/') {
+            s.push('/');
+        }
+        self.path_input = s;
+        self.refresh_entries_if_dir_changed();
+    }
+
+    /// Apply the top filtered entry to the path: drill into it. Sets
+    /// path_input to `<dir>/<entry_name>/` and refreshes. No-op when
+    /// the filtered list is empty.
+    fn complete_to_highlighted(&mut self) -> bool {
+        let filtered = self.filtered_indices();
+        let Some(&real) = filtered.get(self.entry_idx) else {
+            return false;
+        };
+        let Some(target) = self.entries.get(real).cloned() else {
+            return false;
+        };
+        self.navigate_to(target);
+        true
     }
 
     fn cycle_focus(&mut self, forward: bool) {
         self.focus = match (self.focus, forward) {
             (ModalFocus::Accounts, true) => ModalFocus::PathBar,
-            (ModalFocus::PathBar, true) => ModalFocus::Filter,
-            (ModalFocus::Filter, true) => ModalFocus::EntryList,
+            (ModalFocus::PathBar, true) => ModalFocus::EntryList,
             (ModalFocus::EntryList, true) => ModalFocus::Accounts,
             (ModalFocus::Accounts, false) => ModalFocus::EntryList,
             (ModalFocus::PathBar, false) => ModalFocus::Accounts,
-            (ModalFocus::Filter, false) => ModalFocus::PathBar,
-            (ModalFocus::EntryList, false) => ModalFocus::Filter,
+            (ModalFocus::EntryList, false) => ModalFocus::PathBar,
         };
+    }
+
+    fn confirm_spawn(&self) -> ModalOutcome {
+        if let Some(account) = self.accounts.get(self.account_idx).cloned() {
+            return ModalOutcome::Confirm {
+                account,
+                cwd: self.browse_cwd.clone(),
+            };
+        }
+        ModalOutcome::Stay
     }
 
     pub fn handle_key(&mut self, k: KeyEvent) -> ModalOutcome {
@@ -173,25 +246,56 @@ impl NewSessionModal {
                     }
                 }
                 KeyCode::Enter => {
-                    self.focus = ModalFocus::EntryList;
+                    self.focus = ModalFocus::PathBar;
                 }
+                KeyCode::Char('.') => return self.confirm_spawn(),
                 _ => {}
             },
             ModalFocus::PathBar => match (k.code, k.modifiers) {
                 (KeyCode::Enter, _) => {
-                    let typed = expand_tilde(&self.path_input);
-                    if typed.is_dir() {
-                        self.navigate_to(typed);
-                        self.focus = ModalFocus::EntryList;
-                    } else {
-                        self.error = Some(format!("not a directory: {}", typed.display()));
+                    // Two modes:
+                    //  - Filter tail is non-empty → complete to the
+                    //    highlighted entry (typical: typed `Wo`, Enter
+                    //    completes to `Work/`).
+                    //  - Filter tail is empty → user has the bare dir
+                    //    selected; treat Enter as confirm/spawn so the
+                    //    keypress is never wasted.
+                    let filter_empty = self.derived_filter().is_empty();
+                    if filter_empty {
+                        // Verify the dir actually exists before
+                        // spawning under a typo.
+                        let typed = expand_tilde(self.path_input.trim_end_matches('/'));
+                        if typed.is_dir() || self.browse_cwd.is_dir() {
+                            return self.confirm_spawn();
+                        }
+                        self.error =
+                            Some(format!("not a directory: {}", typed.display()));
+                    } else if !self.complete_to_highlighted() {
+                        self.error = Some(format!(
+                            "no match for `{}` in {}",
+                            self.derived_filter(),
+                            self.browse_cwd.display()
+                        ));
+                    }
+                }
+                (KeyCode::Down, _) => {
+                    let filtered = self.filtered_indices();
+                    if self.entry_idx + 1 < filtered.len() {
+                        self.entry_idx += 1;
+                    }
+                }
+                (KeyCode::Up, _) => {
+                    if self.entry_idx > 0 {
+                        self.entry_idx -= 1;
                     }
                 }
                 (KeyCode::Backspace, _) => {
                     self.path_input.pop();
+                    self.refresh_entries_if_dir_changed();
                 }
                 (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
                     self.path_input.clear();
+                    self.refresh_entries_if_dir_changed();
                 }
                 (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
                     // Delete trailing path segment, like shell readline.
@@ -204,33 +308,17 @@ impl NewSessionModal {
                         }
                         self.path_input.pop();
                     }
+                    self.refresh_entries_if_dir_changed();
+                }
+                (KeyCode::Char('.'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    return self.confirm_spawn();
                 }
                 (KeyCode::Char(c), m)
                     if !m.contains(KeyModifiers::CONTROL)
                         && !m.contains(KeyModifiers::ALT) =>
                 {
                     self.path_input.push(c);
-                }
-                _ => {}
-            },
-            ModalFocus::Filter => match (k.code, k.modifiers) {
-                (KeyCode::Backspace, _) => {
-                    self.filter.pop();
-                    self.entry_idx = 0;
-                }
-                (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    self.filter.clear();
-                    self.entry_idx = 0;
-                }
-                (KeyCode::Char(c), m)
-                    if !m.contains(KeyModifiers::CONTROL)
-                        && !m.contains(KeyModifiers::ALT) =>
-                {
-                    self.filter.push(c);
-                    self.entry_idx = 0;
-                }
-                (KeyCode::Enter, _) => {
-                    self.focus = ModalFocus::EntryList;
+                    self.refresh_entries_if_dir_changed();
                 }
                 _ => {}
             },
@@ -248,20 +336,9 @@ impl NewSessionModal {
                         }
                     }
                     KeyCode::Enter => {
-                        if let Some(&real) = filtered.get(self.entry_idx) {
-                            if let Some(target) = self.entries.get(real).cloned() {
-                                self.navigate_to(target);
-                            }
-                        }
+                        self.complete_to_highlighted();
                     }
-                    KeyCode::Char('.') => {
-                        if let Some(account) = self.accounts.get(self.account_idx).cloned() {
-                            return ModalOutcome::Confirm {
-                                account,
-                                cwd: self.browse_cwd.clone(),
-                            };
-                        }
-                    }
+                    KeyCode::Char('.') => return self.confirm_spawn(),
                     _ => {}
                 }
             }
@@ -328,9 +405,7 @@ impl NewSessionModal {
             .borders(Borders::ALL)
             .title(" Folder ")
             .border_style(focus_border(
-                self.focus == ModalFocus::PathBar
-                    || self.focus == ModalFocus::Filter
-                    || self.focus == ModalFocus::EntryList,
+                self.focus == ModalFocus::PathBar || self.focus == ModalFocus::EntryList,
             ));
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -339,9 +414,7 @@ impl NewSessionModal {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // path label
-                Constraint::Length(1), // path input
-                Constraint::Length(1), // filter label
-                Constraint::Length(1), // filter input
+                Constraint::Length(1), // path input (doubles as filter)
                 Constraint::Length(1), // error (or blank)
                 Constraint::Min(2),    // entries
             ])
@@ -349,33 +422,19 @@ impl NewSessionModal {
 
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "path:",
+                "path / filter:",
                 Style::default().fg(Color::DarkGray),
             ))),
             rows[0],
         );
         f.render_widget(
-            Paragraph::new(Line::from(input_spans(
-                &self.path_input,
+            Paragraph::new(Line::from(input_spans_split(
+                self.dir_part(),
+                self.derived_filter(),
                 self.focus == ModalFocus::PathBar,
                 rows[1].width as usize,
             ))),
             rows[1],
-        );
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "filter:",
-                Style::default().fg(Color::DarkGray),
-            ))),
-            rows[2],
-        );
-        f.render_widget(
-            Paragraph::new(Line::from(input_spans(
-                &self.filter,
-                self.focus == ModalFocus::Filter,
-                rows[3].width as usize,
-            ))),
-            rows[3],
         );
 
         if let Some(err) = &self.error {
@@ -384,14 +443,15 @@ impl NewSessionModal {
                     err.clone(),
                     Style::default().fg(Color::Red),
                 ))),
-                rows[4],
+                rows[2],
             );
         }
 
         let filtered = self.filtered_indices();
-        let focused_list = self.focus == ModalFocus::EntryList;
-        let visible_rows = rows[5].height as usize;
-        let offset = if focused_list {
+        let list_focused =
+            self.focus == ModalFocus::EntryList || self.focus == ModalFocus::PathBar;
+        let visible_rows = rows[3].height as usize;
+        let offset = if list_focused {
             self.entry_idx.saturating_sub(visible_rows.saturating_sub(1))
         } else {
             0
@@ -403,7 +463,7 @@ impl NewSessionModal {
             .enumerate()
             .map(|(visible_i, &real)| {
                 let abs_i = visible_i + offset;
-                let selected = focused_list && abs_i == self.entry_idx;
+                let selected = list_focused && abs_i == self.entry_idx;
                 let p = &self.entries[real];
                 let label = entry_label(p);
                 let is_parent = label == "..";
@@ -422,7 +482,15 @@ impl NewSessionModal {
                 ]))
             })
             .collect();
-        f.render_widget(List::new(items), rows[5]);
+        f.render_widget(List::new(items), rows[3]);
+    }
+
+    /// String slice of the dir portion of `path_input` (everything up
+    /// to and including the last `/`). Used by the renderer to colour
+    /// dir and filter halves differently.
+    fn dir_part(&self) -> &str {
+        let cut = self.path_input.rfind('/').map(|i| i + 1).unwrap_or(0);
+        &self.path_input[..cut]
     }
 }
 
@@ -434,32 +502,46 @@ fn focus_border(active: bool) -> Style {
     }
 }
 
-fn input_spans(text: &str, focused: bool, max_width: usize) -> Vec<Span<'static>> {
-    let body_color = if focused { Color::White } else { Color::Gray };
-    // Reserve one cell for the cursor block so the caret stays inside
-    // the row even when the text exactly fills the available width.
+/// Render the combined path/filter input as two colour bands:
+/// the dim dir portion followed by the bright tail (the live filter).
+/// Long inputs are tail-trimmed so the cursor stays on screen.
+fn input_spans_split(
+    dir: &str,
+    filter: &str,
+    focused: bool,
+    max_width: usize,
+) -> Vec<Span<'static>> {
     let budget = if focused {
         max_width.saturating_sub(1)
     } else {
         max_width
     };
-    // Show the *tail* of the string so freshly-typed characters
-    // remain visible. Without this, long paths overflow off the right
-    // edge and the user's keystrokes appear to do nothing.
-    let chars: Vec<char> = text.chars().collect();
-    let visible: String = if chars.len() <= budget {
-        chars.iter().collect()
+    let combined: String = format!("{dir}{filter}");
+    let chars: Vec<char> = combined.chars().collect();
+    let (start, visible_dir_len) = if chars.len() <= budget {
+        (0, dir.chars().count())
     } else {
-        chars
-            .iter()
-            .skip(chars.len() - budget)
-            .copied()
-            .collect()
+        // Trim from the head so the typed tail stays visible. Recompute
+        // how much of the dir portion survives the trim.
+        let start = chars.len() - budget;
+        let dir_chars = dir.chars().count();
+        let visible_dir = dir_chars.saturating_sub(start);
+        (start, visible_dir)
     };
-    let mut spans: Vec<Span<'static>> = vec![Span::styled(
-        visible,
-        Style::default().fg(body_color),
-    )];
+    let visible: String = chars.iter().skip(start).copied().collect();
+    let visible_chars: Vec<char> = visible.chars().collect();
+    let dir_seg: String = visible_chars.iter().take(visible_dir_len).collect();
+    let filter_seg: String = visible_chars.iter().skip(visible_dir_len).collect();
+
+    let dir_color = if focused { Color::Gray } else { Color::DarkGray };
+    let filter_color = if focused { Color::Yellow } else { Color::Gray };
+    let mut spans: Vec<Span<'static>> = vec![
+        Span::styled(dir_seg, Style::default().fg(dir_color)),
+        Span::styled(
+            filter_seg,
+            Style::default().fg(filter_color).add_modifier(Modifier::BOLD),
+        ),
+    ];
     if focused {
         spans.push(Span::styled(
             "█",
