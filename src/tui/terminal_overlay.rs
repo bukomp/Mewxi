@@ -23,9 +23,13 @@ use vt100::Screen;
 
 /// Markers that strongly suggest claude has popped a TUI overlay and is
 /// waiting for input. Pattern-based and intentionally easy to extend —
-/// false positives are recoverable with Ctrl-].
+/// false positives are recoverable with Ctrl-]. Anything added here
+/// **must not** appear in claude's normal chat input box, otherwise the
+/// overlay triggers on every keystroke. Notably `❯` is *not* included:
+/// claude uses it as its input-prompt char, so it matches always.
+/// Picker UIs (where `❯` is the option cursor) need a stricter
+/// row-context check — to be added when a real picker case shows up.
 const PROMPT_MARKERS: &[&str] = &[
-    "❯",          // claude's selection cursor in pickers
     "[y/N]",
     "[Y/n]",
     "(y/n)",
@@ -297,9 +301,11 @@ mod tests {
     }
 
     #[test]
-    fn detects_picker_arrow() {
-        let p = parse("\x1b[2J❯ Option 1\r\n  Option 2".as_bytes());
-        assert!(prompt_visible(p.screen(), false));
+    fn ignores_chevron_in_input_box() {
+        // claude's input prompt is `❯ user_text`. The overlay must NOT
+        // open on this — it would trigger on every keystroke.
+        let p = parse("\x1b[2J❯ hello world".as_bytes());
+        assert!(!prompt_visible(p.screen(), false));
     }
 
     #[test]
