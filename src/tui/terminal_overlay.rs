@@ -121,26 +121,34 @@ fn is_horizontal_separator(line: &str) -> bool {
     t.len() >= 4 && t.chars().all(|c| matches!(c, '─' | '━' | '-' | '═'))
 }
 
-/// Render the popup region of `screen` as a small overlay inside
-/// `area`. The overlay is sized to the popup's content (capped) and
-/// positioned at the bottom of `area` so it reads as a modal sitting
-/// on top of mewxi's chat-log view rather than a full takeover.
+/// Render the popup the way mewxi prefers: if the prompt is a numbered
+/// picker (Switch model? / plan-mode pick / etc.) we parse its
+/// structure and re-render it as a native mewxi modal so it matches
+/// the rest of the chrome. Otherwise (y/N, accept-edit with diff,
+/// anything we can't structurally parse) we fall back to cropping
+/// claude's rendered PTY screen and surfacing it verbatim.
 ///
-/// If we can't locate a popup region, falls back to the bottom-most
-/// non-blank rows of the screen (still tightly cropped).
+/// Keystrokes always pass through to the PTY regardless of render
+/// path; for the native picker the user's ↑↓ move claude's real
+/// cursor, we re-parse next frame, and the modal stays in sync.
 pub fn render(frame: &mut Frame, area: Rect, screen: &Screen) {
+    if let Some(picker) = parse_picker(screen) {
+        render_native_picker(frame, area, &picker);
+    } else {
+        render_pty_crop(frame, area, screen);
+    }
+}
+
+fn render_pty_crop(frame: &mut Frame, area: Rect, screen: &Screen) {
     let region = find_popup_region(screen).unwrap_or_else(|| fallback_region(screen));
     let (top, bot, left, right) = region;
     let popup_rows = bot - top + 1;
     let popup_cols = right - left + 1;
 
-    // Frame + 1-col horizontal padding so the popup doesn't touch the
-    // border. +2 rows for top/bottom border, +2 cols for left/right
-    // border + the 1-col pad on each side.
     let h = (popup_rows + 2).min(area.height);
     let w = (popup_cols + 4).min(area.width);
     let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h + 1); // 1-row gap to footer
+    let y = area.y + area.height.saturating_sub(h + 1);
     let outer = Rect { x, y, width: w, height: h };
 
     frame.render_widget(Clear, outer);
@@ -158,6 +166,188 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &Screen) {
         lines.push(row_to_line(screen, top + r, left, max_cols));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_native_picker(frame: &mut Frame, area: Rect, picker: &PickerContent) {
+    let title_text = picker
+        .title
+        .clone()
+        .unwrap_or_else(|| "claude is asking".to_string());
+    let title = format!(" {} — ↑↓ navigate · Enter confirm · Ctrl-] cancel ", title_text);
+
+    let content_lines = picker.body.len()
+        + (if picker.body.is_empty() { 0 } else { 1 })
+        + picker.options.len();
+    let max_w = std::iter::once(title.chars().count())
+        .chain(picker.body.iter().map(|s| s.chars().count()))
+        .chain(picker.options.iter().map(|o| o.chars().count() + 6))
+        .max()
+        .unwrap_or(40);
+
+    let h = (content_lines as u16 + 2).min(area.height);
+    let w = (max_w as u16 + 4).min(area.width);
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h + 1);
+    let outer = Rect { x, y, width: w, height: h };
+
+    frame.render_widget(Clear, outer);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(title);
+    let inner = block.inner(outer);
+    frame.render_widget(block, outer);
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(content_lines);
+    for line in &picker.body {
+        lines.push(Line::from(Span::styled(
+            line.clone(),
+            Style::default().fg(Color::Gray),
+        )));
+    }
+    if !picker.body.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    for (i, opt) in picker.options.iter().enumerate() {
+        let selected = i == picker.selected;
+        let cursor = if selected { "▶ " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(cursor.to_string(), style),
+            Span::styled(opt.clone(), style),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Structured view of a numbered picker pulled off the PTY screen.
+/// Used to re-render the prompt as a native mewxi modal.
+struct PickerContent {
+    /// First non-blank header line (e.g. "Switch model?"). Goes into
+    /// the modal's title bar.
+    title: Option<String>,
+    /// Remaining header lines (description, context paragraphs).
+    body: Vec<String>,
+    /// Option text with the "N. " prefix and cursor stripped.
+    options: Vec<String>,
+    /// 0-based index of the option claude has its cursor on.
+    selected: usize,
+}
+
+/// Parse a numbered picker from `screen` if one is up. Returns None
+/// for y/N prompts, accept-edit dialogs, and anything else that isn't
+/// shaped like `<header> ... <cursor> 1. opt / 2. opt / ...`.
+fn parse_picker(screen: &Screen) -> Option<PickerContent> {
+    let (top, bot, _left, _right) = find_popup_region(screen)?;
+    let (_, cols) = screen.size();
+    let lines: Vec<String> = (top..=bot).map(|r| row_text(screen, r, cols)).collect();
+
+    let option_idx: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| if is_picker_option_line(line) { Some(i) } else { None })
+        .collect();
+    if option_idx.len() < 2 {
+        return None;
+    }
+    let first_opt = option_idx[0];
+
+    let header: Vec<String> = lines[..first_opt]
+        .iter()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let (title, body) = match header.split_first() {
+        Some((t, rest)) => (Some(t.clone()), rest.to_vec()),
+        None => (None, Vec::new()),
+    };
+
+    let mut options: Vec<String> = Vec::new();
+    let mut selected: usize = 0;
+    for (slot, &row_in_region) in option_idx.iter().enumerate() {
+        let (is_selected, text) = parse_option_line(&lines[row_in_region])?;
+        options.push(text);
+        if is_selected {
+            selected = slot;
+        }
+    }
+
+    Some(PickerContent {
+        title,
+        body,
+        options,
+        selected,
+    })
+}
+
+/// String-side mirror of [`is_picker_option_row`] — works on a row's
+/// extracted text so parsing doesn't have to re-walk the vt100 cells.
+fn is_picker_option_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let sep = if first.is_ascii_digit() {
+        // consume any extra digits (handle "10.", "11.", etc.)
+        let mut peek = chars.clone();
+        while peek.clone().next().is_some_and(|c| c.is_ascii_digit()) {
+            peek.next();
+        }
+        peek.next()
+    } else {
+        if chars.next() != Some(' ') {
+            return false;
+        }
+        let Some(d) = chars.next() else {
+            return false;
+        };
+        if !d.is_ascii_digit() {
+            return false;
+        }
+        let mut peek = chars.clone();
+        while peek.clone().next().is_some_and(|c| c.is_ascii_digit()) {
+            peek.next();
+        }
+        peek.next()
+    };
+    matches!(sep, Some('.') | Some(')'))
+}
+
+/// Pull the option text out of a picker row. Returns `(is_selected,
+/// text)` with the cursor + number + separator + leading space stripped.
+fn parse_option_line(line: &str) -> Option<(bool, String)> {
+    let trimmed = line.trim_start();
+    let chars: Vec<char> = trimmed.chars().collect();
+    let (is_selected, mut idx) = if chars.first()?.is_ascii_digit() {
+        (false, 0usize)
+    } else {
+        if chars.get(1)? != &' ' {
+            return None;
+        }
+        if !chars.get(2)?.is_ascii_digit() {
+            return None;
+        }
+        (true, 2usize)
+    };
+    while chars.get(idx).is_some_and(|c| c.is_ascii_digit()) {
+        idx += 1;
+    }
+    if !matches!(chars.get(idx)?, '.' | ')') {
+        return None;
+    }
+    idx += 1;
+    if chars.get(idx) == Some(&' ') {
+        idx += 1;
+    }
+    let text: String = chars[idx..].iter().collect();
+    Some((is_selected, text.trim_end().to_string()))
 }
 
 /// Locate the popup's bounding box on the screen. Returns
@@ -423,6 +613,63 @@ mod tests {
         // always have at least 2 sibling option rows.
         let p = parse("\x1b[2JHere's an item: 1. apple\r\n\r\nnext paragraph".as_bytes());
         assert!(!prompt_visible(p.screen(), false));
+    }
+
+    #[test]
+    fn picker_parser_extracts_model_switch_shape() {
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JSwitch model?\r\n");
+        bytes.push_str("Your next response will be slower\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("This conversation is cached.\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("❯ 1. Yes, switch to Haiku 4.5\r\n");
+        bytes.push_str("  2. No, go back\r\n");
+        let p = parse(bytes.as_bytes());
+        let picker = parse_picker(p.screen()).expect("picker parsed");
+        assert_eq!(picker.title.as_deref(), Some("Switch model?"));
+        assert_eq!(picker.options.len(), 2);
+        assert_eq!(picker.options[0], "Yes, switch to Haiku 4.5");
+        assert_eq!(picker.options[1], "No, go back");
+        assert_eq!(picker.selected, 0);
+        // Body should at minimum mention the description content.
+        assert!(picker.body.iter().any(|b| b.contains("slower")));
+    }
+
+    #[test]
+    fn picker_parser_tracks_selection_on_second_option() {
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JPick one?\r\n");
+        bytes.push_str("  1. Apple\r\n");
+        bytes.push_str("› 2. Banana\r\n");
+        let p = parse(bytes.as_bytes());
+        let picker = parse_picker(p.screen()).expect("picker parsed");
+        assert_eq!(picker.selected, 1);
+        assert_eq!(picker.options, vec!["Apple", "Banana"]);
+    }
+
+    #[test]
+    fn picker_parser_returns_none_for_y_n_prompt() {
+        // y/N prompts have specific text markers but no numbered
+        // options — they should fall through to the cropped vt100
+        // render, not the native picker.
+        let p = parse(b"\x1b[2JEdit foo.rs? [y/N]");
+        assert!(parse_picker(p.screen()).is_none());
+    }
+
+    #[test]
+    fn picker_parser_handles_multi_digit_numbers() {
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JChoose?\r\n");
+        for n in 1..=12 {
+            let cursor = if n == 11 { "❯" } else { " " };
+            bytes.push_str(&format!("{} {}. Option {}\r\n", cursor, n, n));
+        }
+        let p = parse(bytes.as_bytes());
+        let picker = parse_picker(p.screen()).expect("picker parsed");
+        assert_eq!(picker.options.len(), 12);
+        assert_eq!(picker.selected, 10); // 0-indexed
+        assert_eq!(picker.options[10], "Option 11");
     }
 
     #[test]
