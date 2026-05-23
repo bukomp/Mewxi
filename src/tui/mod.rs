@@ -1030,20 +1030,11 @@ fn run_loop<B: ratatui::backend::Backend>(
             );
             // Terminal overlay (claude's PTY screen) renders before the
             // mewxi modals so an open modal still wins, but after the
-            // base view so it visibly covers the chat-log.
+            // base view so it visibly sits on top of the chat-log. The
+            // render fn auto-sizes a small box around just the popup
+            // region — it does not take over the full mewxi view.
             if let Some(screen) = overlay_screen.as_ref() {
-                let area = f.area();
-                // Centre the overlay with a small margin so it reads as
-                // an overlay rather than a full-screen takeover.
-                let pad_x = (area.width / 16).min(4);
-                let pad_y = (area.height / 12).min(2);
-                let overlay_area = ratatui::layout::Rect {
-                    x: area.x + pad_x,
-                    y: area.y + pad_y,
-                    width: area.width.saturating_sub(pad_x * 2),
-                    height: area.height.saturating_sub(pad_y * 2),
-                };
-                terminal_overlay::render(f, overlay_area, screen);
+                terminal_overlay::render(f, f.area(), screen);
             }
             // Modal overlays everything else when open. Render last so
             // it sits on top with Clear + its own border.
