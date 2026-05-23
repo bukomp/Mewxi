@@ -173,35 +173,50 @@ fn render_native_picker(frame: &mut Frame, area: Rect, picker: &PickerContent) {
         .title
         .clone()
         .unwrap_or_else(|| "claude is asking".to_string());
-    let title = format!(" {} — ↑↓ navigate · Enter confirm · Ctrl-] cancel ", title_text);
+    let title = format!(
+        " {} — ↑↓ navigate · Enter confirm · Ctrl-] cancel ",
+        title_text
+    );
 
-    let content_lines = picker.body.len()
-        + (if picker.body.is_empty() { 0 } else { 1 })
-        + picker.options.len();
-    let max_w = std::iter::once(title.chars().count())
+    // 1-row padding top + bottom inside the borders, blank row between
+    // body and options (if any body), and blank row above the hint.
+    let blank_between_body_and_options: usize = if picker.body.is_empty() { 0 } else { 1 };
+    let inner_h = picker.body.len() + blank_between_body_and_options + picker.options.len() + 2;
+    let inner_w = std::iter::once(title.chars().count())
         .chain(picker.body.iter().map(|s| s.chars().count()))
-        .chain(picker.options.iter().map(|o| o.chars().count() + 6))
+        .chain(picker.options.iter().map(|o| o.chars().count() + 4))
         .max()
-        .unwrap_or(40);
+        .unwrap_or(40)
+        + 2;
 
-    let h = (content_lines as u16 + 2).min(area.height);
-    let w = (max_w as u16 + 4).min(area.width);
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h + 1);
+    let h = (inner_h as u16 + 2).min(area.height);
+    let w = (inner_w as u16 + 2).min(area.width);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
     let outer = Rect { x, y, width: w, height: h };
 
     frame.render_widget(Clear, outer);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(title);
+        .border_style(
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
     let inner = block.inner(outer);
     frame.render_widget(block, outer);
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(content_lines);
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner_h);
+    lines.push(Line::raw("")); // top padding
     for line in &picker.body {
         lines.push(Line::from(Span::styled(
-            line.clone(),
+            format!(" {}", line),
             Style::default().fg(Color::Gray),
         )));
     }
@@ -210,16 +225,18 @@ fn render_native_picker(frame: &mut Frame, area: Rect, picker: &PickerContent) {
     }
     for (i, opt) in picker.options.iter().enumerate() {
         let selected = i == picker.selected;
-        let cursor = if selected { "▶ " } else { "  " };
-        let style = if selected {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+        let (cursor, style) = if selected {
+            (
+                " ▶ ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            Style::default().fg(Color::White)
+            ("   ", Style::default().fg(Color::White))
         };
         lines.push(Line::from(vec![
-            Span::styled(cursor.to_string(), style),
+            Span::styled(cursor, style),
             Span::styled(opt.clone(), style),
         ]));
     }

@@ -937,16 +937,19 @@ fn run_loop<B: ratatui::backend::Backend>(
         } else {
             None
         };
-        let driver_pane = if is_driven {
+        let overlay_active_here = pinned_session
+            .as_ref()
+            .is_some_and(|k| overlay_open.contains(k));
+        let driver_pane = if is_driven && !overlay_active_here {
             Some(view_session::DriverPane {
                 input: driver_input.as_str(),
                 focused: driver_input_focused,
-                overlay_active: pinned_session
-                    .as_ref()
-                    .is_some_and(|k| overlay_open.contains(k)),
+                overlay_active: false,
             })
         } else {
-            // Unfocus if the pinned session is no longer driven.
+            // Either not driven, or the overlay is up and stealing
+            // every keystroke — in both cases the input row would just
+            // mislead the user, so hide it.
             driver_input_focused = false;
             None
         };
@@ -1134,6 +1137,12 @@ fn run_loop<B: ratatui::backend::Backend>(
         // burning CPU on a static screen.
         let poll_timeout = if mode == ViewMode::Mewxi {
             Duration::from_millis(16)
+        } else if !overlay_open.is_empty() {
+            // While an overlay is up the user is actively driving claude
+            // through the PTY; redraw fast so arrow-key feedback feels
+            // immediate, otherwise the perceived input lag piles up
+            // (200ms poll + claude's redraw + next render).
+            Duration::from_millis(33)
         } else {
             Duration::from_millis(200)
         };
