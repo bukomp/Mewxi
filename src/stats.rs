@@ -52,6 +52,14 @@ pub struct UsageRecord {
     pub cache_write_1h: u64,
     pub cost_usd: f64,
     pub message_id: String,
+    /// True when the record was produced by a sub-agent (Task tool,
+    /// plan-mode helper, etc.) rather than the main agent. Tokens
+    /// still count toward the session totals — the user pays for
+    /// sub-agent work — but the displayed model should ignore these
+    /// records so a one-off Sonnet helper doesn't stick the badge to
+    /// Sonnet for the rest of a Haiku session.
+    #[serde(default)]
+    pub is_sidechain: bool,
 }
 
 impl UsageRecord {
@@ -332,6 +340,10 @@ fn parse_file(path: &Path) -> Result<Vec<UsageRecord>> {
             } else {
                 message_id
             };
+            let is_sidechain = v
+                .get("isSidechain")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             let p = price_for(&model);
             let cost_usd = (input as f64 * p.input
@@ -353,6 +365,7 @@ fn parse_file(path: &Path) -> Result<Vec<UsageRecord>> {
                 cache_write_1h: cw1h,
                 cost_usd,
                 message_id,
+                is_sidechain,
             });
         }
     }
@@ -505,6 +518,13 @@ pub fn current_context_from_transcript(path: &Path) -> Option<SessionContext> {
     for line in content.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        // Sub-agents (Task tool, plan-mode helpers) use their own
+        // model + context window. Skip them so the cap stays anchored
+        // to the main agent — otherwise a one-off Sonnet helper would
+        // briefly inflate the displayed cap to Sonnet's 1M.
+        if v.get("isSidechain").and_then(|x| x.as_bool()).unwrap_or(false) {
             continue;
         }
         let Some(msg) = v.get("message") else { continue };

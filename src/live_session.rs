@@ -560,6 +560,7 @@ pub fn scan(
         let mut totals = UsageTotals::default();
         let mut last_activity = DateTime::<Utc>::MIN_UTC;
         let mut model = String::new();
+        let mut model_last_activity = DateTime::<Utc>::MIN_UTC;
         for r in &records {
             if r.session_id != marker.session_id {
                 continue;
@@ -567,6 +568,14 @@ pub fn scan(
             totals.add(r);
             if r.timestamp > last_activity {
                 last_activity = r.timestamp;
+            }
+            // Pick the model from the latest *main-agent* record only.
+            // Sub-agents (Task tool, plan-mode helpers) often use a
+            // different model than the user picked — counting them
+            // here would stick the badge to e.g. Sonnet for the rest
+            // of a Haiku session.
+            if !r.is_sidechain && r.timestamp > model_last_activity {
+                model_last_activity = r.timestamp;
                 model = r.model.clone();
             }
         }
