@@ -327,6 +327,20 @@ fn mode_badge(raw: &str) -> (&'static str, Color) {
     }
 }
 
+/// True when the primary model badge already refers to the same model
+/// as the latest assistant record. `primary` is often a short slug
+/// (`haiku`, `sonnet`, `opus`, or the `default` placeholder) while
+/// `active` is the full transcript name (`claude-sonnet-4-6`); a
+/// case-insensitive substring match either way handles both.
+fn models_match(primary: &str, active: &str) -> bool {
+    if primary == active {
+        return true;
+    }
+    let p = primary.to_ascii_lowercase();
+    let a = active.to_ascii_lowercase();
+    a.contains(&p) || p.contains(&a)
+}
+
 fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
     let mut spans = vec![
         Span::styled(
@@ -343,6 +357,22 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
         spans.push(Span::styled(
             s.model.clone(),
             Style::default().fg(Color::Green),
+        ));
+    }
+    // Transient "via …" indicator when claude's latest assistant
+    // record (sub-agent or plan-mode helper) is a different model
+    // than the user's pick. Snaps back to invisible on the next
+    // main-agent response in the user's chosen model.
+    if !s.active_model.is_empty()
+        && !s.model.is_empty()
+        && !models_match(&s.model, &s.active_model)
+    {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("via {}", s.active_model),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
         ));
     }
     if let Some(mode_raw) = s.permission_mode.as_deref() {
@@ -1291,4 +1321,33 @@ fn pick_mascot(area_w: u16, area_h: u16, caption_h: u16) -> (&'static str, u16, 
         }
     }
     ("", 0, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::models_match;
+
+    #[test]
+    fn slug_matches_full_name() {
+        assert!(models_match("haiku", "claude-haiku-4-5"));
+        assert!(models_match("sonnet", "claude-sonnet-4-6"));
+        assert!(models_match("opus", "claude-opus-4-7"));
+    }
+
+    #[test]
+    fn full_name_matches_full_name() {
+        assert!(models_match("claude-haiku-4-5", "claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn different_models_do_not_match() {
+        assert!(!models_match("haiku", "claude-sonnet-4-6"));
+        assert!(!models_match("sonnet", "claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn case_insensitive() {
+        assert!(models_match("Haiku", "claude-haiku-4-5"));
+        assert!(models_match("haiku", "CLAUDE-HAIKU-4-5"));
+    }
 }

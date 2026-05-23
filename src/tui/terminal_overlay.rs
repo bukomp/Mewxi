@@ -27,10 +27,11 @@ use vt100::Screen;
 /// and intentionally easy to extend — false positives are recoverable
 /// with Ctrl-]. Anything added here **must not** appear in claude's
 /// normal chat input box, otherwise the overlay triggers on every
-/// keystroke. Picker UIs (numbered options with a cursor) are detected
-/// structurally by [`is_picker_option_row`] — never name a cursor char
-/// here, claude uses one of several and reusing the input-prompt
-/// glyph would re-introduce the every-keystroke false positive.
+/// keystroke. Picker UIs (numbered or unnumbered options with a cursor)
+/// are detected structurally by [`picker_cursor_col`] + sibling indent
+/// match — never name a cursor char here, claude uses one of several
+/// and reusing the input-prompt glyph would re-introduce the every-
+/// keystroke false positive.
 const PROMPT_MARKERS: &[&str] = &[
     "[y/N]",
     "[Y/n]",
@@ -38,7 +39,9 @@ const PROMPT_MARKERS: &[&str] = &[
     "(Y/n)",
     "Continue?",
     "Press y ",
-    "Use this ",  // accept-edit prompt
+    "Use this ",        // accept-edit prompt
+    "Esc to cancel",    // picker hint footer
+    "Enter to select",  // picker hint footer
 ];
 
 /// Max overlay height in PTY rows. The widest popup we've seen is the
@@ -59,37 +62,75 @@ pub fn prompt_visible(screen: &Screen, _awaiting_marker: bool) -> bool {
     find_marker_row(screen).is_some()
 }
 
-/// True when `row` looks like one entry in a numbered picker. We
-/// deliberately match by structure (a digit-period anchor) rather than
-/// by cursor character, so we don't conflate the input box's prompt
-/// glyph with picker cursors. Two shapes count:
-///   - unselected: `   1. Option`           (whitespace, then digit + `.`)
-///   - selected:   `<cursor> 1. Option`     (one non-digit char + space + digit + `.`)
+/// Picker row detection by **shape**, not by digit prefix. claude's
+/// pickers come in two flavours we want to handle uniformly:
+///   - numbered: `❯ 1. Yes` / `  2. No`               (the model picker)
+///   - unnumbered: `❯ Auto-accept edits` / `  Manual` (the AskUserQuestion picker)
 ///
-/// Pair with a nearby-sibling check before treating any single row as
-/// a picker — a stray "1. foo" in chat shouldn't trigger.
-fn is_picker_option_row(screen: &Screen, row: u16, cols: u16) -> bool {
-    let line = row_text(screen, row, cols);
-    let trimmed = line.trim_start();
-    let mut chars = trimmed.chars();
-    let Some(first) = chars.next() else {
+/// A picker is confirmed when a **selected** row (cursor + space + text)
+/// has at least one **sibling** row within ±4 lines whose indent equals
+/// the cursor column + 2 (matching the cursor + its space). Single-row
+/// `❯ user_text` (the input box) has no sibling, so it never triggers.
+
+/// Returns `(cursor_col, prefix)` when `line` is a picker's selected
+/// row: `<prefix><cursor><space><text>`, where `prefix` is the leading
+/// run of whitespace + box-drawing chars. The cursor glyph must be a
+/// single non-alphanumeric, non-whitespace, non-box character (e.g.
+/// `❯`, `›`, `▶`). `prefix` is captured exactly so siblings must
+/// share the same leading-prefix structure — that prevents the input
+/// box (`> user_text` with no border) from being mistaken as the
+/// selected row of an adjacent y/N popup (`│ [y/N] │` with a border).
+fn picker_cursor_info(line: &str) -> Option<(usize, String)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut idx = 0;
+    while idx < chars.len() && (chars[idx].is_whitespace() || is_box_char(chars[idx])) {
+        idx += 1;
+    }
+    let cursor = *chars.get(idx)?;
+    if cursor.is_alphanumeric() || is_box_char(cursor) {
+        return None;
+    }
+    if chars.get(idx + 1) != Some(&' ') {
+        return None;
+    }
+    // Text after `<cursor> ` must be a non-empty, non-box payload.
+    let has_text = chars[idx + 2..]
+        .iter()
+        .any(|c| !c.is_whitespace() && !is_box_char(*c));
+    if !has_text {
+        return None;
+    }
+    let prefix: String = chars[..idx].iter().collect();
+    Some((idx, prefix))
+}
+
+/// True when `line` is a sibling (unselected) option for a cursor row
+/// with the given `cursor_prefix`. Sibling must:
+///   1. Start with the **same exact** `cursor_prefix` as the cursor row
+///      (so a bordered popup and a borderless input box can't share
+///      siblings).
+///   2. Have exactly 2 spaces immediately after the prefix (matching
+///      the cursor + its trailing space).
+///   3. Then have non-empty, non-box content.
+fn is_picker_sibling_line(line: &str, cursor_prefix: &str) -> bool {
+    if !line.starts_with(cursor_prefix) {
         return false;
-    };
-    let sep = if first.is_ascii_digit() {
-        chars.next()
-    } else {
-        if chars.next() != Some(' ') {
-            return false;
-        }
-        let Some(d) = chars.next() else {
-            return false;
-        };
-        if !d.is_ascii_digit() {
-            return false;
-        }
-        chars.next()
-    };
-    matches!(sep, Some('.') | Some(')'))
+    }
+    let after: Vec<char> = line[cursor_prefix.len()..].chars().collect();
+    if after.len() < 3 {
+        return false;
+    }
+    if after[0] != ' ' || after[1] != ' ' {
+        return false;
+    }
+    after[2..]
+        .iter()
+        .any(|c| !c.is_whitespace() && !is_box_char(*c))
+}
+
+fn is_box_char(c: char) -> bool {
+    // Unicode Box Drawing block.
+    matches!(c as u32, 0x2500..=0x257F)
 }
 
 /// Find the bottom-most row that looks like a prompt or picker. Used by
@@ -102,15 +143,14 @@ fn find_marker_row(screen: &Screen) -> Option<u16> {
         if PROMPT_MARKERS.iter().any(|m| txt.contains(m)) {
             return Some(r);
         }
-        if is_picker_option_row(screen, r, cols) {
-            // Confirm by a sibling option row within ±4 rows so a stray
-            // "1. foo" in chat doesn't trigger.
+        if let Some((_, prefix)) = picker_cursor_info(&txt) {
             for delta in [-4i32, -3, -2, -1, 1, 2, 3, 4] {
                 let r2 = r as i32 + delta;
                 if r2 < 0 || r2 >= rows as i32 {
                     continue;
                 }
-                if r2 as u16 != r && is_picker_option_row(screen, r2 as u16, cols) {
+                let sib = row_text(screen, r2 as u16, cols);
+                if is_picker_sibling_line(&sib, &prefix) {
                     return Some(r);
                 }
             }
@@ -374,17 +414,45 @@ fn parse_picker(screen: &Screen) -> Option<PickerContent> {
     let (_, cols) = screen.size();
     let lines: Vec<String> = (top..=bot).map(|r| row_text(screen, r, cols)).collect();
 
-    let option_idx: Vec<usize> = lines
+    // Find the cursor row inside the region (there's exactly one).
+    let (cursor_idx, cursor_col, cursor_prefix) = lines
         .iter()
         .enumerate()
-        .filter_map(|(i, line)| if is_picker_option_line(line) { Some(i) } else { None })
-        .collect();
-    if option_idx.len() < 2 {
+        .find_map(|(i, l)| picker_cursor_info(l).map(|(c, p)| (i, c, p)))?;
+
+    // Walk up and down from the cursor collecting contiguous sibling
+    // rows. A non-sibling row (or end of region) terminates the option
+    // list — that way header text above and hint text below stay out
+    // of the options.
+    let mut option_lines: Vec<(usize, bool)> = Vec::new();
+    let mut i = cursor_idx;
+    loop {
+        if i == 0 {
+            break;
+        }
+        let prev = i - 1;
+        if is_picker_sibling_line(&lines[prev], &cursor_prefix) {
+            option_lines.insert(0, (prev, false));
+            i = prev;
+        } else {
+            break;
+        }
+    }
+    option_lines.push((cursor_idx, true));
+    for j in (cursor_idx + 1)..lines.len() {
+        if is_picker_sibling_line(&lines[j], &cursor_prefix) {
+            option_lines.push((j, false));
+        } else {
+            break;
+        }
+    }
+
+    if option_lines.len() < 2 {
         return None;
     }
-    let first_opt = option_idx[0];
 
-    let header: Vec<String> = lines[..first_opt]
+    let first_opt_idx = option_lines[0].0;
+    let header: Vec<String> = lines[..first_opt_idx]
         .iter()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
@@ -394,12 +462,11 @@ fn parse_picker(screen: &Screen) -> Option<PickerContent> {
         None => (None, Vec::new()),
     };
 
-    let mut options: Vec<String> = Vec::new();
-    let mut selected: usize = 0;
-    for (slot, &row_in_region) in option_idx.iter().enumerate() {
-        let (is_selected, text) = parse_option_line(&lines[row_in_region])?;
-        options.push(text);
-        if is_selected {
+    let mut options = Vec::with_capacity(option_lines.len());
+    let mut selected = 0;
+    for (slot, (line_idx, is_selected)) in option_lines.iter().enumerate() {
+        options.push(extract_option_text(&lines[*line_idx], cursor_col, *is_selected));
+        if *is_selected {
             selected = slot;
         }
     }
@@ -412,68 +479,45 @@ fn parse_picker(screen: &Screen) -> Option<PickerContent> {
     })
 }
 
-/// String-side mirror of [`is_picker_option_row`] — works on a row's
-/// extracted text so parsing doesn't have to re-walk the vt100 cells.
-fn is_picker_option_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let mut chars = trimmed.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    let sep = if first.is_ascii_digit() {
-        // consume any extra digits (handle "10.", "11.", etc.)
-        let mut peek = chars.clone();
-        while peek.clone().next().is_some_and(|c| c.is_ascii_digit()) {
-            peek.next();
-        }
-        peek.next()
-    } else {
-        if chars.next() != Some(' ') {
-            return false;
-        }
-        let Some(d) = chars.next() else {
-            return false;
-        };
-        if !d.is_ascii_digit() {
-            return false;
-        }
-        let mut peek = chars.clone();
-        while peek.clone().next().is_some_and(|c| c.is_ascii_digit()) {
-            peek.next();
-        }
-        peek.next()
-    };
-    matches!(sep, Some('.') | Some(')'))
+/// Strip the cursor + indent prefix, the leading `N. ` numbering if
+/// present, and trailing box border / whitespace from a picker row,
+/// leaving just the option label.
+fn extract_option_text(line: &str, cursor_col: usize, _is_selected: bool) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    // Both selected and sibling rows consume the same `cursor_col + 2`
+    // leading columns: selected = `<prefix><cursor><space>`, sibling
+    // = `<prefix><indent of cursor + 2>`.
+    let strip = cursor_col + 2;
+    let mut text: String = chars.iter().skip(strip).collect();
+    // Drop trailing box border + whitespace (popup might wrap in `│ … │`).
+    while text
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_whitespace() || is_box_char(c))
+    {
+        text.pop();
+    }
+    // Strip leading `<digits><.|)> ` so numbered options render
+    // cleanly under mewxi's own cursor indicator (otherwise we'd show
+    // `▶ 1. Yes, switch …`).
+    text = strip_leading_number(&text);
+    text
 }
 
-/// Pull the option text out of a picker row. Returns `(is_selected,
-/// text)` with the cursor + number + separator + leading space stripped.
-fn parse_option_line(line: &str) -> Option<(bool, String)> {
-    let trimmed = line.trim_start();
-    let chars: Vec<char> = trimmed.chars().collect();
-    let (is_selected, mut idx) = if chars.first()?.is_ascii_digit() {
-        (false, 0usize)
-    } else {
-        if chars.get(1)? != &' ' {
-            return None;
-        }
-        if !chars.get(2)?.is_ascii_digit() {
-            return None;
-        }
-        (true, 2usize)
-    };
+fn strip_leading_number(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut idx = 0;
     while chars.get(idx).is_some_and(|c| c.is_ascii_digit()) {
         idx += 1;
     }
-    if !matches!(chars.get(idx)?, '.' | ')') {
-        return None;
+    if idx == 0 || !matches!(chars.get(idx), Some('.') | Some(')')) {
+        return s.to_string();
     }
     idx += 1;
     if chars.get(idx) == Some(&' ') {
         idx += 1;
     }
-    let text: String = chars[idx..].iter().collect();
-    Some((is_selected, text.trim_end().to_string()))
+    chars[idx..].iter().collect()
 }
 
 /// Locate the popup's bounding box on the screen. Returns
@@ -817,6 +861,51 @@ mod tests {
         let content = read_most_recent_plan_file(&tmp).expect("plan file read");
         assert!(content.contains("fresh plan"), "got {content:?}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detects_unnumbered_picker_with_chevron_cursor() {
+        // AskUserQuestion-style picker: a cursor row + indented
+        // siblings, no numeric prefixes.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JWhat scope?\r\n");
+        bytes.push_str("❯ Quick fix\r\n");
+        bytes.push_str("  Full refactor\r\n");
+        bytes.push_str("  Skip for now\r\n");
+        let p = parse(bytes.as_bytes());
+        assert!(prompt_visible(p.screen(), false));
+        let picker = parse_picker(p.screen()).expect("picker parsed");
+        assert_eq!(picker.options, vec!["Quick fix", "Full refactor", "Skip for now"]);
+        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.title.as_deref(), Some("What scope?"));
+    }
+
+    #[test]
+    fn picker_with_only_last_option_numbered() {
+        // The exact AskUserQuestion shape the user reported broken:
+        // 4 unnumbered options + a numbered "Chat about this" footer.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JTask scope?\r\n");
+        bytes.push_str("  Create a simple script\r\n");
+        bytes.push_str("  Make a more complete tool\r\n");
+        bytes.push_str("  Just answer the question\r\n");
+        bytes.push_str("❯ Refactor existing code\r\n");
+        bytes.push_str("  5. Chat about this\r\n");
+        let p = parse(bytes.as_bytes());
+        let picker = parse_picker(p.screen()).expect("picker parsed");
+        assert_eq!(picker.options.len(), 5, "got {:?}", picker.options);
+        assert_eq!(picker.options[0], "Create a simple script");
+        assert_eq!(picker.options[3], "Refactor existing code");
+        assert_eq!(picker.options[4], "Chat about this"); // leading "5. " stripped
+        assert_eq!(picker.selected, 3);
+    }
+
+    #[test]
+    fn input_box_chevron_with_no_siblings_does_not_trigger() {
+        // Regression guard: a single `❯ user_text` line with nothing
+        // sibling-shaped above or below must NOT open the overlay.
+        let p = parse("\x1b[2J\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n❯ hello world".as_bytes());
+        assert!(!prompt_visible(p.screen(), false));
     }
 
     #[test]

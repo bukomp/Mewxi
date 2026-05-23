@@ -78,6 +78,11 @@ pub struct SessionRef {
     pub last_activity: chrono::DateTime<chrono::Utc>,
     pub state_since: chrono::DateTime<chrono::Utc>,
     pub model: String,
+    /// Latest assistant model from the transcript, INCLUDING sub-agents
+    /// and plan-mode helpers. Empty when no assistant record yet. Used
+    /// for the dim "via …" indicator next to the main model badge when
+    /// claude has internally diverged from the user's pick.
+    pub active_model: String,
     pub tokens: u64,
     pub cost_usd: f64,
     pub totals: UsageTotals,
@@ -827,6 +832,26 @@ fn run_loop<B: ratatui::backend::Backend>(
             if let Some(opt) = driver_optimistic.remove(&ps.placeholder_key) {
                 driver_optimistic.insert(key.clone(), opt);
             }
+            // Seed opt.model from settings.json's `model` field so the
+            // user's configured default acts as the persistent intent
+            // even when they didn't use mewxi's `m` picker. The model
+            // badge then reflects this slug regardless of what claude
+            // internally switches to (sub-agents, plan-mode helpers).
+            if let Some(pa) = per_account
+                .iter()
+                .find(|p| p.account.name == key.0)
+            {
+                if let Some(default_model) = pa.account.default_model() {
+                    let opt = driver_optimistic.entry(key.clone()).or_default();
+                    if opt.model.is_none() {
+                        opt.model = Some(default_model);
+                        // No baseline — this seed is the user's
+                        // standing preference, not a transient pick to
+                        // reconcile against.
+                        opt.model_baseline = None;
+                    }
+                }
+            }
             if pinned_session.as_ref() == Some(&ps.placeholder_key) {
                 pinned_session = Some(key);
             } else {
@@ -1114,9 +1139,17 @@ fn run_loop<B: ratatui::backend::Backend>(
             if force_tick {
                 last_full_tick = Instant::now();
             }
-            // Reconcile optimistic state: once the transcript moves past
-            // the baseline snapshotted at command time, claude has caught
-            // up and the optimistic guess is obsolete.
+            // Reconcile optimistic mode state: once the transcript moves
+            // past the baseline snapshotted at command time, claude has
+            // caught up and the optimistic guess is obsolete.
+            //
+            // opt.model is NOT auto-cleared anymore. claude internally
+            // switches model for plan-mode helpers, sub-agents, etc.,
+            // and the user's mewxi pick (or settings.json default) is
+            // the source of truth for what the badge should show. The
+            // "via <model>" indicator (LiveSession::active_model)
+            // surfaces internal model use without overwriting the
+            // user's choice.
             driver_optimistic.retain(|key, opt| {
                 let ls = per_account
                     .iter()
@@ -1128,10 +1161,6 @@ fn run_loop<B: ratatui::backend::Backend>(
                     {
                         opt.mode = None;
                         opt.mode_baseline = None;
-                    }
-                    if opt.model.is_some() && opt.model_baseline.as_ref() != Some(&ls.model) {
-                        opt.model = None;
-                        opt.model_baseline = None;
                     }
                 }
                 opt.mode.is_some() || opt.model.is_some()
@@ -2370,6 +2399,7 @@ fn flatten_sessions(
                     last_activity: ls.last_activity,
                     state_since: ls.state_since,
                     model,
+                    active_model: ls.active_model.clone(),
                     tokens: ls.session_tokens.total_tokens(),
                     cost_usd: ls.session_tokens.cost_usd,
                     totals: ls.session_tokens.clone(),

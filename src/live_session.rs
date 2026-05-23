@@ -403,6 +403,12 @@ pub struct LiveSession {
     /// first frame reflects real elapsed time.
     pub state_since: DateTime<Utc>,
     pub model: String,
+    /// Model from the latest assistant record of ANY kind — main
+    /// agent, sub-agent, plan-mode helper. Used to show a transient
+    /// "via <model>" indicator next to the primary badge when claude
+    /// internally diverges from the user's picked model. Naturally
+    /// snaps back to match `model` on the next main-agent response.
+    pub active_model: String,
     pub session_tokens: UsageTotals,
     pub current_context: Option<u64>,
     pub context_cap: Option<u64>,
@@ -561,6 +567,8 @@ pub fn scan(
         let mut last_activity = DateTime::<Utc>::MIN_UTC;
         let mut model = String::new();
         let mut model_last_activity = DateTime::<Utc>::MIN_UTC;
+        let mut active_model = String::new();
+        let mut active_model_last_activity = DateTime::<Utc>::MIN_UTC;
         for r in &records {
             if r.session_id != marker.session_id {
                 continue;
@@ -569,14 +577,22 @@ pub fn scan(
             if r.timestamp > last_activity {
                 last_activity = r.timestamp;
             }
-            // Pick the model from the latest *main-agent* record only.
-            // Sub-agents (Task tool, plan-mode helpers) often use a
-            // different model than the user picked — counting them
-            // here would stick the badge to e.g. Sonnet for the rest
-            // of a Haiku session.
+            // Pick the displayed `model` from the latest *main-agent*
+            // record only. Sub-agents (Task tool, plan-mode helpers)
+            // often use a different model than the user picked —
+            // counting them here would stick the badge to e.g. Sonnet
+            // for the rest of a Haiku session.
             if !r.is_sidechain && r.timestamp > model_last_activity {
                 model_last_activity = r.timestamp;
                 model = r.model.clone();
+            }
+            // `active_model` mirrors the latest assistant model of ANY
+            // origin (sidechain included) so the UI can surface a
+            // transient "via …" indicator when claude internally
+            // diverges from the user's pick.
+            if r.timestamp > active_model_last_activity {
+                active_model_last_activity = r.timestamp;
+                active_model = r.model.clone();
             }
         }
         // Project label = the raw cwd basename from the marker. The
@@ -726,6 +742,7 @@ pub fn scan(
             last_activity,
             state_since,
             model,
+            active_model,
             session_tokens: totals,
             current_context,
             context_cap,
