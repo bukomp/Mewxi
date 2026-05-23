@@ -47,13 +47,15 @@ const PROMPT_MARKERS: &[&str] = &[
 const MAX_POPUP_ROWS: u16 = 20;
 
 /// True when claude is likely waiting for the user to answer a TUI
-/// overlay. `awaiting_marker` short-circuits to true and lets the
-/// existing permission-prompt signal trigger the overlay even if the
-/// screen-content heuristic would miss the prompt text.
-pub fn prompt_visible(screen: &Screen, awaiting_marker: bool) -> bool {
-    if awaiting_marker {
-        return true;
-    }
+/// overlay. We trust the screen contents only — `awaiting_marker` is
+/// kept in the signature for future use, but does NOT short-circuit
+/// to true: claude's `PostToolUse` hook doesn't always fire (e.g.
+/// when the user Esc-interrupts a tool-use prompt), so the marker
+/// file stays set and the overlay would otherwise paint forever over
+/// an empty input box. Screen markers cover y/N (`[y/N]`, `(y/n)`),
+/// continue dialogs, accept-edit (`Use this `), and numbered pickers
+/// (model switch, plan acceptance, plan-mode pick).
+pub fn prompt_visible(screen: &Screen, _awaiting_marker: bool) -> bool {
     find_marker_row(screen).is_some()
 }
 
@@ -856,9 +858,23 @@ mod tests {
     }
 
     #[test]
-    fn awaiting_marker_short_circuits() {
+    fn awaiting_marker_alone_is_not_enough() {
+        // Stale awaiting markers (e.g. after Esc-interrupting a
+        // tool-use prompt) must NOT keep the overlay open when the
+        // screen has no prompt content — otherwise we paint an empty
+        // input box overlay that blocks every keystroke until Ctrl-].
         let p = parse(b"");
-        assert!(prompt_visible(p.screen(), true));
+        assert!(!prompt_visible(p.screen(), true));
+    }
+
+    #[test]
+    fn empty_input_box_after_interrupt_does_not_trigger() {
+        // After `[Request interrupted by user for tool use]`, claude
+        // collapses back to just its input box. The overlay must
+        // close.
+        let p = parse("\x1b[2J❯ ".as_bytes());
+        assert!(!prompt_visible(p.screen(), true));
+        assert!(!prompt_visible(p.screen(), false));
     }
 
     #[test]
