@@ -100,6 +100,13 @@ fn picker_cursor_info(line: &str) -> Option<(usize, String)> {
     if !has_text {
         return None;
     }
+    // Exclude claude's slash-command preview shape: `▶ /model haiku`
+    // followed by a one-line description. Structurally identical to a
+    // 2-option picker (cursor + 1 sibling), but claude pickers never
+    // place a `/`-prefixed token in the cursor row.
+    if chars.get(idx + 2) == Some(&'/') {
+        return None;
+    }
     let prefix: String = chars[..idx].iter().collect();
     Some((idx, prefix))
 }
@@ -898,6 +905,20 @@ mod tests {
         assert_eq!(picker.options[3], "Refactor existing code");
         assert_eq!(picker.options[4], "Chat about this"); // leading "5. " stripped
         assert_eq!(picker.selected, 3);
+    }
+
+    #[test]
+    fn slash_command_preview_does_not_trigger() {
+        // claude renders typed slash commands as `▶ /model haiku` +
+        // a one-line description sibling. The overlay must NOT open
+        // on this — structurally it matches a 2-option picker.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JWelcome back!\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("▶ /model haiku\r\n");
+        bytes.push_str("  Set model to Haiku 4.5 for this session\r\n");
+        let p = parse(bytes.as_bytes());
+        assert!(!prompt_visible(p.screen(), false));
     }
 
     #[test]
