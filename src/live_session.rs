@@ -689,17 +689,22 @@ pub fn scan(
             None => last_activity,
         };
 
-        // Claude Code always boots in `default` mode and writes a
-        // `permission-mode` record to the JSONL on session start. But
-        // the transcript file isn't created until the first prompt, so
-        // for a brand-new idle session we'd have nothing to read.
-        // Assume `default` in that window so the mode badge always
-        // shows — the next transcript scan post-prompt will overwrite
-        // with the authoritative value.
+        // Claude Code writes a `permission-mode` record to the JSONL
+        // on session start, but the transcript file isn't created
+        // until the first prompt. For a brand-new idle session we'd
+        // have nothing to read.
+        //
+        // Fall back to the account's configured default mode (derived
+        // from `skipAutoPermissionPrompt` in the account's
+        // `settings.json` — `true` means the user has opted into
+        // auto-mode-by-default). This way the badge shows the right
+        // mode immediately on spawn, and the post-prompt scan
+        // overwrites with whatever claude actually settles on.
+        let fallback_mode = account.default_permission_mode();
         let permission_mode = if transcript_exists {
-            tail_permission_mode(&transcript).or_else(|| Some("default".to_string()))
+            tail_permission_mode(&transcript).or_else(|| Some(fallback_mode.clone()))
         } else {
-            Some("default".to_string())
+            Some(fallback_mode)
         };
 
         out.push(LiveSession {

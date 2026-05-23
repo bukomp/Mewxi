@@ -89,6 +89,34 @@ impl Account {
             self.dir.join("settings.local.json"),
         ]
     }
+
+    /// The permission mode this account's user has set as default —
+    /// derived from `<dir>/settings.json`. The only signal Claude Code
+    /// exposes here is `skipAutoPermissionPrompt: true`, which means
+    /// the user has opted into auto mode being the startup default
+    /// (claude no longer asks each session). When that flag is set we
+    /// return `auto`; otherwise `default` (claude's vanilla startup
+    /// mode). `settings.local.json` overrides `settings.json` when
+    /// both define the field, matching claude's own precedence.
+    ///
+    /// Returns the raw transcript-format string so it slots into the
+    /// same display path as live-scanned modes (`default` → "manual",
+    /// `auto` → "auto", etc.).
+    pub fn default_permission_mode(&self) -> String {
+        let mut opted_in = false;
+        for path in self.settings_paths() {
+            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+            let Ok(v): serde_json::Result<serde_json::Value> =
+                serde_json::from_str(&raw) else { continue };
+            if let Some(b) = v
+                .get("skipAutoPermissionPrompt")
+                .and_then(|x| x.as_bool())
+            {
+                opted_in = b;
+            }
+        }
+        if opted_in { "auto".to_string() } else { "default".to_string() }
+    }
 }
 
 /// On-disk shape of `~/.config/mewxi/accounts.toml`.
