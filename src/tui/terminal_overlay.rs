@@ -62,15 +62,16 @@ pub fn prompt_visible(screen: &Screen, _awaiting_marker: bool) -> bool {
     find_marker_row(screen).is_some()
 }
 
-/// Picker row detection by **shape**, not by digit prefix. claude's
-/// pickers come in two flavours we want to handle uniformly:
+/// Picker row detection by **shape**, not by digit prefix. Used only
+/// inside an already-anchored popup region (`parse_picker`) to walk
+/// option rows — NOT as the overlay trigger. The trigger lives in
+/// [`find_marker_row`] and requires a PROMPT_MARKER hit, because
+/// shape-only matching produces too many false positives in claude's
+/// bullet-marker scrollback.
+///
+/// claude's pickers come in two flavours handled uniformly:
 ///   - numbered: `❯ 1. Yes` / `  2. No`               (the model picker)
 ///   - unnumbered: `❯ Auto-accept edits` / `  Manual` (the AskUserQuestion picker)
-///
-/// A picker is confirmed when a **selected** row (cursor + space + text)
-/// has at least one **sibling** row within ±4 lines whose indent equals
-/// the cursor column + 2 (matching the cursor + its space). Single-row
-/// `❯ user_text` (the input box) has no sibling, so it never triggers.
 
 /// Returns `(cursor_col, prefix)` when `line` is a picker's selected
 /// row: `<prefix><cursor><space><text>`, where `prefix` is the leading
@@ -140,27 +141,24 @@ fn is_box_char(c: char) -> bool {
     matches!(c as u32, 0x2500..=0x257F)
 }
 
-/// Find the bottom-most row that looks like a prompt or picker. Used by
-/// both [`prompt_visible`] and [`find_popup_region`] so the trigger and
-/// the crop anchor agree.
+/// Find the bottom-most row matching a PROMPT_MARKER substring. Used
+/// by both [`prompt_visible`] and [`find_popup_region`] so the trigger
+/// and the crop anchor agree.
+///
+/// Structural cursor+sibling detection is intentionally NOT used as a
+/// trigger here: claude's chat scrollback uses bullet glyphs (`●`,
+/// `*`, `›`) that match `picker_cursor_info`, and any indented
+/// continuation line (e.g. `  Set model to Haiku 4.5 for this
+/// session`) matches `is_picker_sibling_line` — so structural
+/// detection fires constantly on normal chat. Real claude pickers
+/// always render a `↑/↓ navigate · Esc to cancel · Enter to select`
+/// hint footer; the matching substrings live in `PROMPT_MARKERS`.
 fn find_marker_row(screen: &Screen) -> Option<u16> {
     let (rows, cols) = screen.size();
     for r in (0..rows).rev() {
         let txt = row_text(screen, r, cols);
         if PROMPT_MARKERS.iter().any(|m| txt.contains(m)) {
             return Some(r);
-        }
-        if let Some((_, prefix)) = picker_cursor_info(&txt) {
-            for delta in [-4i32, -3, -2, -1, 1, 2, 3, 4] {
-                let r2 = r as i32 + delta;
-                if r2 < 0 || r2 >= rows as i32 {
-                    continue;
-                }
-                let sib = row_text(screen, r2 as u16, cols);
-                if is_picker_sibling_line(&sib, &prefix) {
-                    return Some(r);
-                }
-            }
         }
     }
     None
@@ -772,15 +770,16 @@ mod tests {
     #[test]
     fn detects_numbered_picker_with_chevron_cursor() {
         // The model-switch picker: a question + numbered options with
-        // a chevron on the selected row.
-        let p = parse("\x1b[2JSwitch model?\r\n\r\n❯ 1. Yes, switch\r\n  2. No, go back".as_bytes());
+        // a chevron on the selected row + the hint footer that real
+        // claude renders below every picker.
+        let p = parse("\x1b[2JSwitch model?\r\n\r\n❯ 1. Yes, switch\r\n  2. No, go back\r\n\r\n↑/↓ navigate · Esc to cancel · Enter to select".as_bytes());
         assert!(prompt_visible(p.screen(), false));
     }
 
     #[test]
     fn detects_numbered_picker_with_alternate_cursor() {
         // Some terminal fonts render the cursor as `›` instead of `❯`.
-        let p = parse("\x1b[2J› 1. Yes\r\n  2. No".as_bytes());
+        let p = parse("\x1b[2J› 1. Yes\r\n  2. No\r\n\r\nEsc to cancel".as_bytes());
         assert!(prompt_visible(p.screen(), false));
     }
 
@@ -802,6 +801,7 @@ mod tests {
         bytes.push_str("\r\n");
         bytes.push_str("❯ 1. Yes, switch to Haiku 4.5\r\n");
         bytes.push_str("  2. No, go back\r\n");
+        bytes.push_str("\r\nEsc to cancel\r\n");
         let p = parse(bytes.as_bytes());
         let picker = parse_picker(p.screen()).expect("picker parsed");
         assert_eq!(picker.title.as_deref(), Some("Switch model?"));
@@ -819,6 +819,7 @@ mod tests {
         bytes.push_str("\x1b[2JPick one?\r\n");
         bytes.push_str("  1. Apple\r\n");
         bytes.push_str("› 2. Banana\r\n");
+        bytes.push_str("\r\nEsc to cancel\r\n");
         let p = parse(bytes.as_bytes());
         let picker = parse_picker(p.screen()).expect("picker parsed");
         assert_eq!(picker.selected, 1);
@@ -879,6 +880,7 @@ mod tests {
         bytes.push_str("❯ Quick fix\r\n");
         bytes.push_str("  Full refactor\r\n");
         bytes.push_str("  Skip for now\r\n");
+        bytes.push_str("\r\nEsc to cancel\r\n");
         let p = parse(bytes.as_bytes());
         assert!(prompt_visible(p.screen(), false));
         let picker = parse_picker(p.screen()).expect("picker parsed");
@@ -898,6 +900,7 @@ mod tests {
         bytes.push_str("  Just answer the question\r\n");
         bytes.push_str("❯ Refactor existing code\r\n");
         bytes.push_str("  5. Chat about this\r\n");
+        bytes.push_str("\r\nEsc to cancel\r\n");
         let p = parse(bytes.as_bytes());
         let picker = parse_picker(p.screen()).expect("picker parsed");
         assert_eq!(picker.options.len(), 5, "got {:?}", picker.options);
@@ -905,6 +908,24 @@ mod tests {
         assert_eq!(picker.options[3], "Refactor existing code");
         assert_eq!(picker.options[4], "Chat about this"); // leading "5. " stripped
         assert_eq!(picker.selected, 3);
+    }
+
+    #[test]
+    fn chat_scrollback_with_bullet_markers_does_not_trigger() {
+        // Image-13 regression: claude's normal chat scrollback uses
+        // bullet glyphs (`›`, `●`, `*`) that all match the structural
+        // cursor shape, and continuation lines (`  Set model to …`)
+        // match the sibling shape. Pre-fix, this fired the overlay
+        // over normal chat after every `/model` command.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2J› /model haiku\r\n");
+        bytes.push_str("  Set model to Haiku 4.5 for this session\r\n");
+        bytes.push_str("› say hi\r\n");
+        bytes.push_str("● Hi!\r\n");
+        bytes.push_str("* Cogitated for 2s\r\n");
+        let p = parse(bytes.as_bytes());
+        assert!(!prompt_visible(p.screen(), false));
+        assert!(parse_picker(p.screen()).is_none());
     }
 
     #[test]
@@ -937,6 +958,7 @@ mod tests {
             let cursor = if n == 11 { "❯" } else { " " };
             bytes.push_str(&format!("{} {}. Option {}\r\n", cursor, n, n));
         }
+        bytes.push_str("\r\nEsc to cancel\r\n");
         let p = parse(bytes.as_bytes());
         let picker = parse_picker(p.screen()).expect("picker parsed");
         assert_eq!(picker.options.len(), 12);
@@ -953,6 +975,7 @@ mod tests {
         bytes.push_str("\r\n");
         bytes.push_str("❯ 1. Yes\r\n");
         bytes.push_str("  2. No\r\n");
+        bytes.push_str("\r\nEsc to cancel\r\n");
         let p = parse(bytes.as_bytes());
         let (top, bot, _, _) = find_popup_region(p.screen()).expect("picker found");
         let txt: Vec<String> = (top..=bot).map(|r| row_text(p.screen(), r, p.screen().size().1)).collect();
