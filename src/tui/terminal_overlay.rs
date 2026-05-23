@@ -52,8 +52,73 @@ pub fn prompt_visible(screen: &Screen, awaiting_marker: bool) -> bool {
     if awaiting_marker {
         return true;
     }
-    let contents = screen.contents();
-    PROMPT_MARKERS.iter().any(|m| contents.contains(m))
+    find_marker_row(screen).is_some()
+}
+
+/// Cursor characters claude uses for the "selected" row in a picker UI.
+/// Excludes `>` and `)` which would false-positive on user command echoes
+/// like `> /model`.
+fn is_picker_cursor(c: char) -> bool {
+    matches!(c, '❯' | '›' | '▶' | '▷' | '⟩')
+}
+
+/// True when `row` looks like one entry in a numbered picker — either
+/// the selected row (`❯ 1. Option`) or an unselected sibling
+/// (`  2. Option`). Doesn't confirm pickerness alone; pair with a
+/// nearby-sibling check.
+fn is_picker_option_row(screen: &Screen, row: u16, cols: u16) -> bool {
+    let line = row_text(screen, row, cols);
+    let trimmed = line.trim_start();
+    let mut chars = trimmed.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false,
+    };
+    let (digit, sep) = if is_picker_cursor(first) {
+        if chars.next() != Some(' ') {
+            return false;
+        }
+        let d = chars.next();
+        let s = chars.next();
+        (d, s)
+    } else if first.is_ascii_digit() {
+        (Some(first), chars.next())
+    } else {
+        return false;
+    };
+    digit.is_some_and(|c| c.is_ascii_digit()) && matches!(sep, Some('.') | Some(')'))
+}
+
+/// Find the bottom-most row that looks like a prompt or picker. Used by
+/// both [`prompt_visible`] and [`find_popup_region`] so the trigger and
+/// the crop anchor agree.
+fn find_marker_row(screen: &Screen) -> Option<u16> {
+    let (rows, cols) = screen.size();
+    for r in (0..rows).rev() {
+        let txt = row_text(screen, r, cols);
+        if PROMPT_MARKERS.iter().any(|m| txt.contains(m)) {
+            return Some(r);
+        }
+        if is_picker_option_row(screen, r, cols) {
+            // Confirm by a sibling option row within ±4 rows so a stray
+            // "1. foo" in chat doesn't trigger.
+            for delta in [-4i32, -3, -2, -1, 1, 2, 3, 4] {
+                let r2 = r as i32 + delta;
+                if r2 < 0 || r2 >= rows as i32 {
+                    continue;
+                }
+                if r2 as u16 != r && is_picker_option_row(screen, r2 as u16, cols) {
+                    return Some(r);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn is_horizontal_separator(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 4 && t.chars().all(|c| matches!(c, '─' | '━' | '-' | '═'))
 }
 
 /// Render the popup region of `screen` as a small overlay inside
@@ -98,43 +163,72 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &Screen) {
 /// Locate the popup's bounding box on the screen. Returns
 /// `(row_top, row_bot, col_left, col_right)` inclusive. None when no
 /// prompt marker is present (caller falls back to a generic region).
+///
+/// Expansion tolerates a single blank row so we keep the header +
+/// description of un-boxed pickers (e.g. claude's "Switch model?"
+/// dialog separates header from options with a blank line). Stops at
+/// 2 consecutive blanks, a horizontal separator, a box corner, or the
+/// height cap.
 fn find_popup_region(screen: &Screen) -> Option<(u16, u16, u16, u16)> {
     let (rows, cols) = screen.size();
-    // Prefer the bottom-most marker — claude anchors popups near the
-    // input box, so the lowest match is the one the user is waiting on.
-    let marker_row = (0..rows).rev().find(|r| {
-        let txt = row_text(screen, *r, cols);
-        PROMPT_MARKERS.iter().any(|m| txt.contains(m))
-    })?;
+    let marker_row = find_marker_row(screen)?;
 
     let mut top = marker_row;
-    while top > 0 {
+    let mut blanks_up = 0u16;
+    while top > 0 && marker_row.saturating_sub(top) < MAX_POPUP_ROWS {
         let prev = top - 1;
         let txt = row_text(screen, prev, cols);
-        if txt.trim().is_empty() {
+        if is_horizontal_separator(&txt) {
             break;
         }
+        if txt.trim().is_empty() {
+            blanks_up += 1;
+            if blanks_up >= 2 {
+                break;
+            }
+        } else {
+            blanks_up = 0;
+        }
         top = prev;
-        // Stop *after* including a row that contains a box top-corner —
-        // that's the popup's upper border.
         if txt.chars().any(is_box_top_corner) {
             break;
         }
     }
+    // Trim leading blank rows.
+    while top < marker_row && row_text(screen, top, cols).trim().is_empty() {
+        top += 1;
+    }
+
     let mut bot = marker_row;
-    while bot + 1 < rows {
+    let mut blanks_dn = 0u16;
+    while bot + 1 < rows && bot.saturating_sub(marker_row) < MAX_POPUP_ROWS {
         let next = bot + 1;
         let txt = row_text(screen, next, cols);
-        if txt.trim().is_empty() {
+        if is_horizontal_separator(&txt) {
             break;
+        }
+        // Stop *before* the next UI element's top border (input box).
+        if txt.chars().any(is_box_top_corner) && !txt.chars().any(is_box_bottom_corner) {
+            break;
+        }
+        if txt.trim().is_empty() {
+            blanks_dn += 1;
+            if blanks_dn >= 2 {
+                break;
+            }
+        } else {
+            blanks_dn = 0;
         }
         bot = next;
         if txt.chars().any(is_box_bottom_corner) {
             break;
         }
     }
-    // Cap height: anchor on marker_row so the user sees what they're
-    // answering, not a long preamble that got pulled in.
+    while bot > marker_row && row_text(screen, bot, cols).trim().is_empty() {
+        bot -= 1;
+    }
+
+    // Hard cap height: anchor on marker so the user sees the prompt.
     if bot - top + 1 > MAX_POPUP_ROWS {
         let half = MAX_POPUP_ROWS.saturating_sub(4);
         top = marker_row.saturating_sub(half);
@@ -306,6 +400,46 @@ mod tests {
         // open on this — it would trigger on every keystroke.
         let p = parse("\x1b[2J❯ hello world".as_bytes());
         assert!(!prompt_visible(p.screen(), false));
+    }
+
+    #[test]
+    fn detects_numbered_picker_with_chevron_cursor() {
+        // The model-switch picker: a question + numbered options with
+        // a chevron on the selected row.
+        let p = parse("\x1b[2JSwitch model?\r\n\r\n❯ 1. Yes, switch\r\n  2. No, go back".as_bytes());
+        assert!(prompt_visible(p.screen(), false));
+    }
+
+    #[test]
+    fn detects_numbered_picker_with_alternate_cursor() {
+        // Some terminal fonts render the cursor as `›` instead of `❯`.
+        let p = parse("\x1b[2J› 1. Yes\r\n  2. No".as_bytes());
+        assert!(prompt_visible(p.screen(), false));
+    }
+
+    #[test]
+    fn ignores_lone_numbered_line_without_sibling() {
+        // A stray "1. foo" in chat output should NOT trigger — pickers
+        // always have at least 2 sibling option rows.
+        let p = parse("\x1b[2JHere's an item: 1. apple\r\n\r\nnext paragraph".as_bytes());
+        assert!(!prompt_visible(p.screen(), false));
+    }
+
+    #[test]
+    fn picker_region_includes_header_across_blank_row() {
+        // Header + blank + chevron+digit options — region should span
+        // header to the last option.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JSwitch model?\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("❯ 1. Yes\r\n");
+        bytes.push_str("  2. No\r\n");
+        let p = parse(bytes.as_bytes());
+        let (top, bot, _, _) = find_popup_region(p.screen()).expect("picker found");
+        let txt: Vec<String> = (top..=bot).map(|r| row_text(p.screen(), r, p.screen().size().1)).collect();
+        assert!(txt.iter().any(|l| l.contains("Switch model?")), "expected header in region: {:?}", txt);
+        assert!(txt.iter().any(|l| l.contains("❯ 1. Yes")), "expected option in region: {:?}", txt);
+        assert!(txt.iter().any(|l| l.contains("2. No")), "expected sibling option in region: {:?}", txt);
     }
 
     #[test]
