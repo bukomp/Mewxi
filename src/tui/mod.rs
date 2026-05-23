@@ -2221,6 +2221,19 @@ fn flatten_sessions(
                 let model = opt
                     .and_then(|o| o.model.clone())
                     .unwrap_or_else(|| ls.model.clone());
+                // Brand-new session with no transcript records yet:
+                // surface the account's settings-level model override
+                // so the badge isn't blank during the spawn → first
+                // assistant response window. Falls back to the literal
+                // `default` placeholder when nothing is configured,
+                // matching the picker's "Default (recommended)" label.
+                let model = if model.is_empty() {
+                    pa.account
+                        .default_model()
+                        .unwrap_or_else(|| "default".to_string())
+                } else {
+                    model
+                };
                 let permission_mode = opt
                     .and_then(|o| o.mode.clone())
                     .or_else(|| ls.permission_mode.clone());

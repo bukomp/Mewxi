@@ -117,6 +117,29 @@ impl Account {
         }
         if opted_in { "auto".to_string() } else { "default".to_string() }
     }
+
+    /// The default model this account uses when spawning a session
+    /// without an explicit `--model` flag — derived from the `model`
+    /// field in `<dir>/settings.json` (claude's standard override). If
+    /// neither settings file sets it, returns `None` and the caller
+    /// should fall back to claude's hardcoded default — which we render
+    /// as the literal `default` placeholder, matching the picker's
+    /// "Default (recommended)" option. `settings.local.json` overrides
+    /// `settings.json` when both define the field.
+    pub fn default_model(&self) -> Option<String> {
+        let mut out: Option<String> = None;
+        for path in self.settings_paths() {
+            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+            let Ok(v): serde_json::Result<serde_json::Value> =
+                serde_json::from_str(&raw) else { continue };
+            if let Some(m) = v.get("model").and_then(|x| x.as_str()) {
+                if !m.is_empty() {
+                    out = Some(m.to_string());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// On-disk shape of `~/.config/mewxi/accounts.toml`.
