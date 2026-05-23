@@ -182,56 +182,79 @@ fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &Pendi
         idx += 1;
     }
 
-    let secs = p.elapsed.as_secs();
-    let mut lines: Vec<Line<'static>> = vec![
-        Line::from(vec![
-            Span::styled("starting ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "claude",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" under ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                p.account_name.clone(),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("({}s)", secs),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("folder   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                p.cwd.to_string_lossy().into_owned(),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "waiting for the session marker to appear …",
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        )),
-    ];
-    if let Some(tail) = &p.last_output {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "── child output (tail) ──",
-            Style::default().fg(Color::DarkGray),
-        )));
-        for ln in tail.lines() {
-            lines.push(Line::from(Span::styled(
-                ln.to_string(),
-                Style::default().fg(Color::Gray),
-            )));
-        }
-    }
+    let pending_area = chunks[idx];
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Spawning ")
         .border_style(Style::default().fg(Color::Yellow));
-    f.render_widget(Paragraph::new(lines).block(block), chunks[idx]);
+    let inner = block.inner(pending_area);
+    f.render_widget(block, pending_area);
+
+    let secs = p.elapsed.as_secs();
+    // Animated trailing dots: 0..=3, ticked roughly twice per second.
+    let dots_count = ((p.elapsed.as_millis() / 500) % 4) as usize;
+    let dots: String = ".".repeat(dots_count);
+
+    // Pick the largest mascot that fits with room for a 4-line caption
+    // (blank + meowing + blank + folder line) below it.
+    let caption_h: u16 = 4;
+    let (mascot, mascot_h, mascot_w) = pick_mascot(inner.width, inner.height, caption_h);
+
+    let vrows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(mascot_h),
+            Constraint::Length(caption_h),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    if !mascot.is_empty() && mascot_w <= vrows[0].width {
+        let pad = vrows[0].width.saturating_sub(mascot_w) / 2;
+        let mascot_area = Rect {
+            x: vrows[0].x + pad,
+            y: vrows[0].y,
+            width: mascot_w,
+            height: mascot_h.min(vrows[0].height),
+        };
+        f.render_widget(
+            Paragraph::new(mascot).style(Style::default().fg(Color::Magenta)),
+            mascot_area,
+        );
+    }
+
+    let cwd_display = p.cwd.to_string_lossy().into_owned();
+    let caption_lines: Vec<Line<'static>> = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!("meowing new agent{:<3}", dots),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ({}s)", secs),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+        .alignment(ratatui::layout::Alignment::Center),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("under ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                p.account_name.clone(),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(cwd_display, Style::default().fg(Color::Cyan)),
+        ])
+        .alignment(ratatui::layout::Alignment::Center),
+    ];
+    f.render_widget(Paragraph::new(caption_lines), vrows[1]);
+    let _ = p.last_output;
     idx += 1;
     widgets::render_footer(
         f,
@@ -1213,4 +1236,25 @@ fn fmt_age(secs: i64) -> String {
     } else {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
+}
+
+const MASCOT_SMALL: &str = include_str!("../../images/mewxi-small.ascii");
+const MASCOT_TINY: &str = include_str!("../../images/mewxi-tiny.ascii");
+
+/// Pick the largest mewxi mascot whose dimensions fit inside the given
+/// area together with `caption_h` rows reserved below it. Returns the
+/// raw mascot text plus its (height, width) — empty string when nothing
+/// fits.
+fn pick_mascot(area_w: u16, area_h: u16, caption_h: u16) -> (&'static str, u16, u16) {
+    let avail_h = area_h.saturating_sub(caption_h);
+    let candidates: [(&str, u16, u16); 2] = [
+        (MASCOT_SMALL, 22, 44),
+        (MASCOT_TINY, 16, 32),
+    ];
+    for (art, h, w) in candidates {
+        if h <= avail_h && w <= area_w {
+            return (art, h, w);
+        }
+    }
+    ("", 0, 0)
 }

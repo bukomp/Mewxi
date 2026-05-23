@@ -56,7 +56,18 @@ impl PtySession {
 
         let mut cmd = CommandBuilder::new(&claude_bin);
         cmd.cwd(&cwd);
-        cmd.env("CLAUDE_CONFIG_DIR", &account.dir);
+        // Only override CLAUDE_CONFIG_DIR for non-default accounts. For
+        // the default `~/.claude`, claude already discovers its own
+        // config dir, and setting the env forces it to look for
+        // `.claude.json` *inside* `~/.claude` — but the user's real
+        // auth/theme config lives at `$HOME/.claude.json`. Setting the
+        // env on the default account would surface the empty stub at
+        // `~/.claude/.claude.json` and trigger the first-run welcome
+        // flow (theme picker + login method), which never resolves
+        // because mewxi hides the PTY.
+        if !is_default_claude_dir(&account.dir) {
+            cmd.env("CLAUDE_CONFIG_DIR", &account.dir);
+        }
         cmd.env("TERM", "xterm-256color");
 
         let child = pair
@@ -141,6 +152,14 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         let _ = self.kill();
     }
+}
+
+/// True when `dir` is the user's default Claude config directory
+/// (`$HOME/.claude`). Used to decide whether to forward
+/// `CLAUDE_CONFIG_DIR` to the child — see [`PtySession::spawn`].
+fn is_default_claude_dir(dir: &std::path::Path) -> bool {
+    let Some(home) = std::env::var_os("HOME") else { return false };
+    PathBuf::from(home).join(".claude") == dir
 }
 
 /// Resolve the `claude` binary to spawn. Honours `MEWXI_CLAUDE_BIN`
