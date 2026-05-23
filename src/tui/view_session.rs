@@ -331,9 +331,14 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
         Span::styled(s.project.clone(), Style::default().fg(Color::Cyan)),
         Span::raw("  session "),
         Span::styled(s.session_id.clone(), Style::default().fg(Color::Yellow)),
-        Span::raw("  "),
-        Span::styled(s.model.clone(), Style::default().fg(Color::Green)),
     ];
+    if !s.model.is_empty() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            s.model.clone(),
+            Style::default().fg(Color::Green),
+        ));
+    }
     if let Some(mode_raw) = s.permission_mode.as_deref() {
         let (label, color) = mode_badge(mode_raw);
         spans.push(Span::raw("  "));
