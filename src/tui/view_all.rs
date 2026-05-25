@@ -329,28 +329,10 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
     let show_io = w >= 94;
     let show_cache = w >= 103;
 
-    // Sort by project (alphabetical, case-insensitive), then within each
-    // project keep the existing order (active first, then idle, newest
-    // first). Project becomes a header row above each group, so the
-    // per-row project column goes away.
-    let mut ordered: Vec<&SessionRef> = sessions.to_vec();
-    ordered.sort_by(|a, b| {
-        let pa = a.project.to_ascii_lowercase();
-        let pb = b.project.to_ascii_lowercase();
-        let rank = |s: SessionState| match s {
-            SessionState::Active => 0,
-            SessionState::Idle => 1,
-        };
-        pa.cmp(&pb)
-            .then_with(|| rank(a.state).cmp(&rank(b.state)))
-            .then_with(|| b.last_activity.cmp(&a.last_activity))
-    });
-
-    // Selection comes in as an index into the original `sessions` slice.
-    // Resolve it to a pointer so we can match the right row after sorting.
-    let selected_ptr: Option<*const SessionRef> = selected
-        .and_then(|i| sessions.get(i).copied())
-        .map(|s| s as *const SessionRef);
+    // `sessions` is already grouped by project (alphabetical) with
+    // active-then-idle ordering within each group — sort lives in
+    // flatten_sessions so selection indexes match visible row order.
+    let ordered: &[&SessionRef] = sessions;
 
     let now = Utc::now();
     // Compute column count up front so header rows pad correctly.
@@ -372,7 +354,6 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
 
     let mut rows: Vec<Row> = Vec::with_capacity(ordered.len() + 8);
     let mut group_start = 0usize;
-    let mut first_group = true;
     while group_start < ordered.len() {
         let project = &ordered[group_start].project;
         let mut group_end = group_start + 1;
@@ -388,13 +369,12 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         let any_active = active_in_group > 0;
         let project_color = if any_active { Color::Cyan } else { Color::DarkGray };
 
-        // Blank spacer row between groups (not before the first).
-        if !first_group {
-            let mut blank: Vec<Cell> = Vec::with_capacity(col_count);
-            for _ in 0..col_count { blank.push(Cell::from("")); }
-            rows.push(Row::new(blank));
-        }
-        first_group = false;
+        // Blank spacer row before every group — separates groups from
+        // each other and gives the first group breathing room under
+        // the column-header row.
+        let mut blank: Vec<Cell> = Vec::with_capacity(col_count);
+        for _ in 0..col_count { blank.push(Cell::from("")); }
+        rows.push(Row::new(blank));
 
         let mut header_cells: Vec<Cell> = Vec::with_capacity(col_count);
         header_cells.push(Cell::from(Line::from(vec![
@@ -410,9 +390,9 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         }
         rows.push(Row::new(header_cells));
 
-        for s in group {
+        for (offset, s) in group.iter().enumerate() {
             let age_secs = (now - s.state_since).num_seconds().max(0);
-            let is_selected = selected_ptr == Some(*s as *const SessionRef);
+            let is_selected = selected == Some(group_start + offset);
             let arrow = if is_selected { "▶ " } else { "  " };
             let state_label = match s.state {
                 SessionState::Active => "active",

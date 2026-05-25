@@ -1096,16 +1096,20 @@ fn flatten_sessions(accounts: &[PerAccount]) -> Vec<SessionRef> {
             })
         })
         .collect();
-    // Active sessions first (newest first), then idle (newest first) —
-    // mirrors the per-account scan order so view 1's table looks the
-    // same whether you have one account or many.
+    // Group by project (alphabetical, case-insensitive); within each
+    // project, active sessions first (newest first) then idle (newest
+    // first). View 1 renders project headers above each group, and j/k
+    // navigation walks this same order so the selection cursor tracks
+    // the visible row order rather than jumping around.
     out.sort_by(|a, b| {
         let rank = |s: SessionState| match s {
             SessionState::Active => 0,
             SessionState::Idle => 1,
         };
-        rank(a.state)
-            .cmp(&rank(b.state))
+        a.project
+            .to_ascii_lowercase()
+            .cmp(&b.project.to_ascii_lowercase())
+            .then_with(|| rank(a.state).cmp(&rank(b.state)))
             .then_with(|| b.last_activity.cmp(&a.last_activity))
     });
     out
