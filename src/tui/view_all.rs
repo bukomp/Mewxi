@@ -320,22 +320,99 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
     }
 
     // Responsive columns — added in priority order as the screen widens.
-    // Base columns need ~84 chars (8 columns + 7 spacers + 2 borders);
+    // Base columns need ~57 chars (6 columns + 5 spacers + 2 borders);
     // each extra column adds (length + 1 spacer). Thresholds include a
     // small buffer so columns don't appear right at the edge of fitting.
     let w = area.width;
-    let show_ctx = w >= 95;
-    let show_status = w >= 107;
-    let show_io = w >= 121;
-    let show_cache = w >= 130;
+    let show_ctx = w >= 68;
+    let show_status = w >= 80;
+    let show_io = w >= 94;
+    let show_cache = w >= 103;
+
+    // Sort by project (alphabetical, case-insensitive), then within each
+    // project keep the existing order (active first, then idle, newest
+    // first). Project becomes a header row above each group, so the
+    // per-row project column goes away.
+    let mut ordered: Vec<&SessionRef> = sessions.to_vec();
+    ordered.sort_by(|a, b| {
+        let pa = a.project.to_ascii_lowercase();
+        let pb = b.project.to_ascii_lowercase();
+        let rank = |s: SessionState| match s {
+            SessionState::Active => 0,
+            SessionState::Idle => 1,
+        };
+        pa.cmp(&pb)
+            .then_with(|| rank(a.state).cmp(&rank(b.state)))
+            .then_with(|| b.last_activity.cmp(&a.last_activity))
+    });
+
+    // Selection comes in as an index into the original `sessions` slice.
+    // Resolve it to a pointer so we can match the right row after sorting.
+    let selected_ptr: Option<*const SessionRef> = selected
+        .and_then(|i| sessions.get(i).copied())
+        .map(|s| s as *const SessionRef);
 
     let now = Utc::now();
-    let rows: Vec<Row> = sessions
+    // Compute column count up front so header rows pad correctly.
+    // Base: account, age, tokens, cost, model, state = 6.
+    let mut col_count = 6;
+    if show_status { col_count += 1; }
+    if show_ctx { col_count += 1; }
+    if show_io { col_count += 1; }
+    if show_cache { col_count += 1; }
+
+    // Pad project names to the widest one so the "x/y active" count
+    // lines up vertically across all group headers regardless of name
+    // length or digit count.
+    let max_project_len = ordered
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
+        .map(|s| if s.project.is_empty() { "(unknown)".len() } else { s.project.chars().count() })
+        .max()
+        .unwrap_or(0);
+
+    let mut rows: Vec<Row> = Vec::with_capacity(ordered.len() + 8);
+    let mut group_start = 0usize;
+    let mut first_group = true;
+    while group_start < ordered.len() {
+        let project = &ordered[group_start].project;
+        let mut group_end = group_start + 1;
+        while group_end < ordered.len() && ordered[group_end].project == *project {
+            group_end += 1;
+        }
+        let group = &ordered[group_start..group_end];
+        let active_in_group = group.iter().filter(|s| s.state == SessionState::Active).count();
+        let total_in_group = group.len();
+        let label = if project.is_empty() { "(unknown)" } else { project.as_str() };
+        let label_pad = max_project_len.saturating_sub(label.chars().count());
+        let count_text = format!("{active_in_group}/{total_in_group} active");
+        let any_active = active_in_group > 0;
+        let project_color = if any_active { Color::Cyan } else { Color::DarkGray };
+
+        // Blank spacer row between groups (not before the first).
+        if !first_group {
+            let mut blank: Vec<Cell> = Vec::with_capacity(col_count);
+            for _ in 0..col_count { blank.push(Cell::from("")); }
+            rows.push(Row::new(blank));
+        }
+        first_group = false;
+
+        let mut header_cells: Vec<Cell> = Vec::with_capacity(col_count);
+        header_cells.push(Cell::from(Line::from(vec![
+            Span::styled(
+                format!("▾ {label}"),
+                Style::default().fg(project_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(label_pad + 2)),
+            Span::styled(count_text, Style::default().fg(Color::DarkGray)),
+        ])));
+        for _ in 1..col_count {
+            header_cells.push(Cell::from(""));
+        }
+        rows.push(Row::new(header_cells));
+
+        for s in group {
             let age_secs = (now - s.state_since).num_seconds().max(0);
-            let is_selected = selected == Some(i);
+            let is_selected = selected_ptr == Some(*s as *const SessionRef);
             let arrow = if is_selected { "▶ " } else { "  " };
             let state_label = match s.state {
                 SessionState::Active => "active",
@@ -353,14 +430,12 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
                 Style::default()
             };
             let mut cells: Vec<Cell> = vec![
-                Cell::from(format!("{arrow}{}", s.account_name)),
-                Cell::from(s.project.clone()),
-                Cell::from(short_id(&s.session_id)),
+                Cell::from(format!("  {arrow}{}", s.account_name)),
                 Cell::from(fmt_age(age_secs)),
             ];
             if show_status {
-                let (label, color) = activity_display(&s.activity);
-                cells.push(Cell::from(Span::styled(label, Style::default().fg(color))));
+                let (lbl, color) = activity_display(&s.activity);
+                cells.push(Cell::from(Span::styled(lbl, Style::default().fg(color))));
             }
             if show_ctx {
                 cells.push(Cell::from(fmt_ctx(s.current_context, s.context_cap)));
@@ -379,15 +454,17 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
             cells.push(Cell::from(format!("${:.2}", s.cost_usd)));
             cells.push(Cell::from(short_model(&s.model)));
             cells.push(Cell::from(Span::styled(state_label, Style::default().fg(state_color))));
-            Row::new(cells).style(base_style)
-        })
-        .collect();
+            rows.push(Row::new(cells).style(base_style));
+        }
 
-    let mut header_labels: Vec<&'static str> = vec!["account", "project", "session", "age"];
+        group_start = group_end;
+    }
+
+    // Account names are indented by 4 chars under project headers ("  ▶ "
+    // or "    "), so the column label needs the same lead-in to line up.
+    let mut header_labels: Vec<&'static str> = vec!["    account", "age"];
     let mut constraints: Vec<Constraint> = vec![
-        Constraint::Length(12),
         Constraint::Min(14),
-        Constraint::Length(11),
         Constraint::Length(6),
     ];
     if show_status {
@@ -461,11 +538,6 @@ fn fmt_ctx(current: Option<u64>, cap: Option<u64>) -> String {
         }
         _ => "—".into(),
     }
-}
-
-fn short_id(s: &str) -> String {
-    let n = 8.min(s.len());
-    s.chars().take(n).collect::<String>() + if s.len() > n { "…" } else { "" }
 }
 
 fn short_model(m: &str) -> String {
