@@ -172,8 +172,12 @@ impl Account {
     /// The persisted `/effort` level for this account, read from
     /// `effortLevel` in `<dir>/settings.json` (or `settings.local.json`
     /// when it overrides). `None` when the user has never set one —
-    /// claude then uses its built-in default ("auto"). Mirrors how
-    /// Claude Code persists the value globally rather than per-session.
+    /// claude then uses its built-in default ("auto").
+    ///
+    /// Note: Claude Code's `/effort` command is session-scoped and does
+    /// not itself write this field. The value here is whatever was put
+    /// there explicitly (Claude Code's own config UI, a hand-edit, or
+    /// mewxi's [`set_default_effort`]).
     pub fn default_effort(&self) -> Option<String> {
         let mut out: Option<String> = None;
         for path in self.settings_paths() {
@@ -188,6 +192,50 @@ impl Account {
         }
         out
     }
+}
+
+/// Persist `level` as the `effortLevel` field of this account's
+/// `<dir>/settings.json`. Creates the file (and `<dir>`) if missing,
+/// preserves any other keys, and writes atomically via tempfile +
+/// rename so a crash mid-write can't leave the JSON half-written.
+///
+/// We always target `settings.json` (not `settings.local.json`): the
+/// goal is the persistent default, and `settings.local.json` is
+/// per-machine-only — writing there would make the default vanish
+/// when the user moves to a different host.
+pub fn set_default_effort(account: &Account, level: &str) -> Result<()> {
+    let path = account.dir.join("settings.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut root: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("read {}", path.display()))?;
+        if raw.trim().is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str(&raw)
+                .with_context(|| format!("parse {}", path.display()))?
+        }
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("{} is not a JSON object", path.display()))?;
+    obj.insert(
+        "effortLevel".to_string(),
+        serde_json::Value::String(level.to_string()),
+    );
+    let out = serde_json::to_string_pretty(&root)
+        .with_context(|| format!("serialize {}", path.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, out)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename into {}", path.display()))?;
+    Ok(())
 }
 
 /// On-disk shape of `~/.config/mewxi/accounts.toml`.
@@ -615,4 +663,53 @@ fn sanitize_slug(name: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn account_in(dir: &Path) -> Account {
+        Account {
+            name: "test".into(),
+            dir: dir.to_path_buf(),
+            token_source: TokenSource::default(),
+        }
+    }
+
+    #[test]
+    fn set_default_effort_creates_settings_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let acc = account_in(tmp.path());
+        set_default_effort(&acc, "max").unwrap();
+        assert_eq!(acc.default_effort().as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn set_default_effort_preserves_other_keys() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"model":"claude-opus-4-7","skipAutoPermissionPrompt":true}"#,
+        )
+        .unwrap();
+        let acc = account_in(tmp.path());
+        set_default_effort(&acc, "high").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["effortLevel"], "high");
+        assert_eq!(v["model"], "claude-opus-4-7");
+        assert_eq!(v["skipAutoPermissionPrompt"], true);
+    }
+
+    #[test]
+    fn set_default_effort_overwrites_existing_value() {
+        let tmp = TempDir::new().unwrap();
+        let acc = account_in(tmp.path());
+        set_default_effort(&acc, "low").unwrap();
+        set_default_effort(&acc, "high").unwrap();
+        assert_eq!(acc.default_effort().as_deref(), Some("high"));
+    }
 }

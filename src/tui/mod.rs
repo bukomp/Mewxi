@@ -1490,93 +1490,143 @@ fn run_loop<B: ratatui::backend::Backend>(
                     // mutually exclusive but this ordering documents
                     // the precedence.
                     if let Some(modal) = model_picker.as_mut() {
-                        match modal.handle_key(k) {
-                            ModelOutcome::Stay => {}
-                            ModelOutcome::Cancel => {
-                                model_picker = None;
-                            }
-                            ModelOutcome::Confirm { slug, effort } => {
-                                model_picker = None;
-                                if let Some(key) = pinned_session.clone() {
-                                    if let Some(pty) = drivers.get_mut(&key) {
-                                        let mut bytes = format!("/model {slug}").into_bytes();
-                                        bytes.push(b'\r');
-                                        match pty.send_keys(&bytes) {
-                                            Ok(_) => {
-                                                let ls = per_account
-                                                    .iter()
-                                                    .find(|p| p.account.name == key.0)
-                                                    .and_then(|p| {
-                                                        p.live_sessions
-                                                            .iter()
-                                                            .find(|s| s.session_id == key.1)
-                                                    });
-                                                let model_baseline = ls
-                                                    .map(|s| s.model.clone())
-                                                    .unwrap_or_default();
-                                                let transcript_mode =
-                                                    ls.and_then(|s| s.permission_mode.clone());
-                                                let opt = driver_optimistic
-                                                    .entry(key.clone())
-                                                    .or_default();
-                                                let prior_mode = opt
-                                                    .mode
-                                                    .clone()
-                                                    .or_else(|| transcript_mode.clone());
-                                                opt.model = Some(slug.clone());
-                                                opt.model_baseline = Some(model_baseline);
-                                                // Mirror claude's
-                                                // auto-downgrade so a
-                                                // stale "auto" doesn't
-                                                // resurface when the
-                                                // user later switches
-                                                // back to a model that
-                                                // does support it.
-                                                if prior_mode.as_deref() == Some("auto")
-                                                    && !model_supports_auto(&slug)
-                                                {
-                                                    opt.mode = Some("default".into());
-                                                    opt.mode_baseline = transcript_mode;
+                        // Unify Confirm and ConfirmAsDefault into one
+                        // (slug, effort_opt, persist_default) tuple so
+                        // the PTY-send body below isn't duplicated.
+                        // ConfirmAsDefault adds a settings.json write
+                        // *after* the in-session sends, so the live
+                        // session reflects the change even if the
+                        // settings write later fails.
+                        let action: Option<(String, Option<String>, bool)> =
+                            match modal.handle_key(k) {
+                                ModelOutcome::Stay => None,
+                                ModelOutcome::Cancel => {
+                                    model_picker = None;
+                                    None
+                                }
+                                ModelOutcome::Confirm { slug, effort } => {
+                                    model_picker = None;
+                                    Some((slug, effort, false))
+                                }
+                                ModelOutcome::ConfirmAsDefault { slug, effort } => {
+                                    model_picker = None;
+                                    Some((slug, Some(effort), true))
+                                }
+                            };
+                        if let Some((slug, effort, persist_default)) = action {
+                            if let Some(key) = pinned_session.clone() {
+                                if let Some(pty) = drivers.get_mut(&key) {
+                                    let mut bytes = format!("/model {slug}").into_bytes();
+                                    bytes.push(b'\r');
+                                    match pty.send_keys(&bytes) {
+                                        Ok(_) => {
+                                            let ls = per_account
+                                                .iter()
+                                                .find(|p| p.account.name == key.0)
+                                                .and_then(|p| {
+                                                    p.live_sessions
+                                                        .iter()
+                                                        .find(|s| s.session_id == key.1)
+                                                });
+                                            let model_baseline = ls
+                                                .map(|s| s.model.clone())
+                                                .unwrap_or_default();
+                                            let transcript_mode =
+                                                ls.and_then(|s| s.permission_mode.clone());
+                                            let opt = driver_optimistic
+                                                .entry(key.clone())
+                                                .or_default();
+                                            let prior_mode = opt
+                                                .mode
+                                                .clone()
+                                                .or_else(|| transcript_mode.clone());
+                                            opt.model = Some(slug.clone());
+                                            opt.model_baseline = Some(model_baseline);
+                                            // Mirror claude's
+                                            // auto-downgrade so a
+                                            // stale "auto" doesn't
+                                            // resurface when the
+                                            // user later switches
+                                            // back to a model that
+                                            // does support it.
+                                            if prior_mode.as_deref() == Some("auto")
+                                                && !model_supports_auto(&slug)
+                                            {
+                                                opt.mode = Some("default".into());
+                                                opt.mode_baseline = transcript_mode;
+                                            }
+                                            // Send `/effort X\r` after
+                                            // the model change so the
+                                            // second command lands
+                                            // once claude's already
+                                            // processed the model
+                                            // switch. `/effort` itself
+                                            // is session-only — the
+                                            // settings.json write
+                                            // below (when
+                                            // `persist_default`) is
+                                            // what makes it stick.
+                                            let mut status_msg = format!("model → {slug}");
+                                            let mut effort_sent = false;
+                                            if let Some(eff) = effort.as_deref() {
+                                                let mut eb =
+                                                    format!("/effort {eff}").into_bytes();
+                                                eb.push(b'\r');
+                                                match pty.send_keys(&eb) {
+                                                    Ok(_) => {
+                                                        opt.effort = Some(eff.to_string());
+                                                        effort_sent = true;
+                                                        status_msg = format!(
+                                                            "model → {slug}  ·  effort → {eff}"
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        status_msg = format!(
+                                                            "model → {slug}  ·  effort send failed: {e}"
+                                                        );
+                                                    }
                                                 }
-                                                // Send `/effort X\r`
-                                                // after the model
-                                                // change so the second
-                                                // command lands once
-                                                // claude's already
-                                                // processed the model
-                                                // switch — claude
-                                                // persists effort
-                                                // globally, the order
-                                                // matters only for
-                                                // user-visible echo.
-                                                let mut status_msg = format!("model → {slug}");
+                                            }
+                                            // Persist the effort as
+                                            // the account's startup
+                                            // default. Only run when
+                                            // the in-session send
+                                            // worked — otherwise we'd
+                                            // pin a value the user
+                                            // never actually saw take
+                                            // effect.
+                                            if persist_default && effort_sent {
                                                 if let Some(eff) = effort.as_deref() {
-                                                    let mut eb =
-                                                        format!("/effort {eff}").into_bytes();
-                                                    eb.push(b'\r');
-                                                    match pty.send_keys(&eb) {
-                                                        Ok(_) => {
-                                                            opt.effort = Some(eff.to_string());
-                                                            status_msg = format!(
-                                                                "model → {slug}  ·  effort → {eff}"
-                                                            );
-                                                        }
-                                                        Err(e) => {
-                                                            status_msg = format!(
-                                                                "model → {slug}  ·  effort send failed: {e}"
-                                                            );
+                                                    if let Some(pa) = per_account
+                                                        .iter()
+                                                        .find(|p| p.account.name == key.0)
+                                                    {
+                                                        match crate::accounts::set_default_effort(
+                                                            &pa.account,
+                                                            eff,
+                                                        ) {
+                                                            Ok(()) => {
+                                                                status_msg = format!(
+                                                                    "model → {slug}  ·  effort → {eff} (saved as default)"
+                                                                );
+                                                            }
+                                                            Err(e) => {
+                                                                status_msg = format!(
+                                                                    "model → {slug}  ·  effort → {eff}  ·  default save failed: {e}"
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                 }
-                                                driver_status =
-                                                    Some((status_msg, Instant::now()));
                                             }
-                                            Err(e) => {
-                                                driver_status = Some((
-                                                    format!("model send failed: {e}"),
-                                                    Instant::now(),
-                                                ));
-                                            }
+                                            driver_status =
+                                                Some((status_msg, Instant::now()));
+                                        }
+                                        Err(e) => {
+                                            driver_status = Some((
+                                                format!("model send failed: {e}"),
+                                                Instant::now(),
+                                            ));
                                         }
                                     }
                                 }

@@ -4,10 +4,16 @@
 //! caller — this module is presentation-only.
 //!
 //! While open, the modal owns every keystroke (Esc to cancel, Up/Down
-//! to move, Tab to switch pane, Enter to confirm). The parent must
-//! dispatch keys through [`ModelPickerModal::handle_key`] *before* the
-//! global handlers, otherwise the underlying view's keybinds will leak
-//! through.
+//! to move, Tab to switch pane, Enter to confirm, `d` to confirm and
+//! also persist the effort as this account's startup default). The
+//! parent must dispatch keys through [`ModelPickerModal::handle_key`]
+//! *before* the global handlers, otherwise the underlying view's
+//! keybinds will leak through.
+//!
+//! Enter alone is session-scoped: claude's own `/effort` is "this
+//! session only" — it does not update `settings.json`. `d` adds the
+//! settings-file write so a brand-new session opens at the chosen
+//! level.
 //!
 //! ## Per-model effort matrix
 //!
@@ -116,6 +122,14 @@ pub enum ModelOutcome {
     Confirm {
         slug: String,
         effort: Option<String>,
+    },
+    /// Same as [`Confirm`] but also asks the caller to persist `effort`
+    /// to the account's `settings.json` (`effortLevel`) so future
+    /// sessions start there. Only emitted when the current model
+    /// actually supports effort — `effort` is therefore always `Some`.
+    ConfirmAsDefault {
+        slug: String,
+        effort: String,
     },
 }
 
@@ -242,6 +256,20 @@ impl ModelPickerModal {
                 let effort = levels.get(self.effort_idx).map(|s| (*s).to_string());
                 ModelOutcome::Confirm { slug, effort }
             }
+            // `d` confirms *and* persists the effort to settings.json.
+            // No-op when the current model has no effort to persist
+            // (Haiku) — falling through to Stay leaves the modal open
+            // so the user can switch models and try again.
+            (_, KeyCode::Char('d')) | (_, KeyCode::Char('D')) => {
+                let levels = self.current_levels();
+                match levels.get(self.effort_idx) {
+                    Some(eff) => ModelOutcome::ConfirmAsDefault {
+                        slug: MODELS[self.model_idx].slug.to_string(),
+                        effort: (*eff).to_string(),
+                    },
+                    None => ModelOutcome::Stay,
+                }
+            }
             _ => ModelOutcome::Stay,
         }
     }
@@ -254,7 +282,7 @@ impl ModelPickerModal {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Model & Thinking — Tab swap · Enter pick · Esc cancel ")
+            .title(" Model & Thinking — Tab swap · Enter session · d default · Esc cancel ")
             .border_style(Style::default().fg(Color::Magenta));
 
         // Carve inside the block: two columns side-by-side.
@@ -436,5 +464,33 @@ mod tests {
         assert!(opts.contains(&"auto"));
         assert!(opts.contains(&"max"));
         assert!(!opts.contains(&"xhigh"));
+    }
+
+    fn key(c: char) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(
+            KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    #[test]
+    fn d_emits_confirm_as_default_with_current_effort() {
+        // Opens on opus + max (the level we'll then persist).
+        let mut m = ModelPickerModal::new(Some("opus"), Some("max"));
+        match m.handle_key(key('d')) {
+            ModelOutcome::ConfirmAsDefault { slug, effort } => {
+                assert_eq!(slug, "opus");
+                assert_eq!(effort, "max");
+            }
+            _ => panic!("expected ConfirmAsDefault"),
+        }
+    }
+
+    #[test]
+    fn d_is_noop_when_model_has_no_effort() {
+        // Haiku has no effort levels — `d` has nothing to persist and
+        // must not silently fall through to Confirm or Cancel.
+        let mut m = ModelPickerModal::new(Some("haiku"), None);
+        assert!(matches!(m.handle_key(key('d')), ModelOutcome::Stay));
     }
 }
