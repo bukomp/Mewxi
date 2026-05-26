@@ -117,8 +117,16 @@ impl PtySession {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            parser.lock().expect("parser poisoned").process(&buf[..n]);
-                            let mut r = ring.lock().expect("ring poisoned");
+                            // Recover from a poisoned lock — vt100 has
+                            // its own assert paths and we'd rather keep
+                            // serving stale screen state than crash the
+                            // whole TUI (which would leave the terminal
+                            // in raw mode).
+                            parser
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .process(&buf[..n]);
+                            let mut r = ring.lock().unwrap_or_else(|e| e.into_inner());
                             r.extend_from_slice(&buf[..n]);
                             if r.len() > PTY_RING_BYTES {
                                 let cut = r.len() - PTY_RING_BYTES;
@@ -151,14 +159,18 @@ impl PtySession {
 
     /// Snapshot of the child's recent output (raw, ANSI-laden).
     pub fn ring_snapshot(&self) -> Vec<u8> {
-        self.ring.lock().expect("ring poisoned").clone()
+        self.ring.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Snapshot of the vt100 screen state. Cloning is cheap (flat cell
     /// array + a few counters) so callers can take a snapshot per render
     /// tick without holding the parser lock across the render.
     pub fn screen_snapshot(&self) -> vt100::Screen {
-        self.parser.lock().expect("parser poisoned").screen().clone()
+        self.parser
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen()
+            .clone()
     }
 
     /// Forward a crossterm KeyEvent to the PTY as the byte sequence
@@ -171,6 +183,14 @@ impl PtySession {
             return Ok(());
         }
         self.send_keys(&bytes)
+    }
+
+    /// OS process id of the spawned claude child, when available. Used
+    /// by the TUI to detect when claude rotates its `sessionId` on the
+    /// same process (e.g. after `/clear`, `/compact`) and re-pin the
+    /// driver to the new id without re-spawning.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.process_id()
     }
 
     /// Has the child exited?
