@@ -9,8 +9,8 @@ use super::widgets::{self, fmt_tokens_compact};
 use super::{PerAccount, SessionRef};
 use crate::chat_log::{self, ChatEntry, EntryKind};
 use serde_json::Value;
-use std::path::Path;
-use crate::live_session::SessionState;
+use std::path::{Path, PathBuf};
+use crate::live_session::{Activity, SessionState};
 use crate::stats::fmt_num;
 use chrono::Utc;
 use ratatui::Frame;
@@ -80,7 +80,7 @@ pub fn render(
         Constraint::Length(4), // 3 gauges
         Constraint::Length(3), // compact session totals
         Constraint::Length(3), // meta
-        Constraint::Min(4),    // chat log
+        Constraint::Min(4),    // chat log (mode/activity now in its bottom border)
     ];
     if driver.is_some() {
         // 3-row input pane: borders + one row of text.
@@ -273,11 +273,7 @@ fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &Pendi
 }
 
 fn render_driver_input(f: &mut Frame, area: Rect, d: &DriverPane<'_>) {
-    let (border_color, title) = if d.focused {
-        (Color::Green, " Drive (focused) ")
-    } else {
-        (Color::DarkGray, " Drive ")
-    };
+    let border_color = if d.focused { Color::Green } else { Color::DarkGray };
     let mut spans: Vec<Span> = vec![Span::styled(
         "> ",
         Style::default().fg(if d.focused { Color::Green } else { Color::DarkGray }),
@@ -307,11 +303,32 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &DriverPane<'_>) {
         Paragraph::new(Line::from(spans)).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(title)
                 .border_style(Style::default().fg(border_color)),
         ),
         area,
     );
+}
+
+// Mirrors view_all.rs's `activity_display` so the same word reads the
+// same colour across views; kept in sync manually.
+fn activity_badge(a: &Activity) -> (String, Color) {
+    let color = match a {
+        Activity::Waiting => Color::DarkGray,
+        Activity::Starting => Color::Cyan,
+        Activity::Thinking => Color::Cyan,
+        Activity::Writing => Color::Green,
+        Activity::Reading => Color::Blue,
+        Activity::Editing => Color::Yellow,
+        Activity::Searching => Color::Blue,
+        Activity::Fetching => Color::Blue,
+        Activity::Running => Color::Magenta,
+        Activity::Delegating => Color::Magenta,
+        Activity::Asking => Color::Yellow,
+        Activity::Awaiting => Color::Red,
+        Activity::Compacting => Color::LightBlue,
+        Activity::Tool(_) => Color::White,
+    };
+    (a.label(), color)
 }
 
 /// Map a raw permission-mode string from the transcript to the badge
@@ -337,6 +354,13 @@ fn models_match(primary: &str, active: &str) -> bool {
         return true;
     }
     let p = primary.to_ascii_lowercase();
+    // "default" is a placeholder meaning "whatever claude picks"; any
+    // real model name agrees with it. Without this, unconfigured
+    // accounts paint a perpetual `via <model>` indicator next to the
+    // `[default]` badge even though there's no real divergence.
+    if p == "default" {
+        return true;
+    }
     let a = active.to_ascii_lowercase();
     a.contains(&p) || p.contains(&a)
 }
@@ -359,6 +383,44 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
             Style::default().fg(Color::Green),
         ));
     }
+    f.render_widget(
+        Paragraph::new(Line::from(spans))
+            .block(Block::default().borders(Borders::ALL).title("Session detail")),
+        area,
+    );
+}
+
+/// Spans for the ephemeral status indicators (`[mode]`, `[activity]`,
+/// `[idle for Nm]`, transient `via <model>`). Rendered as the chat-log
+/// block's bottom-title overlay so the live state sits visually attached
+/// to the chat it describes. Returns an empty vec when nothing notable
+/// is happening — callers should then skip the `title_bottom` call so
+/// the chat box keeps a clean border.
+fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let push_sep = |spans: &mut Vec<Span<'static>>| {
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+    };
+    if let Some(mode_raw) = s.permission_mode.as_deref() {
+        let (label, color) = mode_badge(mode_raw);
+        push_sep(&mut spans);
+        spans.push(Span::styled(
+            format!("[{label}]"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    // Hide Waiting — it's the boring default; the idle-for-Nm badge
+    // already conveys "nothing happening" when applicable.
+    if !matches!(s.activity, Activity::Waiting) {
+        let (label, color) = activity_badge(&s.activity);
+        push_sep(&mut spans);
+        spans.push(Span::styled(
+            format!("[{label}]"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
     // Transient "via …" indicator when claude's latest assistant
     // record (sub-agent or plan-mode helper) is a different model
     // than the user's pick. Snaps back to invisible on the next
@@ -367,7 +429,7 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
         && !s.model.is_empty()
         && !models_match(&s.model, &s.active_model)
     {
-        spans.push(Span::raw("  "));
+        push_sep(&mut spans);
         spans.push(Span::styled(
             format!("via {}", s.active_model),
             Style::default()
@@ -375,27 +437,15 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
                 .add_modifier(Modifier::ITALIC),
         ));
     }
-    if let Some(mode_raw) = s.permission_mode.as_deref() {
-        let (label, color) = mode_badge(mode_raw);
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("[mode: {label}]"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
-    }
     if s.state == SessionState::Idle {
         let mins = (Utc::now() - s.state_since).num_minutes().max(0);
-        spans.push(Span::raw("  "));
+        push_sep(&mut spans);
         spans.push(Span::styled(
             format!("[idle for {mins}m]"),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
     }
-    f.render_widget(
-        Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::ALL).title("Session detail")),
-        area,
-    );
+    spans
 }
 
 fn render_session_table(f: &mut Frame, area: Rect, s: &SessionRef) {
@@ -459,7 +509,7 @@ fn render_meta_panel(f: &mut Frame, area: Rect, s: &SessionRef) {
         }
         _ => Span::styled("n/a", Style::default().fg(Color::DarkGray)),
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled("context ", Style::default().fg(Color::DarkGray)),
         ctx_span,
         Span::raw("    "),
@@ -471,7 +521,16 @@ fn render_meta_panel(f: &mut Frame, area: Rect, s: &SessionRef) {
             s.cwd.to_string_lossy().into_owned(),
             Style::default().fg(Color::Cyan),
         ),
-    ]);
+    ];
+    if let Some(branch) = git_branch(&s.cwd) {
+        spans.push(Span::raw("    "));
+        spans.push(Span::styled("branch ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            branch,
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let line = Line::from(spans);
     f.render_widget(
         Paragraph::new(line).block(Block::default().borders(Borders::ALL).title("Session meta")),
         area,
@@ -575,7 +634,15 @@ fn render_chat_log(
             title.push_str(" · actions hidden (resize ≥130 cols for Actions pane)");
         }
     }
-    let block = Block::default().borders(Borders::ALL).title(title);
+    // Live status (mode/activity/via/idle) overlays the chat-log's
+    // bottom border so it sits visually attached to the conversation
+    // it describes. Skip the bottom title when nothing notable is
+    // happening so the box keeps a clean border.
+    let status = build_status_spans(s);
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    if !status.is_empty() {
+        block = block.title_bottom(Line::from(status));
+    }
     let inner = block.inner(chat_area);
     f.render_widget(block, chat_area);
 
@@ -1290,6 +1357,38 @@ fn chunk_chars(word: &str, width: usize) -> Vec<String> {
         .chunks(width)
         .map(|c| c.iter().collect::<String>())
         .collect()
+}
+
+/// Best-effort current branch for a working directory. Walks up from
+/// `cwd` looking for `.git`; reads `HEAD` directly so we don't shell
+/// out per render. Returns the branch name for a normal HEAD, a short
+/// commit hash for a detached HEAD, or `None` if the directory isn't
+/// inside a git repo (or `.git` looks malformed).
+fn git_branch(cwd: &Path) -> Option<String> {
+    let mut dir: &Path = cwd;
+    loop {
+        let dot_git = dir.join(".git");
+        let head_path: Option<PathBuf> = match std::fs::metadata(&dot_git) {
+            Ok(m) if m.is_dir() => Some(dot_git.join("HEAD")),
+            Ok(_) => std::fs::read_to_string(&dot_git)
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find_map(|l| l.strip_prefix("gitdir: ").map(|p| PathBuf::from(p.trim()).join("HEAD")))
+                }),
+            Err(_) => None,
+        };
+        if let Some(p) = head_path {
+            if let Ok(contents) = std::fs::read_to_string(&p) {
+                let trimmed = contents.trim();
+                if let Some(rest) = trimmed.strip_prefix("ref: refs/heads/") {
+                    return Some(rest.to_string());
+                }
+                return Some(trimmed.chars().take(7).collect());
+            }
+        }
+        dir = dir.parent()?;
+    }
 }
 
 fn fmt_age(secs: i64) -> String {
