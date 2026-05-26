@@ -414,7 +414,15 @@ pub fn alive_pids() -> HashSet<u32> {
 /// Reverse of Claude Code's project-dir flattening: every `/` in the
 /// process cwd becomes `-`. Leading slash → leading dash.
 fn cwd_to_project_dir(cwd: &Path) -> String {
-    cwd.to_string_lossy().replace('/', "-")
+    // Claude Code encodes a cwd into its on-disk projects/<dir> name by
+    // replacing `/`, `_`, and `.` with `-` (one dash per source char), so
+    // `/Users/foo/.claude/bar_baz` becomes `-Users-foo--claude-bar-baz`.
+    // Mirror that here or the transcript JSONL lookup misses for any
+    // path containing `_` or `.`.
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if matches!(c, '/' | '_' | '.') { '-' } else { c })
+        .collect()
 }
 
 fn read_markers(account: &Account, alive: &HashSet<u32>) -> Vec<SessionMarker> {
@@ -500,7 +508,6 @@ pub fn scan(
         let mut totals = UsageTotals::default();
         let mut last_activity = DateTime::<Utc>::MIN_UTC;
         let mut model = String::new();
-        let mut project = String::new();
         for r in &records {
             if r.session_id != marker.session_id {
                 continue;
@@ -509,9 +516,19 @@ pub fn scan(
             if r.timestamp > last_activity {
                 last_activity = r.timestamp;
                 model = r.model.clone();
-                project = r.project.clone();
             }
         }
+        // Project label = the raw cwd basename from the marker. The
+        // record's `project` field is run through stats::decode_project_slug,
+        // which only keeps the last dash segment (Claude Code's projects/<dir>
+        // encoding flattens `/`, `_`, and `.` all to `-`, so it can't be
+        // reversed unambiguously). The marker's cwd preserves the real name.
+        let project = marker
+            .cwd
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
         if last_activity == DateTime::<Utc>::MIN_UTC {
             // No usage records yet — either the transcript JSONL hasn't
             // been created (brand-new window, no first prompt sent) or
@@ -530,15 +547,6 @@ pub fn scan(
                 })
                 .unwrap_or_else(Utc::now);
         }
-        if project.is_empty() {
-            project = marker
-                .cwd
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-        }
-
         let (current_context, context_cap) = if transcript_exists {
             match stats::current_context_from_transcript(&transcript) {
                 Some(SessionContext { current, max_observed, model: m }) => {
