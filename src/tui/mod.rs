@@ -637,12 +637,23 @@ fn run_loop<B: ratatui::backend::Backend>(
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
                     match k.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
+                        KeyCode::Char('q') => {
                             for (_, cmd_tx) in &live_pollers {
                                 let _ = cmd_tx.send(LiveCmd::Stop);
                             }
                             break;
                         }
+                        KeyCode::Esc => match mode {
+                            ViewMode::AllSessions => {}
+                            ViewMode::SessionDetail
+                            | ViewMode::AccountDetail
+                            | ViewMode::Setup
+                            | ViewMode::Mewxi => {
+                                mode = ViewMode::AllSessions;
+                                last_session_select = Instant::now();
+                                pinned_session = None;
+                            }
+                        },
                         KeyCode::Char('r') => {
                             let alive = live_session::alive_pids();
                             for pa in per_account.iter_mut() {
