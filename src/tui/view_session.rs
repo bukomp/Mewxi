@@ -387,6 +387,22 @@ fn mode_badge(raw: &str) -> (&'static str, Color) {
     }
 }
 
+/// Colour for the `/effort` badge. Picked along a "cool → warm"
+/// gradient so the badge reads as a thermometer: dim grey for `auto`
+/// (let claude decide), blue/green for the cheap levels, magenta/red
+/// for the expensive ones. `?` for unknown future levels.
+fn effort_color(raw: &str) -> Color {
+    match raw {
+        "auto" => Color::DarkGray,
+        "low" => Color::Blue,
+        "medium" => Color::Green,
+        "high" => Color::Cyan,
+        "xhigh" => Color::Magenta,
+        "max" => Color::Red,
+        _ => Color::DarkGray,
+    }
+}
+
 /// True when the primary model badge already refers to the same model
 /// as the latest assistant record. `primary` is often a short slug
 /// (`haiku`, `sonnet`, `opus`, or the `default` placeholder) while
@@ -409,7 +425,7 @@ fn models_match(primary: &str, active: &str) -> bool {
 }
 
 fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
-    let mut spans = vec![
+    let spans = vec![
         Span::styled(
             format!("[{}]", s.account_name),
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
@@ -419,13 +435,6 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
         Span::raw("  session "),
         Span::styled(s.session_id.clone(), Style::default().fg(Color::Yellow)),
     ];
-    if !s.model.is_empty() {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            s.model.clone(),
-            Style::default().fg(Color::Green),
-        ));
-    }
     f.render_widget(
         Paragraph::new(Line::from(spans))
             .block(Block::default().borders(Borders::ALL).title("Session detail")),
@@ -446,6 +455,19 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
             spans.push(Span::raw("  "));
         }
     };
+    // Thinking effort sits to the left of the permission-mode badge so
+    // the two `/`-commands a user controls (`/effort` and Shift-Tab's
+    // permission mode) read left-to-right in pick order.
+    if let Some(eff) = s.effort.as_deref() {
+        push_sep(&mut spans);
+        let model = if s.model.is_empty() { "default" } else { s.model.as_str() };
+        spans.push(Span::styled(
+            format!("[{model}:{eff}]"),
+            Style::default()
+                .fg(effort_color(eff))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(mode_raw) = s.permission_mode.as_deref() {
         let (label, color) = mode_badge(mode_raw);
         push_sep(&mut spans);
