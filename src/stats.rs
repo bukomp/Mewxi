@@ -129,7 +129,7 @@ fn floor_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
 /// concurrent watchers (one per account) don't clobber each other.
 pub fn cache_path_for(account: &Account) -> Option<PathBuf> {
     dirs::cache_dir()
-        .map(|c| c.join("mewxi").join(format!("files2-{}.json", account.slug())))
+        .map(|c| c.join("mewxi").join(format!("files3-{}.json", account.slug())))
 }
 
 /// Per-account on-disk statusLine output: `status-<slug>.txt`.
