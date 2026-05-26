@@ -143,6 +143,29 @@ impl Account {
                 }
             }
         }
+        // For the default account (`~/.claude`), Claude Code's UI writes
+        // the user's `model` override to `$HOME/.claude.json` rather
+        // than `~/.claude/settings.json`. Fall back to that file when
+        // settings.json didn't yield a value — without this, the default
+        // account always returns None and the badge shows the literal
+        // `default` placeholder forever.
+        if out.is_none() {
+            if let Some(home) = std::env::var_os("HOME") {
+                let home_claude = PathBuf::from(&home).join(".claude");
+                if self.dir == home_claude {
+                    let path = PathBuf::from(home).join(".claude.json");
+                    if let Ok(raw) = std::fs::read_to_string(&path) {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            if let Some(m) = v.get("model").and_then(|x| x.as_str()) {
+                                if !m.is_empty() {
+                                    out = Some(m.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         out
     }
 }
