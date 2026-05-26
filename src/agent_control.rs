@@ -173,6 +173,14 @@ impl PtySession {
             .clone()
     }
 
+    /// Interrupt claude's in-flight execution by sending a bare ESC
+    /// byte to the PTY. Claude's input handler treats `0x1b` as the
+    /// cancel signal — same behaviour the user would get by pressing
+    /// Esc inside a standalone `claude` session.
+    pub fn cancel_execution(&mut self) -> Result<()> {
+        self.send_keys(b"\x1b")
+    }
+
     /// Forward a crossterm KeyEvent to the PTY as the byte sequence
     /// claude expects. Centralises key→bytes conversion so the overlay
     /// passthrough and the existing driver-input path share one

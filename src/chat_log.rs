@@ -378,6 +378,72 @@ pub fn extract_tasks(entries: &[ChatEntry]) -> Vec<Task> {
     tasks
 }
 
+/// Walk the transcript and return the plan content from the most recent
+/// `ExitPlanMode` tool_use that has no matching `tool_result` yet. This
+/// is the protocol-level signal that claude is currently waiting on the
+/// plan-acceptance picker — independent of how the picker is worded on
+/// screen.
+///
+/// Matching is by `tool_use_id`, not order, so it stays correct when
+/// other tools resolve in parallel around the ExitPlanMode call.
+pub fn pending_plan_content(path: &Path) -> Option<String> {
+    let f = File::open(path).ok()?;
+    let reader = BufReader::new(f);
+
+    // Preserve insertion order so the "most recent" pick is well-defined.
+    let mut plans: Vec<(String, String)> = Vec::new();
+    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in reader.lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let typ = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let Some(arr) = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for item in arr {
+            let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            match (typ, kind) {
+                ("assistant", "tool_use") => {
+                    if item.get("name").and_then(|x| x.as_str()) != Some("ExitPlanMode") {
+                        continue;
+                    }
+                    let Some(id) = item.get("id").and_then(|x| x.as_str()) else {
+                        continue;
+                    };
+                    let plan = item
+                        .get("input")
+                        .and_then(|i| i.get("plan"))
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    plans.push((id.to_string(), plan));
+                }
+                ("user", "tool_result") => {
+                    if let Some(id) = item.get("tool_use_id").and_then(|x| x.as_str()) {
+                        resolved.insert(id.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    plans
+        .into_iter()
+        .rev()
+        .find(|(id, _)| !resolved.contains(id))
+        .map(|(_, plan)| plan)
+}
+
 pub fn one_line(s: &str, max: usize) -> String {
     let collapsed: String = s
         .lines()
@@ -393,5 +459,79 @@ pub fn one_line(s: &str, max: usize) -> String {
         t
     } else {
         chars.into_iter().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_jsonl(lines: &[&str]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mewxi-chat-log-test-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let mut f = std::fs::File::create(&path).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn pending_plan_returns_content_when_no_result() {
+        // Note: r##"..."## (not r#"..."#) because the JSON below contains
+        // the substring `"#` (e.g. `":"#`) which would close `r#"..."#`
+        // prematurely.
+        let tool_use = r##"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"ExitPlanMode","input":{"plan":"# fresh plan\n\nstep one"}}]}}"##;
+        let path = write_jsonl(&[tool_use]);
+        let got = pending_plan_content(&path).expect("plan pending");
+        assert!(got.contains("fresh plan"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pending_plan_returns_none_after_matching_result() {
+        let tool_use = r##"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"ExitPlanMode","input":{"plan":"resolved plan"}}]}}"##;
+        let tool_result = r##"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"##;
+        let path = write_jsonl(&[tool_use, tool_result]);
+        assert!(pending_plan_content(&path).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pending_plan_picks_latest_unresolved() {
+        // Two ExitPlanMode calls; only the first is resolved. The
+        // second's plan is what claude is currently asking about.
+        let first_use = r##"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_a","name":"ExitPlanMode","input":{"plan":"older plan"}}]}}"##;
+        let first_result = r##"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"ok"}]}}"##;
+        let second_use = r##"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_b","name":"ExitPlanMode","input":{"plan":"newer plan"}}]}}"##;
+        let path = write_jsonl(&[first_use, first_result, second_use]);
+        let got = pending_plan_content(&path).expect("plan pending");
+        assert!(got.contains("newer plan"), "got {got:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pending_plan_ignores_unrelated_tool_results() {
+        // A parallel Read tool's result fires after ExitPlanMode in the
+        // log, but doesn't resolve it because the tool_use_id differs.
+        let plan_use = r##"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_plan","name":"ExitPlanMode","input":{"plan":"still pending"}}]}}"##;
+        let other_result = r##"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"file body"}]}}"##;
+        let path = write_jsonl(&[plan_use, other_result]);
+        let got = pending_plan_content(&path).expect("plan pending");
+        assert!(got.contains("still pending"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pending_plan_returns_none_for_missing_file() {
+        let p = std::env::temp_dir().join("mewxi-no-such-transcript.jsonl");
+        assert!(pending_plan_content(&p).is_none());
     }
 }

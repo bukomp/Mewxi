@@ -25,6 +25,7 @@
 //! directory.
 
 use crate::accounts::{self, Account};
+use crate::tui::text_input::{EditOutcome, TextInput};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -52,8 +53,9 @@ pub struct NewSessionModal {
     /// Editable text. The leading part up to the last `/` is the
     /// directory whose contents `entries` was built from; the trailing
     /// fragment after the last `/` is the live fuzzy filter applied
-    /// over `entries`.
-    path_input: String,
+    /// over `entries`. Backed by [`TextInput`] for readline-style
+    /// cursor movement and edit shortcuts.
+    path_input: TextInput,
     /// Resolved directory whose contents `entries` was built from.
     /// Stays in sync with [`Self::derived_dir`]; updated by
     /// [`Self::refresh_entries_if_dir_changed`].
@@ -98,10 +100,11 @@ impl NewSessionModal {
         // Trailing slash on the path input keeps the dir/tail split
         // well-defined: the tail is empty (no filter), and any chars
         // the user types next become the filter for `browse_cwd`.
-        let mut path_input = browse_cwd.to_string_lossy().into_owned();
-        if !path_input.ends_with('/') {
-            path_input.push('/');
+        let mut path_str = browse_cwd.to_string_lossy().into_owned();
+        if !path_str.ends_with('/') {
+            path_str.push('/');
         }
+        let path_input = TextInput::from_str(&path_str);
         let recent = accounts
             .get(account_idx)
             .map(|a| accounts::recent_project_dirs(a, RECENT_LIMIT))
@@ -143,15 +146,17 @@ impl NewSessionModal {
     /// Directory portion of `path_input` — everything up to and
     /// including the last `/`. `~` is expanded.
     fn derived_dir(&self) -> PathBuf {
-        let cut = self.path_input.rfind('/').map(|i| i + 1).unwrap_or(0);
-        expand_tilde(&self.path_input[..cut])
+        let s = self.path_input.as_str();
+        let cut = s.rfind('/').map(|i| i + 1).unwrap_or(0);
+        expand_tilde(&s[..cut])
     }
 
     /// Fragment after the last `/` of `path_input`. This is the live
     /// fuzzy filter applied to the entries of [`Self::derived_dir`].
     fn derived_filter(&self) -> &str {
-        let cut = self.path_input.rfind('/').map(|i| i + 1).unwrap_or(0);
-        &self.path_input[cut..]
+        let s = self.path_input.as_str();
+        let cut = s.rfind('/').map(|i| i + 1).unwrap_or(0);
+        &s[cut..]
     }
 
     /// Indices of `entries` that match the live fuzzy filter
@@ -216,7 +221,7 @@ impl NewSessionModal {
         if !s.ends_with('/') {
             s.push('/');
         }
-        self.path_input = s;
+        self.path_input.set(s);
         self.refresh_entries_if_dir_changed();
     }
 
@@ -371,7 +376,7 @@ impl NewSessionModal {
                     if filter_empty {
                         // Verify the dir actually exists before
                         // spawning under a typo.
-                        let typed = expand_tilde(self.path_input.trim_end_matches('/'));
+                        let typed = expand_tilde(self.path_input.as_str().trim_end_matches('/'));
                         if typed.is_dir() || self.browse_cwd.is_dir() {
                             return self.confirm_spawn();
                         }
@@ -396,38 +401,21 @@ impl NewSessionModal {
                         self.entry_idx -= 1;
                     }
                 }
-                (KeyCode::Backspace, _) => {
-                    self.path_input.pop();
-                    self.refresh_entries_if_dir_changed();
-                }
-                (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    self.path_input.clear();
-                    self.refresh_entries_if_dir_changed();
-                }
-                (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    // Delete trailing path segment, like shell readline.
-                    while matches!(self.path_input.chars().last(), Some('/')) {
-                        self.path_input.pop();
-                    }
-                    while let Some(c) = self.path_input.chars().last() {
-                        if c == '/' {
-                            break;
-                        }
-                        self.path_input.pop();
-                    }
-                    self.refresh_entries_if_dir_changed();
-                }
                 (KeyCode::Char('.'), m) if m.contains(KeyModifiers::CONTROL) => {
                     return self.confirm_spawn();
                 }
-                (KeyCode::Char(c), m)
-                    if !m.contains(KeyModifiers::CONTROL)
-                        && !m.contains(KeyModifiers::ALT) =>
-                {
-                    self.path_input.push(c);
-                    self.refresh_entries_if_dir_changed();
+                // All other keys (chars, Backspace, Delete, arrows,
+                // Home/End, Ctrl-A/E/W/U/K/H, Alt-B/F/D) go through the
+                // shared readline editor. `/` is a word boundary under
+                // its alnum+`_` rule, so Ctrl-W still deletes the
+                // trailing path segment.
+                _ => {
+                    if let EditOutcome::Consumed { changed: true } =
+                        self.path_input.handle_edit_key(k)
+                    {
+                        self.refresh_entries_if_dir_changed();
+                    }
                 }
-                _ => {}
             },
             ModalFocus::EntryList => {
                 let filtered = self.filtered_indices();
@@ -610,6 +598,7 @@ impl NewSessionModal {
             Paragraph::new(Line::from(input_spans_split(
                 self.dir_part(),
                 self.derived_filter(),
+                self.path_input.cursor_char(),
                 self.focus == ModalFocus::PathBar,
                 rows[1].width as usize,
             ))),
@@ -668,8 +657,9 @@ impl NewSessionModal {
     /// to and including the last `/`). Used by the renderer to colour
     /// dir and filter halves differently.
     fn dir_part(&self) -> &str {
-        let cut = self.path_input.rfind('/').map(|i| i + 1).unwrap_or(0);
-        &self.path_input[..cut]
+        let s = self.path_input.as_str();
+        let cut = s.rfind('/').map(|i| i + 1).unwrap_or(0);
+        &s[..cut]
     }
 }
 
@@ -681,53 +671,99 @@ fn focus_border(active: bool) -> Style {
     }
 }
 
-/// Render the combined path/filter input as two colour bands:
-/// the dim dir portion followed by the bright tail (the live filter).
-/// Long inputs are tail-trimmed so the cursor stays on screen.
+/// Render the combined path/filter input as two colour bands (dim
+/// dir + bright filter) with the edit cursor drawn at its actual
+/// position. `cursor_char` is a character index into `dir + filter`.
+/// Long inputs scroll horizontally so the cursor stays on-screen.
 fn input_spans_split(
     dir: &str,
     filter: &str,
+    cursor_char: usize,
     focused: bool,
     max_width: usize,
 ) -> Vec<Span<'static>> {
-    let budget = if focused {
+    let dir_chars: Vec<char> = dir.chars().collect();
+    let filter_chars: Vec<char> = filter.chars().collect();
+    let total_len = dir_chars.len() + filter_chars.len();
+    let dir_len = dir_chars.len();
+
+    // Reserve one column for the trailing block when focused + cursor
+    // at end. Mid-string cursor overlays a char so no reservation.
+    let cursor_at_end = cursor_char >= total_len;
+    let budget = if focused && cursor_at_end {
         max_width.saturating_sub(1)
     } else {
         max_width
     };
-    let combined: String = format!("{dir}{filter}");
-    let chars: Vec<char> = combined.chars().collect();
-    let (start, visible_dir_len) = if chars.len() <= budget {
-        (0, dir.chars().count())
+    let budget = budget.max(1);
+
+    // Scroll window: keep the cursor inside [start, start+budget).
+    let start = if total_len <= budget {
+        0
+    } else if cursor_char >= budget {
+        // Bias so the cursor sits a couple columns from the right edge
+        // when scrolled — leaves room to see what comes next on
+        // backward edits without snapping the view.
+        (cursor_char + 1).saturating_sub(budget)
     } else {
-        // Trim from the head so the typed tail stays visible. Recompute
-        // how much of the dir portion survives the trim.
-        let start = chars.len() - budget;
-        let dir_chars = dir.chars().count();
-        let visible_dir = dir_chars.saturating_sub(start);
-        (start, visible_dir)
+        0
     };
-    let visible: String = chars.iter().skip(start).copied().collect();
-    let visible_chars: Vec<char> = visible.chars().collect();
-    let dir_seg: String = visible_chars.iter().take(visible_dir_len).collect();
-    let filter_seg: String = visible_chars.iter().skip(visible_dir_len).collect();
 
     let dir_color = if focused { Color::Gray } else { Color::DarkGray };
     let filter_color = if focused { Color::Yellow } else { Color::Gray };
-    let mut spans: Vec<Span<'static>> = vec![
-        Span::styled(dir_seg, Style::default().fg(dir_color)),
-        Span::styled(
-            filter_seg,
-            Style::default().fg(filter_color).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if focused {
-        spans.push(Span::styled(
-            "█",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
+    let dir_style = Style::default().fg(dir_color);
+    let filter_style = Style::default().fg(filter_color).add_modifier(Modifier::BOLD);
+
+    // Helper to style a char by its absolute index (dir vs filter).
+    let style_at = |abs: usize| if abs < dir_len { dir_style } else { filter_style };
+    // Build a visible char list with original absolute indices preserved
+    // so we can split around the cursor and keep dir/filter coloring.
+    let visible: Vec<(usize, char)> = dir_chars
+        .iter()
+        .chain(filter_chars.iter())
+        .copied()
+        .enumerate()
+        .skip(start)
+        .take(budget)
+        .collect();
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let cursor_style = Style::default()
+        .bg(Color::Yellow)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+
+    // Group consecutive visible chars by (style, is_cursor) into runs
+    // so the rendered line stays compact.
+    let mut run: String = String::new();
+    let mut run_style: Option<Style> = None;
+    let flush = |s: &mut String, style: &mut Option<Style>, out: &mut Vec<Span<'static>>| {
+        if !s.is_empty() {
+            if let Some(st) = *style {
+                out.push(Span::styled(std::mem::take(s), st));
+            }
+            *style = None;
+        }
+    };
+
+    for (abs, c) in &visible {
+        let style = if focused && *abs == cursor_char {
+            cursor_style
+        } else {
+            style_at(*abs)
+        };
+        if run_style.is_some_and(|s| s == style) {
+            run.push(*c);
+        } else {
+            flush(&mut run, &mut run_style, &mut spans);
+            run.push(*c);
+            run_style = Some(style);
+        }
+    }
+    flush(&mut run, &mut run_style, &mut spans);
+
+    if focused && cursor_at_end {
+        spans.push(Span::styled("█", filter_style));
     }
     spans
 }

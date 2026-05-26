@@ -96,6 +96,13 @@ pub struct SessionRef {
     /// Latest permission mode from the transcript (`default`, `auto`,
     /// `acceptEdits`, `plan`). `None` until a record exposes one.
     pub permission_mode: Option<String>,
+    /// Current `/effort` level (`auto`, `low`, `medium`, `high`,
+    /// `xhigh`, `max`). Sourced from the optimistic pick first, falling
+    /// back to the account's `settings.json` `effortLevel` since claude
+    /// persists effort globally rather than in the transcript. `None`
+    /// when the model has no effort support (Haiku) or nothing's
+    /// configured yet.
+    pub effort: Option<String>,
 }
 
 /// Optimistic per-driver state for things mewxi just commanded but
@@ -123,6 +130,12 @@ struct DriverOptimistic {
     cycle_auto: Option<bool>,
     model: Option<String>,
     model_baseline: Option<String>,
+    /// Effort the user just picked via the model picker. There's no
+    /// transcript record for effort, so this stays "optimistic" for the
+    /// life of the driver — we have no reconcile path back to claude's
+    /// view, but we know `/effort X` was acknowledged the moment the
+    /// PTY accepted the bytes. Cleared on driver respawn.
+    effort: Option<String>,
 }
 
 /// Hardcoded fallback cycle order — used only on the very first
@@ -1482,7 +1495,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             ModelOutcome::Cancel => {
                                 model_picker = None;
                             }
-                            ModelOutcome::Confirm(slug) => {
+                            ModelOutcome::Confirm { slug, effort } => {
                                 model_picker = None;
                                 if let Some(key) = pinned_session.clone() {
                                     if let Some(pty) = drivers.get_mut(&key) {
@@ -1525,10 +1538,38 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                     opt.mode = Some("default".into());
                                                     opt.mode_baseline = transcript_mode;
                                                 }
-                                                driver_status = Some((
-                                                    format!("model → {slug}"),
-                                                    Instant::now(),
-                                                ));
+                                                // Send `/effort X\r`
+                                                // after the model
+                                                // change so the second
+                                                // command lands once
+                                                // claude's already
+                                                // processed the model
+                                                // switch — claude
+                                                // persists effort
+                                                // globally, the order
+                                                // matters only for
+                                                // user-visible echo.
+                                                let mut status_msg = format!("model → {slug}");
+                                                if let Some(eff) = effort.as_deref() {
+                                                    let mut eb =
+                                                        format!("/effort {eff}").into_bytes();
+                                                    eb.push(b'\r');
+                                                    match pty.send_keys(&eb) {
+                                                        Ok(_) => {
+                                                            opt.effort = Some(eff.to_string());
+                                                            status_msg = format!(
+                                                                "model → {slug}  ·  effort → {eff}"
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            status_msg = format!(
+                                                                "model → {slug}  ·  effort send failed: {e}"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                driver_status =
+                                                    Some((status_msg, Instant::now()));
                                             }
                                             Err(e) => {
                                                 driver_status = Some((
@@ -2005,8 +2046,25 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 })
                                         })
                                 });
+                                // Effort: same precedence as the model
+                                // badge — optimistic pick first, then
+                                // the account's persisted `effortLevel`
+                                // (claude stores it globally rather
+                                // than in the transcript).
+                                let current_effort = pinned_session.as_ref().and_then(|k| {
+                                    driver_optimistic
+                                        .get(k)
+                                        .and_then(|o| o.effort.clone())
+                                        .or_else(|| {
+                                            per_account
+                                                .iter()
+                                                .find(|p| p.account.name == k.0)
+                                                .and_then(|p| p.account.default_effort())
+                                        })
+                                });
                                 model_picker = Some(ModelPickerModal::new(
                                     current.as_deref(),
+                                    current_effort.as_deref(),
                                 ));
                             } else {
                                 mode = ViewMode::Mewxi;
@@ -2194,6 +2252,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                         }
                         KeyCode::Char('J') if mode == ViewMode::SessionDetail => {
                             detail_scroll = detail_scroll.saturating_add(1);
+                        }
+                        KeyCode::Char('K') if mode == ViewMode::SessionDetail => {
+                            detail_scroll = detail_scroll.saturating_sub(1);
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') => {
                             // Open the picker. The actual spawn happens
@@ -2777,6 +2838,16 @@ fn flatten_sessions(
                     }
                     _ => permission_mode,
                 };
+                // Effort: user's in-session pick wins; otherwise read
+                // the account's persisted `effortLevel`. Suppress when
+                // the resolved model has no effort support so the badge
+                // doesn't claim a level claude is silently ignoring.
+                let effort = opt
+                    .and_then(|o| o.effort.clone())
+                    .or_else(|| pa.account.default_effort());
+                let effort = effort.filter(|_| {
+                    !model_picker_modal::effort_levels_for(&model).is_empty()
+                });
                 SessionRef {
                     account_name: ls.account_name.clone(),
                     session_id: ls.session_id.clone(),
@@ -2796,6 +2867,7 @@ fn flatten_sessions(
                     state: ls.state,
                     activity: ls.activity.clone(),
                     permission_mode,
+                    effort,
                 }
             })
         })

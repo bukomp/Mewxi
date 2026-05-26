@@ -19,7 +19,6 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use std::path::Path;
 use vt100::Screen;
 
 /// Substring markers that strongly suggest claude has popped a TUI
@@ -237,53 +236,21 @@ fn is_horizontal_separator(line: &str) -> bool {
 /// path; for the native picker the user's ↑↓ move claude's real
 /// cursor, we re-parse next frame, and the modal stays in sync.
 ///
-/// `account_dir` is the driving account's `CLAUDE_CONFIG_DIR` and is
-/// used to surface plan content from `<dir>/plans/` when the picker is
-/// claude's plan-acceptance dialog — the plan text only exists on
-/// disk, not in the PTY screen's popup region.
-pub fn render(frame: &mut Frame, area: Rect, screen: &Screen, account_dir: Option<&Path>) {
+/// `plan_content` is the markdown body of the pending `ExitPlanMode`
+/// tool_use for this session, sourced from the transcript JSONL by the
+/// caller. When `Some`, it's spliced into the picker modal so the user
+/// can see what they're approving — the plan text isn't on the PTY
+/// screen, only in the JSONL. When `None`, render the picker as-is.
+///
+/// Tying this to the JSONL tool_use (a protocol-level signal) instead
+/// of pattern-matching the picker's prose means rewordings of claude's
+/// plan-acceptance dialog don't silently disable the plan view.
+pub fn render(frame: &mut Frame, area: Rect, screen: &Screen, plan_content: Option<&str>) {
     if let Some(picker) = parse_picker(screen) {
-        let plan_content = if is_plan_picker(&picker) {
-            account_dir.and_then(read_most_recent_plan_file)
-        } else {
-            None
-        };
-        render_native_picker(frame, area, &picker, plan_content.as_deref());
+        render_native_picker(frame, area, &picker, plan_content);
     } else {
         render_pty_crop(frame, area, screen);
     }
-}
-
-fn is_plan_picker(picker: &PickerContent) -> bool {
-    let haystack = picker
-        .title
-        .as_deref()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        + " "
-        + &picker
-            .body
-            .iter()
-            .map(|s| s.to_ascii_lowercase())
-            .collect::<Vec<_>>()
-            .join(" ");
-    haystack.contains("plan") && (haystack.contains("execute") || haystack.contains("proceed"))
-}
-
-/// Read the most recently modified `*.md` file under `<account_dir>/plans/`.
-/// Returns None if the directory doesn't exist or has no markdown files.
-/// The freshest file wins — claude always Writes the plan immediately
-/// before the acceptance picker fires, so the newest file is the one
-/// the picker is asking about.
-fn read_most_recent_plan_file(account_dir: &Path) -> Option<String> {
-    let plans_dir = account_dir.join("plans");
-    let entries = std::fs::read_dir(&plans_dir).ok()?;
-    let newest = entries
-        .flatten()
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
-        .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, e.path())))
-        .max_by_key(|(t, _)| *t)?;
-    std::fs::read_to_string(newest.1).ok()
 }
 
 fn render_pty_crop(frame: &mut Frame, area: Rect, screen: &Screen) {
@@ -926,42 +893,6 @@ mod tests {
         // render, not the native picker.
         let p = parse(b"\x1b[2JEdit foo.rs? [y/N]");
         assert!(parse_picker(p.screen()).is_none());
-    }
-
-    #[test]
-    fn plan_picker_detected_by_keywords() {
-        let p = PickerContent {
-            title: Some("Claude has written up a plan and is ready to execute. Would you like to proceed?".into()),
-            body: vec![],
-            options: vec!["Yes, auto-accept edits".into(), "No".into()],
-            selected: 0,
-        };
-        assert!(is_plan_picker(&p));
-    }
-
-    #[test]
-    fn non_plan_picker_not_detected() {
-        let p = PickerContent {
-            title: Some("Switch model?".into()),
-            body: vec![],
-            options: vec!["Yes".into(), "No".into()],
-            selected: 0,
-        };
-        assert!(!is_plan_picker(&p));
-    }
-
-    #[test]
-    fn reads_newest_plan_file() {
-        let tmp = std::env::temp_dir().join(format!("mewxi-test-plans-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("plans")).unwrap();
-        std::fs::write(tmp.join("plans/old.md"), "stale plan content").unwrap();
-        // Sleep to ensure mtime ordering.
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        std::fs::write(tmp.join("plans/new.md"), "# fresh plan\n\nstep one").unwrap();
-        let content = read_most_recent_plan_file(&tmp).expect("plan file read");
-        assert!(content.contains("fresh plan"), "got {content:?}");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

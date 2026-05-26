@@ -168,6 +168,26 @@ impl Account {
         }
         out
     }
+
+    /// The persisted `/effort` level for this account, read from
+    /// `effortLevel` in `<dir>/settings.json` (or `settings.local.json`
+    /// when it overrides). `None` when the user has never set one —
+    /// claude then uses its built-in default ("auto"). Mirrors how
+    /// Claude Code persists the value globally rather than per-session.
+    pub fn default_effort(&self) -> Option<String> {
+        let mut out: Option<String> = None;
+        for path in self.settings_paths() {
+            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+            let Ok(v): serde_json::Result<serde_json::Value> =
+                serde_json::from_str(&raw) else { continue };
+            if let Some(e) = v.get("effortLevel").and_then(|x| x.as_str()) {
+                if !e.is_empty() {
+                    out = Some(e.to_string());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// On-disk shape of `~/.config/mewxi/accounts.toml`.
