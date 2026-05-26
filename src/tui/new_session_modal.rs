@@ -16,11 +16,15 @@
 //!    entries. Pressing Enter on the path bar drills into the
 //!    highlighted entry (or spawns when there is no tail to complete).
 //!
-//! Focus rotates Accounts → PathBar → EntryList (Tab forward,
-//! Shift-Tab backward). `.` from any focus confirms and spawns under
-//! the currently-resolved directory.
+//! Focus rotates Accounts → Recent → PathBar → EntryList (Tab forward,
+//! Shift-Tab backward). The Recent pane lists directories the selected
+//! account has been used in before — pulled from its `projects/`
+//! subtree — so the common case ("spawn another session in a project
+//! I've already worked on") doesn't require typing or browsing. `.`
+//! from any focus confirms and spawns under the currently-resolved
+//! directory.
 
-use crate::accounts::Account;
+use crate::accounts::{self, Account};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -32,9 +36,15 @@ use std::path::{Path, PathBuf};
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ModalFocus {
     Accounts,
+    Recent,
     PathBar,
     EntryList,
 }
+
+/// How many "previously used" directories to surface per account.
+/// Big enough to cover real workflow breadth, small enough that the
+/// pane stays scannable without scrolling on a min-height modal.
+const RECENT_LIMIT: usize = 20;
 
 pub struct NewSessionModal {
     accounts: Vec<Account>,
@@ -57,6 +67,10 @@ pub struct NewSessionModal {
     /// Index into the *filtered* entry list (the live fuzzy match over
     /// `entries`).
     entry_idx: usize,
+    /// Directories the currently-selected account has spawned sessions
+    /// in before, newest first. Refreshed whenever `account_idx` moves.
+    recent: Vec<PathBuf>,
+    recent_idx: usize,
     focus: ModalFocus,
 }
 
@@ -88,6 +102,19 @@ impl NewSessionModal {
         if !path_input.ends_with('/') {
             path_input.push('/');
         }
+        let recent = accounts
+            .get(account_idx)
+            .map(|a| accounts::recent_project_dirs(a, RECENT_LIMIT))
+            .unwrap_or_default();
+        // When the account has history, land on Recent so the most
+        // common action ("re-enter a project I just used") is a single
+        // Enter away. With no history, fall through to the path bar
+        // where typing/browsing is the only path forward.
+        let focus = if recent.is_empty() {
+            ModalFocus::PathBar
+        } else {
+            ModalFocus::Recent
+        };
         Self {
             accounts,
             account_idx,
@@ -96,10 +123,21 @@ impl NewSessionModal {
             error,
             entries,
             entry_idx: 0,
-            // Start on the path bar — the cursor is visibly there so
-            // the user immediately knows where typing goes.
-            focus: ModalFocus::PathBar,
+            recent,
+            recent_idx: 0,
+            focus,
         }
+    }
+
+    /// Repopulate the recent-projects list after the selected account
+    /// changes. Resets the highlight to the top of the new list.
+    fn refresh_recent(&mut self) {
+        self.recent = self
+            .accounts
+            .get(self.account_idx)
+            .map(|a| accounts::recent_project_dirs(a, RECENT_LIMIT))
+            .unwrap_or_default();
+        self.recent_idx = 0;
     }
 
     /// Directory portion of `path_input` — everything up to and
@@ -198,14 +236,29 @@ impl NewSessionModal {
     }
 
     fn cycle_focus(&mut self, forward: bool) {
-        self.focus = match (self.focus, forward) {
-            (ModalFocus::Accounts, true) => ModalFocus::PathBar,
-            (ModalFocus::PathBar, true) => ModalFocus::EntryList,
-            (ModalFocus::EntryList, true) => ModalFocus::Accounts,
-            (ModalFocus::Accounts, false) => ModalFocus::EntryList,
-            (ModalFocus::PathBar, false) => ModalFocus::Accounts,
-            (ModalFocus::EntryList, false) => ModalFocus::PathBar,
+        // Recent is skipped on accounts with no history — landing on
+        // an empty pane is a dead-end the user can't act on.
+        let order: &[ModalFocus] = if self.recent.is_empty() {
+            &[
+                ModalFocus::Accounts,
+                ModalFocus::PathBar,
+                ModalFocus::EntryList,
+            ]
+        } else {
+            &[
+                ModalFocus::Accounts,
+                ModalFocus::Recent,
+                ModalFocus::PathBar,
+                ModalFocus::EntryList,
+            ]
         };
+        let cur = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+        let next = if forward {
+            (cur + 1) % order.len()
+        } else {
+            (cur + order.len() - 1) % order.len()
+        };
+        self.focus = order[next];
     }
 
     fn confirm_spawn(&self) -> ModalOutcome {
@@ -238,17 +291,71 @@ impl NewSessionModal {
                 KeyCode::Up | KeyCode::Char('k') => {
                     if self.account_idx > 0 {
                         self.account_idx -= 1;
+                        self.refresh_recent();
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if self.account_idx + 1 < self.accounts.len() {
                         self.account_idx += 1;
+                        self.refresh_recent();
                     }
                 }
                 KeyCode::Enter => {
-                    self.focus = ModalFocus::PathBar;
+                    // After picking an account, advance to the most
+                    // useful next step: Recent if there's history to
+                    // pick from, otherwise the path bar to type/browse.
+                    self.focus = if self.recent.is_empty() {
+                        ModalFocus::PathBar
+                    } else {
+                        ModalFocus::Recent
+                    };
                 }
                 KeyCode::Char('.') => return self.confirm_spawn(),
+                _ => {}
+            },
+            ModalFocus::Recent => match k.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.recent_idx > 0 {
+                        self.recent_idx -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.recent_idx + 1 < self.recent.len() {
+                        self.recent_idx += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    // Two-step pattern (load into path bar, don't
+                    // auto-spawn) keeps the user one keystroke from
+                    // either: confirming with `.`, narrowing into a
+                    // subdir, or aborting. Spawning immediately on
+                    // Enter would be surprising in a list that scrolls
+                    // and could trigger the wrong session on a mis-key.
+                    if let Some(dir) = self.recent.get(self.recent_idx).cloned() {
+                        if dir.is_dir() {
+                            self.navigate_to(dir);
+                            self.focus = ModalFocus::PathBar;
+                        } else {
+                            self.error = Some(format!(
+                                "not a directory (moved/deleted?): {}",
+                                dir.display()
+                            ));
+                        }
+                    }
+                }
+                KeyCode::Char('.') => {
+                    // `.` shortcut: pick + spawn in one go.
+                    if let Some(dir) = self.recent.get(self.recent_idx).cloned() {
+                        if dir.is_dir() {
+                            self.navigate_to(dir);
+                            return self.confirm_spawn();
+                        }
+                        self.error = Some(format!(
+                            "not a directory (moved/deleted?): {}",
+                            dir.display()
+                        ));
+                    }
+                }
                 _ => {}
             },
             ModalFocus::PathBar => match (k.code, k.modifiers) {
@@ -347,7 +454,7 @@ impl NewSessionModal {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let modal_area = center_rect(area, 80, 70, 70, 22);
+        let modal_area = center_rect(area, 85, 75, 78, 24);
         f.render_widget(Clear, modal_area);
 
         let outer = Block::default()
@@ -363,7 +470,79 @@ impl NewSessionModal {
             .split(inner);
 
         self.render_accounts(f, cols[0]);
-        self.render_folder_pane(f, cols[1]);
+
+        // Right side: Recent (top) + Folder (bottom). Recent is sized
+        // to fit the list snugly (cap at ~8 rows + chrome) so the
+        // folder browser keeps the bulk of the height even when the
+        // account has dozens of historical projects.
+        let recent_rows = (self.recent.len().min(8) as u16) + 2; // +borders
+        let recent_h = recent_rows.max(3); // always show at least the empty-state line
+        let right_split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(recent_h), Constraint::Min(6)])
+            .split(cols[1]);
+        self.render_recent_pane(f, right_split[0]);
+        self.render_folder_pane(f, right_split[1]);
+    }
+
+    fn render_recent_pane(&self, f: &mut Frame, area: Rect) {
+        let title = format!(
+            " Recent — {} project{} ",
+            self.recent.len(),
+            if self.recent.len() == 1 { "" } else { "s" }
+        );
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(focus_border(self.focus == ModalFocus::Recent));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        if self.recent.is_empty() {
+            let msg = if self.accounts.is_empty() {
+                "(no account selected)"
+            } else {
+                "(no previous sessions for this account)"
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    msg,
+                    Style::default().fg(Color::DarkGray),
+                ))),
+                inner,
+            );
+            return;
+        }
+
+        let visible_rows = inner.height as usize;
+        let focused = self.focus == ModalFocus::Recent;
+        let offset = if focused {
+            self.recent_idx.saturating_sub(visible_rows.saturating_sub(1))
+        } else {
+            0
+        };
+        let home = dirs::home_dir();
+        let items: Vec<ListItem> = self
+            .recent
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(visible_rows.max(1))
+            .map(|(i, p)| {
+                let selected = focused && i == self.recent_idx;
+                let label = display_recent(p, home.as_deref());
+                let mut style = Style::default().fg(Color::White);
+                if selected {
+                    style = style.add_modifier(Modifier::BOLD).bg(Color::DarkGray);
+                }
+                let arrow = if selected { "▶ " } else { "  " };
+                ListItem::new(Line::from(vec![
+                    Span::styled(arrow, style),
+                    Span::styled(label, style),
+                ]))
+            })
+            .collect();
+        f.render_widget(List::new(items), inner);
     }
 
     fn render_accounts(&self, f: &mut Frame, area: Rect) {
@@ -572,6 +751,18 @@ fn center_rect(
         width: w,
         height: h,
     }
+}
+
+/// Compact display for a recent-project path: collapse the user's
+/// home dir to `~` so the typical `/home/user/Work/foo` doesn't
+/// dominate the column.
+fn display_recent(p: &Path, home: Option<&Path>) -> String {
+    if let Some(h) = home {
+        if let Ok(rel) = p.strip_prefix(h) {
+            return format!("~/{}", rel.display());
+        }
+    }
+    p.display().to_string()
 }
 
 fn entry_label(p: &Path) -> String {

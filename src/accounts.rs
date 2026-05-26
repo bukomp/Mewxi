@@ -337,6 +337,84 @@ pub fn load_accounts() -> Result<AccountsView> {
     })
 }
 
+/// Directories this account has been used in before, newest first.
+///
+/// Discovers history by scanning `<account.dir>/projects/<encoded>/*.jsonl`.
+/// Claude Code's `projects/<encoded>` dir-name encoding is lossy
+/// (it flattens `/`, `_`, and `.` all to `-`), so we recover the real
+/// cwd by parsing one record out of each project's transcripts —
+/// every record carries the unescaped `cwd` field. Sorted by the
+/// newest JSONL mtime per project, dedup'd by canonical path, capped
+/// at `limit`. Cheap enough for interactive use: one stat per JSONL
+/// + one short read per project.
+pub fn recent_project_dirs(account: &Account, limit: usize) -> Vec<PathBuf> {
+    let projects = account.projects_dir();
+    let Ok(entries) = std::fs::read_dir(&projects) else {
+        return Vec::new();
+    };
+    // (cwd, newest_jsonl_mtime)
+    let mut found: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&dir) else { continue };
+        let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(meta) = f.metadata() else { continue };
+            let Ok(mt) = meta.modified() else { continue };
+            if newest.as_ref().is_none_or(|(_, t)| mt > *t) {
+                newest = Some((p, mt));
+            }
+        }
+        let Some((jsonl, mtime)) = newest else { continue };
+        let Some(cwd) = read_cwd_from_jsonl(&jsonl) else { continue };
+        found.push((cwd, mtime));
+    }
+    found.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out: Vec<PathBuf> = Vec::with_capacity(found.len().min(limit));
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for (cwd, _) in found {
+        let key = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+        if seen.iter().any(|p| p == &key) {
+            continue;
+        }
+        seen.push(key);
+        out.push(cwd);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
+/// Read up to ~64 lines of `jsonl` to find a record with a `cwd`
+/// field. We don't trust the first line — early frames are sometimes
+/// envelope-only (e.g. `{"type":"permission-mode",...}`).
+fn read_cwd_from_jsonl(path: &Path) -> Option<PathBuf> {
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(f);
+    for line in reader.lines().take(64).flatten() {
+        if !line.contains("\"cwd\"") {
+            continue;
+        }
+        let Ok(v): serde_json::Result<serde_json::Value> =
+            serde_json::from_str(&line) else { continue };
+        if let Some(cwd) = v.get("cwd").and_then(|s| s.as_str()) {
+            if !cwd.is_empty() {
+                return Some(PathBuf::from(cwd));
+            }
+        }
+    }
+    None
+}
+
 /// Resolve the directory the new-session modal should open in.
 ///
 /// Order: `MEWXI_DEFAULT_NEW_SESSION_DIR` env var (if it points to an
