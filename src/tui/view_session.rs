@@ -7,7 +7,7 @@
 use super::markdown;
 use super::widgets::{self, fmt_tokens_compact};
 use super::{PerAccount, SessionRef};
-use crate::chat_log::{self, ChatEntry, EntryKind};
+use crate::chat_log::{self, ChatEntry, EntryKind, Task, TaskStatus};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use crate::live_session::{Activity, SessionState};
@@ -674,17 +674,125 @@ fn render_chat_log(
             }
         };
 
+        let tasks = chat_log::extract_tasks(&entries);
+        // Reserve a bottom slice for the Tasks panel sized to the tasks
+        // we actually have — bordered box (2) + one row per task, capped
+        // at ~40% of the right column so it can't squeeze Actions/Detail
+        // off-screen on tall layouts. A short "no tasks yet" placeholder
+        // is still shown so the user knows the panel exists.
+        let task_lines: u16 = tasks.len().min(64) as u16;
+        let want_h: u16 = (task_lines + 2).max(4);
+        let max_h: u16 = (panel_area.height * 4) / 10;
+        let tasks_h: u16 = want_h.min(max_h).max(4);
+        let upper_h: u16 = panel_area.height.saturating_sub(tasks_h);
+
+        let outer_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(upper_h), Constraint::Length(tasks_h)])
+            .split(panel_area);
         let panel_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .split(panel_area);
+            .split(outer_rows[0]);
         *actions_rect = Some(panel_rows[0]);
         *detail_rect = Some(panel_rows[1]);
         render_changes_list(f, panel_rows[0], &rows, resolved, &s.cwd);
         render_changes_detail(f, panel_rows[1], &rows, resolved, detail_scroll, &s.cwd);
+        render_tasks_panel(f, outer_rows[1], &tasks);
     } else {
         *last_change_count = 0;
     }
+}
+
+/// Render the reconstructed task list from the transcript. Each row is
+/// `<status-glyph> <subject>`; the in-progress row also shows its
+/// `activeForm` in dim text to mirror what Claude's todo UI shows the
+/// user. Counts in the title (`done/total`) give a quick progress
+/// readout at the box level.
+fn render_tasks_panel(f: &mut Frame, area: Rect, tasks: &[Task]) {
+    let done = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Completed)
+        .count();
+    let active = tasks
+        .iter()
+        .find(|t| t.status == TaskStatus::InProgress);
+    let title = if tasks.is_empty() {
+        "Tasks".to_string()
+    } else {
+        format!("Tasks ({done}/{} done)", tasks.len())
+    };
+
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    if let Some(t) = active {
+        // Bottom border echoes whatever Claude is *currently* doing so
+        // it sits visually attached to the task list without taking up
+        // an interior row.
+        let af = t.active_form.as_deref().unwrap_or(&t.subject);
+        block = block.title_bottom(Line::from(vec![
+            Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                truncate_chars(af, area.width.saturating_sub(6) as usize),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if tasks.is_empty() {
+        let hint = Paragraph::new(Line::from(Span::styled(
+            "no tasks yet — claude will populate this once it calls TaskCreate",
+            Style::default().fg(Color::DarkGray),
+        )));
+        f.render_widget(hint, inner);
+        return;
+    }
+
+    let width = inner.width as usize;
+    let target_h = inner.height as usize;
+    // Anchor on the active task when one exists so it stays visible;
+    // otherwise show the tail (latest creation order) like a TODO list.
+    let anchor = tasks
+        .iter()
+        .position(|t| t.status == TaskStatus::InProgress)
+        .unwrap_or(tasks.len().saturating_sub(1));
+    let max_start = tasks.len().saturating_sub(target_h);
+    let half = target_h / 2;
+    let start = anchor.saturating_sub(half).min(max_start);
+    let end = (start + target_h).min(tasks.len());
+
+    let lines: Vec<Line<'static>> = tasks[start..end]
+        .iter()
+        .map(|t| {
+            let (glyph, glyph_color) = match t.status {
+                TaskStatus::Pending => ("○", Color::DarkGray),
+                TaskStatus::InProgress => ("▶", Color::Yellow),
+                TaskStatus::Completed => ("✓", Color::Green),
+                TaskStatus::Cancelled => ("✗", Color::Red),
+                TaskStatus::Other => ("?", Color::DarkGray),
+            };
+            let subj_style = match t.status {
+                TaskStatus::Completed => Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::CROSSED_OUT),
+                TaskStatus::InProgress => Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                _ => Style::default().fg(Color::Gray),
+            };
+            let prefix_w = 2 + 1 + t.id.chars().count() + 2;
+            let body_w = width.saturating_sub(prefix_w).max(4);
+            let subj = truncate_chars(&t.subject, body_w);
+            Line::from(vec![
+                Span::styled(format!("{glyph} "), Style::default().fg(glyph_color).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("#{} ", t.id), Style::default().fg(Color::DarkGray)),
+                Span::styled(subj, subj_style),
+            ])
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_changes_list(

@@ -290,6 +290,94 @@ fn tool_result_text(content: Option<&Value>) -> String {
     String::new()
 }
 
+/// One task as seen through the Claude transcript. Reconstructed by
+/// replaying `TaskCreate` / `TaskUpdate` tool calls — Claude exposes a
+/// TodoWrite-style task list (subject + description + activeForm + status)
+/// that we surface in the session detail view.
+#[derive(Clone, Debug)]
+pub struct Task {
+    pub id: String,
+    pub subject: String,
+    pub description: Option<String>,
+    pub active_form: Option<String>,
+    pub status: TaskStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+    Other,
+}
+
+impl TaskStatus {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "pending" => TaskStatus::Pending,
+            "in_progress" => TaskStatus::InProgress,
+            "completed" => TaskStatus::Completed,
+            "cancelled" | "canceled" => TaskStatus::Cancelled,
+            _ => TaskStatus::Other,
+        }
+    }
+}
+
+/// Replay every `TaskCreate` and `TaskUpdate` in the entry stream to
+/// reconstruct the current task list. Order in the returned vec matches
+/// creation order (taskIds are issued sequentially by Claude: "1", "2",
+/// …). Tasks the agent never updates stay `Pending`.
+pub fn extract_tasks(entries: &[ChatEntry]) -> Vec<Task> {
+    let mut tasks: Vec<Task> = Vec::new();
+    // taskId → index into `tasks`. TaskCreate doesn't carry the id in
+    // its input; Claude assigns the next sequential id ("1", "2", …) at
+    // create time, so we mirror that here.
+    let mut by_id: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut next_id: u64 = 1;
+
+    let s_field = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
+
+    for e in entries {
+        let EntryKind::ToolUse { name, input } = &e.kind else {
+            continue;
+        };
+        match name.as_str() {
+            "TaskCreate" => {
+                let id = next_id.to_string();
+                next_id += 1;
+                let subject = s_field(input, "subject").unwrap_or_else(|| "(no subject)".to_string());
+                let task = Task {
+                    id: id.clone(),
+                    subject,
+                    description: s_field(input, "description"),
+                    active_form: s_field(input, "activeForm"),
+                    status: TaskStatus::Pending,
+                };
+                by_id.insert(id, tasks.len());
+                tasks.push(task);
+            }
+            "TaskUpdate" => {
+                let Some(id) = s_field(input, "taskId") else { continue };
+                let Some(&idx) = by_id.get(&id) else { continue };
+                let t = &mut tasks[idx];
+                if let Some(s) = s_field(input, "status") {
+                    t.status = TaskStatus::parse(&s);
+                }
+                if let Some(af) = s_field(input, "activeForm") {
+                    t.active_form = Some(af);
+                }
+                if let Some(d) = s_field(input, "description") {
+                    t.description = Some(d);
+                }
+            }
+            _ => {}
+        }
+    }
+    tasks
+}
+
 pub fn one_line(s: &str, max: usize) -> String {
     let collapsed: String = s
         .lines()
