@@ -1741,23 +1741,44 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
-                        // Not driven — fall through to the existing
-                        // BackTab arm in the match below (prev-session
-                        // cycle). Rewrite the code so the match sees
-                        // the canonical `BackTab` form rather than
-                        // having to handle both there too.
-                        // (We can't mutate `k`; the BackTab arm
-                        // already runs for both shapes thanks to the
-                        // existing match arm — for `(Tab, SHIFT)` we
-                        // call into the same logic directly here.)
-                        if matches!(k.code, KeyCode::Tab) && !sessions.is_empty() {
-                            selected_session =
-                                (selected_session + sessions.len() - 1) % sessions.len();
-                            last_session_select = Instant::now();
-                            if mode == ViewMode::SessionDetail {
-                                pinned_session = visible_sessions
-                                    .get(selected_session)
-                                    .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                        // Not driven — when the key arrived as
+                        // `(Tab, SHIFT)` the `match k.code` below would
+                        // route to the forward-cycle `Tab` arm instead
+                        // of `BackTab`, so handle the same per-mode
+                        // back-cycle the `BackTab` arm does and skip
+                        // the match. The legacy `BackTab` shape still
+                        // falls through naturally.
+                        if matches!(k.code, KeyCode::Tab) {
+                            match mode {
+                                ViewMode::AllSessions | ViewMode::SessionDetail => {
+                                    if !sessions.is_empty() {
+                                        selected_session = (selected_session + sessions.len() - 1)
+                                            % sessions.len();
+                                        last_session_select = Instant::now();
+                                        if mode == ViewMode::SessionDetail {
+                                            pinned_session = visible_sessions.get(selected_session).map(
+                                                |s| (s.account_name.clone(), s.session_id.clone()),
+                                            );
+                                        }
+                                    }
+                                }
+                                ViewMode::AccountDetail => {
+                                    if !per_account.is_empty() {
+                                        selected_account = (selected_account + per_account.len()
+                                            - 1)
+                                            % per_account.len();
+                                    }
+                                }
+                                ViewMode::Setup => {
+                                    let len = setup_snapshot
+                                        .as_ref()
+                                        .map(|s| s.accounts.len())
+                                        .unwrap_or(0);
+                                    if len > 0 {
+                                        selected_setup = (selected_setup + len - 1) % len;
+                                    }
+                                }
+                                ViewMode::Mewxi => {}
                             }
                             continue;
                         }
@@ -1825,19 +1846,28 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     .as_ref()
                                     .is_some_and(|k| drivers.contains_key(k));
                             if driven {
-                                let current = pinned_session
-                                    .as_ref()
-                                    .and_then(|k| {
-                                        per_account
-                                            .iter()
-                                            .find(|p| p.account.name == k.0)
-                                            .and_then(|p| {
-                                                p.live_sessions
-                                                    .iter()
-                                                    .find(|s| s.session_id == k.1)
-                                                    .map(|s| s.model.clone())
-                                            })
-                                    });
+                                // Prefer the user's last optimistic pick
+                                // over the raw transcript value — re-opening
+                                // the picker before the transcript catches
+                                // up should pre-highlight the pick the user
+                                // just made, otherwise Enter on the default
+                                // highlight silently reverts it.
+                                let current = pinned_session.as_ref().and_then(|k| {
+                                    driver_optimistic
+                                        .get(k)
+                                        .and_then(|o| o.model.clone())
+                                        .or_else(|| {
+                                            per_account
+                                                .iter()
+                                                .find(|p| p.account.name == k.0)
+                                                .and_then(|p| {
+                                                    p.live_sessions
+                                                        .iter()
+                                                        .find(|s| s.session_id == k.1)
+                                                        .map(|s| s.model.clone())
+                                                })
+                                        })
+                                });
                                 model_picker = Some(ModelPickerModal::new(
                                     current.as_deref(),
                                 ));
@@ -2025,9 +2055,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                             changes_selection = None;
                             detail_scroll = 0;
                         }
-                        KeyCode::Char('K') if mode == ViewMode::SessionDetail => {
-                            detail_scroll = detail_scroll.saturating_sub(1);
-                        }
+                        // Note: K is reserved for the kill flow below
+                        // (the footer in SessionDetail advertises `K kill
+                        // (2×)`). Use PageUp/Down or Home/End for detail
+                        // scroll in this view.
                         KeyCode::Char('J') if mode == ViewMode::SessionDetail => {
                             detail_scroll = detail_scroll.saturating_add(1);
                         }
