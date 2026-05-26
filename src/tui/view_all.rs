@@ -25,6 +25,7 @@ pub fn render(
     accounts: &[&PerAccount],
     sessions: &[&SessionRef],
     selected: Option<usize>,
+    sessions_rect: &mut Option<Rect>,
 ) {
     // Reserve enough rows for every account block, capped so the
     // sessions table always gets at least 5 rows.
@@ -42,6 +43,7 @@ pub fn render(
         .split(area);
 
     render_account_stack(f, rows[0], accounts);
+    *sessions_rect = Some(rows[1]);
     render_sessions_table(f, rows[1], sessions, selected);
     render_footer(f, rows[2], "1", "↑/↓ Tab select · Enter open session");
 }

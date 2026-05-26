@@ -17,6 +17,7 @@
 //!  - On every event-loop tick we drain channels, debounce dirty
 //!    reloads to ≥500ms per account, and rescan live sessions.
 
+mod markdown;
 mod view_account;
 mod view_all;
 mod view_mewxi;
@@ -30,13 +31,16 @@ use crate::live_usage::{self, LiveUsage};
 use crate::setup::{self, SetupSnapshot};
 use crate::stats::{self, Aggregate, UsageTotals};
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::execute;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::Frame;
 use ratatui::Terminal;
 use std::collections::HashMap;
@@ -121,7 +125,7 @@ pub fn run(no_live: bool) -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -129,7 +133,11 @@ pub fn run(no_live: bool) -> Result<()> {
     let result = run_loop(&mut terminal, no_live);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     live_usage::set_tui_mode(false);
     result
@@ -574,6 +582,15 @@ fn run_loop<B: ratatui::backend::Backend>(
             last_selected_session = selected_session;
         }
 
+        // Per-frame pane rectangles. Declared inside the loop so the
+        // previous frame's values don't leak when the user switches
+        // views; render() repopulates only what applies to the current
+        // view. Read by handle_scroll later in the same iteration.
+        let mut chat_rect: Option<Rect> = None;
+        let mut actions_rect: Option<Rect> = None;
+        let mut detail_rect: Option<Rect> = None;
+        let mut sessions_rect: Option<Rect> = None;
+        let mut setup_rect: Option<Rect> = None;
         terminal.draw(|f| {
             render(
                 f,
@@ -585,6 +602,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                 &mut changes_selection,
                 &mut last_change_count,
                 &mut detail_scroll,
+                &mut chat_rect,
+                &mut actions_rect,
+                &mut detail_rect,
+                &mut sessions_rect,
+                &mut setup_rect,
                 visible_selection,
                 selected_account,
                 selected_setup,
@@ -650,7 +672,39 @@ fn run_loop<B: ratatui::backend::Backend>(
             Duration::from_millis(200)
         };
         if event::poll(poll_timeout)? {
-            if let Event::Key(k) = event::read()? {
+            let evt = event::read()?;
+            if let Event::Mouse(m) = &evt {
+                let dir: i32 = match m.kind {
+                    MouseEventKind::ScrollUp => -1,
+                    MouseEventKind::ScrollDown => 1,
+                    _ => 0,
+                };
+                if dir != 0 {
+                    handle_scroll(
+                        dir,
+                        m.column,
+                        m.row,
+                        mode,
+                        &mut chat_scroll,
+                        &mut changes_selection,
+                        last_change_count,
+                        &mut detail_scroll,
+                        chat_rect,
+                        actions_rect,
+                        detail_rect,
+                        sessions_rect,
+                        setup_rect,
+                        &mut selected_session,
+                        &mut selected_setup,
+                        &mut last_session_select,
+                        &visible_sessions,
+                        sessions.len(),
+                        setup_snapshot.as_ref().map(|s| s.accounts.len()).unwrap_or(0),
+                        &mut pinned_session,
+                    );
+                }
+            }
+            if let Event::Key(k) = evt {
                 if k.kind == KeyEventKind::Press {
                     match k.code {
                         KeyCode::Char('q') => {
@@ -899,6 +953,90 @@ fn run_loop<B: ratatui::backend::Backend>(
     Ok(())
 }
 
+fn hit(rect: Option<Rect>, col: u16, row: u16) -> bool {
+    match rect {
+        Some(r) => col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height,
+        None => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_scroll(
+    dir: i32,
+    col: u16,
+    row: u16,
+    mode: ViewMode,
+    chat_scroll: &mut usize,
+    changes_selection: &mut Option<usize>,
+    last_change_count: usize,
+    detail_scroll: &mut usize,
+    chat_rect: Option<Rect>,
+    actions_rect: Option<Rect>,
+    detail_rect: Option<Rect>,
+    sessions_rect: Option<Rect>,
+    setup_rect: Option<Rect>,
+    selected_session: &mut usize,
+    selected_setup: &mut usize,
+    last_session_select: &mut Instant,
+    visible_sessions: &[&SessionRef],
+    sessions_len: usize,
+    setup_len: usize,
+    pinned_session: &mut Option<(String, String)>,
+) {
+    match mode {
+        ViewMode::SessionDetail => {
+            if hit(detail_rect, col, row) {
+                if dir < 0 {
+                    *detail_scroll = detail_scroll.saturating_sub(1);
+                } else {
+                    *detail_scroll = detail_scroll.saturating_add(1);
+                }
+            } else if hit(actions_rect, col, row) {
+                let tail = last_change_count.saturating_sub(1);
+                let cur = changes_selection.unwrap_or(tail);
+                let next = if dir < 0 {
+                    cur.saturating_sub(1)
+                } else {
+                    (cur + 1).min(tail)
+                };
+                *changes_selection = Some(next);
+                *detail_scroll = 0;
+            } else if hit(chat_rect, col, row) {
+                // Wheel-up reveals older content; chat_scroll counts
+                // lines back from tail, so wheel-up increases it.
+                if dir < 0 {
+                    *chat_scroll = chat_scroll.saturating_add(3);
+                } else {
+                    *chat_scroll = chat_scroll.saturating_sub(3);
+                }
+            }
+        }
+        ViewMode::AllSessions => {
+            if hit(sessions_rect, col, row) && sessions_len > 0 {
+                if dir < 0 {
+                    *selected_session = selected_session.saturating_sub(1);
+                } else {
+                    *selected_session = (*selected_session + 1).min(sessions_len - 1);
+                }
+                *last_session_select = Instant::now();
+                *pinned_session = visible_sessions
+                    .get(*selected_session)
+                    .map(|s| (s.account_name.clone(), s.session_id.clone()));
+            }
+        }
+        ViewMode::Setup => {
+            if hit(setup_rect, col, row) && setup_len > 0 {
+                if dir < 0 {
+                    *selected_setup = selected_setup.saturating_sub(1);
+                } else {
+                    *selected_setup = (*selected_setup + 1).min(setup_len - 1);
+                }
+            }
+        }
+        ViewMode::AccountDetail | ViewMode::Mewxi => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render(
     f: &mut Frame,
@@ -910,6 +1048,11 @@ fn render(
     changes_selection: &mut Option<usize>,
     last_change_count: &mut usize,
     detail_scroll: &mut usize,
+    chat_rect: &mut Option<Rect>,
+    actions_rect: &mut Option<Rect>,
+    detail_rect: &mut Option<Rect>,
+    sessions_rect: &mut Option<Rect>,
+    setup_rect: &mut Option<Rect>,
     visible_session_selection: Option<usize>,
     selected_account: usize,
     selected_setup: usize,
@@ -954,27 +1097,40 @@ fn render(
     }
 
     match mode {
-        ViewMode::AllSessions => {
-            view_all::render(f, view_area, accounts, sessions, visible_session_selection)
-        }
-        ViewMode::SessionDetail => {
-            view_session::render(
-                f,
-                view_area,
-                accounts,
-                sessions.get(selected_session).copied(),
-                chat_scroll,
-                changes_selection,
-                last_change_count,
-                detail_scroll,
-            )
-        }
+        ViewMode::AllSessions => view_all::render(
+            f,
+            view_area,
+            accounts,
+            sessions,
+            visible_session_selection,
+            sessions_rect,
+        ),
+        ViewMode::SessionDetail => view_session::render(
+            f,
+            view_area,
+            accounts,
+            sessions.get(selected_session).copied(),
+            chat_scroll,
+            changes_selection,
+            last_change_count,
+            detail_scroll,
+            chat_rect,
+            actions_rect,
+            detail_rect,
+        ),
         ViewMode::AccountDetail => {
             if let Some(pa) = accounts.get(selected_account) {
                 view_account::render(f, view_area, pa);
             }
         }
-        ViewMode::Setup => view_setup::render(f, view_area, setup, selected_setup, setup_message),
+        ViewMode::Setup => view_setup::render(
+            f,
+            view_area,
+            setup,
+            selected_setup,
+            setup_message,
+            setup_rect,
+        ),
         ViewMode::Mewxi => view_mewxi::render(f, view_area, accounts, sessions),
     }
 }

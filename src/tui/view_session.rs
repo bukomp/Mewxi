@@ -4,6 +4,7 @@
 //! breakdown. Then a formatted chat log read from the session's JSONL
 //! transcript. Footer: keybinding hints.
 
+use super::markdown;
 use super::widgets::{self, fmt_tokens_compact};
 use super::{PerAccount, SessionRef};
 use crate::chat_log::{self, ChatEntry, EntryKind};
@@ -27,6 +28,9 @@ pub fn render(
     changes_selection: &mut Option<usize>,
     last_change_count: &mut usize,
     detail_scroll: &mut usize,
+    chat_rect: &mut Option<Rect>,
+    actions_rect: &mut Option<Rect>,
+    detail_rect: &mut Option<Rect>,
 ) {
     let Some(session) = session else {
         let p = Paragraph::new(Line::from(Span::styled(
@@ -77,6 +81,9 @@ pub fn render(
         changes_selection,
         last_change_count,
         detail_scroll,
+        chat_rect,
+        actions_rect,
+        detail_rect,
     );
     widgets::render_footer(
         f,
@@ -211,6 +218,7 @@ fn collect_change_rows(entries: &[ChatEntry]) -> Vec<ChangeRow> {
     rows
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_chat_log(
     f: &mut Frame,
     area: Rect,
@@ -219,6 +227,9 @@ fn render_chat_log(
     changes_selection: &mut Option<usize>,
     last_change_count: &mut usize,
     detail_scroll: &mut usize,
+    chat_rect: &mut Option<Rect>,
+    actions_rect: &mut Option<Rect>,
+    detail_rect: &mut Option<Rect>,
 ) {
     let entries = chat_log::read(&s.transcript_path);
 
@@ -232,6 +243,7 @@ fn render_chat_log(
     } else {
         (area, None)
     };
+    *chat_rect = Some(chat_area);
 
     let width = chat_area.width.saturating_sub(2) as usize;
     let body_w = width.saturating_sub(LABEL_W).max(10);
@@ -260,6 +272,13 @@ fn render_chat_log(
     };
     if wide {
         title.push_str(" · actions →");
+    } else {
+        let has_tool = entries
+            .iter()
+            .any(|e| matches!(e.kind, EntryKind::ToolUse { .. }));
+        if has_tool {
+            title.push_str(" · actions hidden (resize ≥130 cols for Actions pane)");
+        }
     }
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(chat_area);
@@ -297,6 +316,8 @@ fn render_chat_log(
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(panel_area);
+        *actions_rect = Some(panel_rows[0]);
+        *detail_rect = Some(panel_rows[1]);
         render_changes_list(f, panel_rows[0], &rows, resolved, &s.cwd);
         render_changes_detail(f, panel_rows[1], &rows, resolved, detail_scroll, &s.cwd);
     } else {
@@ -804,63 +825,92 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-fn entry_to_lines(e: &ChatEntry, body_w: usize, cwd: &Path) -> Vec<Line<'static>> {
-    let (label, label_style, body_style) = match &e.kind {
-        EntryKind::User => (
+fn entry_to_lines(e: &ChatEntry, body_w: usize, _cwd: &Path) -> Vec<Line<'static>> {
+    match &e.kind {
+        EntryKind::User => build_lines_md(
             "you      ",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            Style::default().fg(Color::White),
+            markdown::render(
+                &e.text,
+                body_w,
+                Style::default().fg(Color::White),
+            ),
         ),
-        EntryKind::Assistant => (
+        EntryKind::Assistant => build_lines_md(
             "claude   ",
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            Style::default().fg(Color::White),
+            markdown::render(
+                &e.text,
+                body_w,
+                Style::default().fg(Color::White),
+            ),
         ),
-        EntryKind::Thinking => (
+        EntryKind::Thinking => build_lines_md(
             "thinking ",
             Style::default().fg(Color::Magenta),
-            Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
-        ),
-        EntryKind::ToolUse { name, input } => {
-            let summary = shorten_summary_paths(
-                &chat_log::tool_input_summary(name, Some(input)),
-                cwd,
-            );
-            let head = if summary.is_empty() {
-                name.clone()
-            } else {
-                format!("{name}  {summary}")
-            };
-            return build_lines(
-                "tool→    ",
-                Style::default().fg(Color::Yellow),
-                Style::default().fg(Color::Yellow),
-                &head,
+            markdown::render(
+                &e.text,
                 body_w,
-            );
+                Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+            ),
+        ),
+        EntryKind::ToolUse { name, .. } => {
+            // Heavy dim — readable marginalia next to user/assistant
+            // turns. Full input/diff/output lives in the Actions pane.
+            let style = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM);
+            vec![Line::from(vec![
+                Span::styled("· ".to_string(), style),
+                Span::styled(name.clone(), style),
+            ])]
         }
         EntryKind::ToolResult { ok } => {
-            let marker = if *ok { "tool✓    " } else { "tool✗    " };
-            let color = if *ok { Color::DarkGray } else { Color::Red };
-            // Inline view collapses the (now full) result text to a
-            // single short line; the Changes detail pane shows it in
-            // full.
-            let snippet = chat_log::one_line(&e.text, 200);
-            return build_lines(
-                marker,
-                Style::default().fg(color),
-                Style::default().fg(color),
-                &snippet,
-                body_w,
-            );
+            let (text, color) = if *ok {
+                ("↳ ok", Color::DarkGray)
+            } else {
+                ("↳ error", Color::Red)
+            };
+            let style = Style::default().fg(color).add_modifier(Modifier::DIM);
+            vec![Line::from(vec![
+                Span::raw("  "),
+                Span::styled(text.to_string(), style),
+            ])]
         }
-        EntryKind::System => (
+        EntryKind::System => build_lines(
             "system   ",
             Style::default().fg(Color::DarkGray),
             Style::default().fg(Color::DarkGray),
+            &e.text,
+            body_w,
         ),
-    };
-    build_lines(label, label_style, body_style, &e.text, body_w)
+    }
+}
+
+/// Like `build_lines`, but the body is a pre-rendered markdown block
+/// (vec of styled lines). The first line gets the label prefix; the
+/// rest are left-padded by `LABEL_W` spaces to align with it.
+fn build_lines_md(
+    label: &str,
+    label_style: Style,
+    md_lines: Vec<Line<'static>>,
+) -> Vec<Line<'static>> {
+    if md_lines.is_empty() {
+        return vec![Line::from(Span::styled(label.to_string(), label_style))];
+    }
+    let indent: String = " ".repeat(LABEL_W);
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(md_lines.len());
+    let mut iter = md_lines.into_iter();
+    let first = iter.next().unwrap();
+    let mut first_spans = vec![Span::styled(label.to_string(), label_style)];
+    first_spans.extend(first.spans);
+    out.push(Line::from(first_spans));
+    for line in iter {
+        let mut spans = vec![Span::raw(indent.clone())];
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
+    out
 }
 
 fn build_lines(

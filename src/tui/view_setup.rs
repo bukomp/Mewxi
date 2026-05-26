@@ -16,6 +16,7 @@ pub fn render(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     last_message: Option<&str>,
+    setup_rect: &mut Option<Rect>,
 ) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -29,6 +30,7 @@ pub fn render(
         .split(area);
 
     render_header(f, rows[0], snap);
+    *setup_rect = Some(rows[1]);
     match snap {
         Some(s) => {
             render_accounts(f, rows[1], s, selected);
