@@ -64,6 +64,19 @@ impl PtySession {
 
         let mut cmd = CommandBuilder::new(&claude_bin);
         cmd.cwd(&cwd);
+        // Honour the account's auto-mode opt-in by starting claude in
+        // auto. Claude itself always launches in `default` regardless of
+        // `skipAutoPermissionPrompt`; that flag only suppresses the
+        // confirmation prompt the first time the user toggles into
+        // auto. Without `--permission-mode auto` here, mewxi's badge
+        // (which uses the opt-in as a pre-transcript fallback) would
+        // briefly show `auto` and then snap back to `manual` once
+        // claude's first `permission-mode` record lands — and the
+        // Shift-Tab cycle would start from the wrong baseline.
+        if account.default_permission_mode() == "auto" {
+            cmd.arg("--permission-mode");
+            cmd.arg("auto");
+        }
         // Only override CLAUDE_CONFIG_DIR for non-default accounts. For
         // the default `~/.claude`, claude already discovers its own
         // config dir, and setting the env forces it to look for

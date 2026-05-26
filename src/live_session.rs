@@ -285,13 +285,19 @@ fn tail_permission_mode(path: &Path) -> Option<String> {
             continue;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        if v.get("type").and_then(|x| x.as_str()) == Some("permission-mode") {
+        let record_type = v.get("type").and_then(|x| x.as_str());
+        if record_type == Some("permission-mode") {
             if let Some(m) = v.get("permissionMode").and_then(|x| x.as_str()) {
                 return Some(m.to_string());
             }
         }
-        if let Some(m) = v.get("permissionMode").and_then(|x| x.as_str()) {
-            return Some(m.to_string());
+        // Fallback only for `user` records — assistant/system records
+        // can echo a permissionMode field that doesn't reflect a real
+        // mode change.
+        if record_type == Some("user") {
+            if let Some(m) = v.get("permissionMode").and_then(|x| x.as_str()) {
+                return Some(m.to_string());
+            }
         }
     }
     None

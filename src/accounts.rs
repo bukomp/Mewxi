@@ -90,14 +90,19 @@ impl Account {
         ]
     }
 
-    /// The permission mode this account's user has set as default —
-    /// derived from `<dir>/settings.json`. The only signal Claude Code
-    /// exposes here is `skipAutoPermissionPrompt: true`, which means
-    /// the user has opted into auto mode being the startup default
-    /// (claude no longer asks each session). When that flag is set we
-    /// return `auto`; otherwise `default` (claude's vanilla startup
-    /// mode). `settings.local.json` overrides `settings.json` when
-    /// both define the field, matching claude's own precedence.
+    /// The permission mode mewxi should use as this account's startup
+    /// default. Derived from `skipAutoPermissionPrompt: true` in
+    /// `<dir>/settings.json`, which signals the user accepts auto mode
+    /// (claude no longer asks them to confirm it each session). When
+    /// set we return `auto`; otherwise `default` (claude's vanilla
+    /// startup mode). `settings.local.json` overrides `settings.json`
+    /// when both define the field.
+    ///
+    /// Note: claude itself ALWAYS launches in `default` regardless of
+    /// this flag — the flag only suppresses the auto-mode confirmation
+    /// prompt, not claude's startup mode. Mewxi acts on the opt-in by
+    /// passing `--permission-mode auto` when spawning the child (see
+    /// [`crate::agent_control::PtySession::spawn`]).
     ///
     /// Returns the raw transcript-format string so it slots into the
     /// same display path as live-scanned modes (`default` → "manual",
