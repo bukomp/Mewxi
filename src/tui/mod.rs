@@ -225,7 +225,7 @@ struct PendingSpawn {
 /// prefix cannot collide.
 const PLACEHOLDER_PREFIX: &str = "__pending:";
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum ViewMode {
     AllSessions,
     SessionDetail,
@@ -556,6 +556,10 @@ fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     no_live: bool,
 ) -> Result<()> {
+    crate::debug_log::log(&format!(
+        "tui.start no_live={no_live} pid={}",
+        std::process::id()
+    ));
     let view: AccountsView = accounts::load_accounts()?;
     if view.accounts.is_empty() {
         return Err(anyhow::anyhow!("no accounts discovered"));
@@ -664,6 +668,12 @@ fn run_loop<B: ratatui::backend::Backend>(
     // doesn't immediately re-pop.
     let mut overlay_open: HashSet<(String, String)> = HashSet::new();
     let mut overlay_manual_close_until: HashMap<(String, String), Instant> = HashMap::new();
+    // After a slash command is sent (e.g. /clear, /compact), claude
+    // performs an internal session reset and may briefly drain stdin.
+    // Hold the next send until this deadline to give the reset time to
+    // settle and the session_id rotation to be observed by the
+    // re-pin pass above.
+    let mut driver_send_grace_until: HashMap<(String, String), Instant> = HashMap::new();
 
     // New-session modal state. Some(_) while it's open and intercepting
     // every keystroke; None otherwise. `next_spawn_id` produces the
@@ -806,13 +816,21 @@ fn run_loop<B: ratatui::backend::Backend>(
         // at spawn time. Sessions whose marker hasn't appeared after a
         // generous timeout are abandoned (child probably crashed).
         let mut promotions: Vec<(usize, String)> = Vec::new();
+        // Track session_ids already bound to an earlier pending spawn this
+        // frame so two concurrent spawns under the same account don't both
+        // claim the first new session_id (which would make drivers.insert
+        // overwrite — and Drop-kill — the earlier PTY).
+        let mut claimed_in_frame: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
         for (i, ps) in pending_spawns.iter().enumerate() {
             if let Some(pa) = per_account.iter().find(|p| p.account.name == ps.account_name) {
-                let new = pa
-                    .live_sessions
-                    .iter()
-                    .find(|s| !ps.snapshot_session_ids.contains(&s.session_id));
+                let new = pa.live_sessions.iter().find(|s| {
+                    !ps.snapshot_session_ids.contains(&s.session_id)
+                        && !claimed_in_frame
+                            .contains(&(ps.account_name.clone(), s.session_id.clone()))
+                });
                 if let Some(s) = new {
+                    claimed_in_frame.insert((ps.account_name.clone(), s.session_id.clone()));
                     promotions.push((i, s.session_id.clone()));
                 }
             }
@@ -822,6 +840,10 @@ fn run_loop<B: ratatui::backend::Backend>(
         for (i, sid) in promotions.into_iter().rev() {
             let ps = pending_spawns.swap_remove(i);
             let key = (ps.account_name.clone(), sid.clone());
+            crate::debug_log::log(&format!(
+                "driver.promote placeholder={:?} → key={key:?}",
+                ps.placeholder_key
+            ));
             drivers.insert(key.clone(), ps.pty);
             // If this spawn's placeholder is currently pinned, swap
             // the pin to the real key without changing view mode — the
@@ -870,6 +892,10 @@ fn run_loop<B: ratatui::backend::Backend>(
         pending_spawns.retain(|ps| {
             let too_old = now.duration_since(ps.started_at) > Duration::from_secs(15);
             if too_old {
+                crate::debug_log::log(&format!(
+                    "driver.spawn-timeout placeholder={:?} account={}",
+                    ps.placeholder_key, ps.account_name
+                ));
                 expired_placeholders.push(ps.placeholder_key.clone());
                 driver_status = Some((
                     format!(
@@ -903,10 +929,12 @@ fn run_loop<B: ratatui::backend::Backend>(
             })
             .collect();
         for k in &exited {
+            crate::debug_log::log(&format!("driver.reap key={k:?} reason=child-exit"));
             drivers.remove(k);
             driver_optimistic.remove(k);
             overlay_open.remove(k);
             overlay_manual_close_until.remove(k);
+            driver_send_grace_until.remove(k);
             driver_status = Some((
                 format!("driven session {} ended", short_sid(&k.1)),
                 Instant::now(),
@@ -914,6 +942,49 @@ fn run_loop<B: ratatui::backend::Backend>(
             if pinned_session.as_ref() == Some(k) {
                 driver_input.clear();
                 driver_input_focused = false;
+            }
+        }
+
+        // Re-pin drivers whose claude child rotated its session_id
+        // (happens on `/clear`, `/compact`, etc — same PID, new id).
+        // For each driver, match its child PID against per_account's
+        // live_sessions; if the matching live_session's id differs from
+        // the driver's pinned key, swap keys across every state map and
+        // bump pinned_session so the UI follows the new transcript.
+        let rotations: Vec<((String, String), String)> = drivers
+            .iter()
+            .filter_map(|(key, pty)| {
+                let pid = pty.child_pid()?;
+                let pa = per_account.iter().find(|p| p.account.name == key.0)?;
+                let ls = pa.live_sessions.iter().find(|s| s.pid == pid)?;
+                if ls.session_id == key.1 {
+                    return None;
+                }
+                Some((key.clone(), ls.session_id.clone()))
+            })
+            .collect();
+        for (old_key, new_sid) in rotations {
+            let new_key = (old_key.0.clone(), new_sid.clone());
+            crate::debug_log::log(&format!(
+                "driver.rotate-session-id old={old_key:?} → new={new_key:?}"
+            ));
+            if let Some(pty) = drivers.remove(&old_key) {
+                drivers.insert(new_key.clone(), pty);
+            }
+            if let Some(opt) = driver_optimistic.remove(&old_key) {
+                driver_optimistic.insert(new_key.clone(), opt);
+            }
+            if overlay_open.remove(&old_key) {
+                overlay_open.insert(new_key.clone());
+            }
+            if let Some(t) = overlay_manual_close_until.remove(&old_key) {
+                overlay_manual_close_until.insert(new_key.clone(), t);
+            }
+            if let Some(t) = driver_send_grace_until.remove(&old_key) {
+                driver_send_grace_until.insert(new_key.clone(), t);
+            }
+            if pinned_session.as_ref() == Some(&old_key) {
+                pinned_session = Some(new_key);
             }
         }
 
@@ -934,10 +1005,27 @@ fn run_loop<B: ratatui::backend::Backend>(
                 .is_some_and(|s| matches!(s.activity, live_session::Activity::Awaiting));
             let screen = pty.screen_snapshot();
             let visible = terminal_overlay::prompt_visible(&screen, awaiting);
+            let was_open = overlay_open.contains(key);
             if visible && !in_cooldown {
                 overlay_open.insert(key.clone());
+                if !was_open {
+                    if let Some((row, marker, snippet)) =
+                        terminal_overlay::matched_marker(&screen)
+                    {
+                        crate::debug_log::log(&format!(
+                            "overlay.open key={key:?} row={row} marker={marker:?} awaiting={awaiting} snippet={snippet:?}"
+                        ));
+                    } else {
+                        crate::debug_log::log(&format!(
+                            "overlay.open key={key:?} awaiting={awaiting} marker=<unknown>"
+                        ));
+                    }
+                }
             } else if !visible {
                 overlay_open.remove(key);
+                if was_open {
+                    crate::debug_log::log(&format!("overlay.close key={key:?} reason=marker-gone"));
+                }
             }
         }
         // Trim expired cooldown entries so the map doesn't grow without
@@ -982,6 +1070,14 @@ fn run_loop<B: ratatui::backend::Backend>(
             // Either not driven, or the overlay is up and stealing
             // every keystroke — in both cases the input row would just
             // mislead the user, so hide it.
+            if driver_input_focused {
+                crate::debug_log::log(&format!(
+                    "driver_input.defocus reason={} pinned={:?} overlay_active={}",
+                    if !is_driven { "not-driven" } else { "overlay-active" },
+                    pinned_session,
+                    overlay_active_here,
+                ));
+            }
             driver_input_focused = false;
             None
         };
@@ -1217,6 +1313,17 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
             if let Event::Key(k) = evt {
                 if k.kind == KeyEventKind::Press {
+                    crate::debug_log::log(&format!(
+                        "key code={:?} mods={:?} mode={:?} pinned={:?} overlay_open_n={} focused={} modals: picker={} new={}",
+                        k.code,
+                        k.modifiers,
+                        mode,
+                        pinned_session,
+                        overlay_open.len(),
+                        driver_input_focused,
+                        model_picker.is_some(),
+                        new_session_modal.is_some(),
+                    ));
                     // Terminal overlay: when an overlay is open for the
                     // currently-pinned driven session, every keystroke
                     // goes verbatim to the PTY so the user can answer
@@ -1233,6 +1340,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                             let is_dismiss = matches!(k.code, KeyCode::Char(']'))
                                 && k.modifiers.contains(KeyModifiers::CONTROL);
                             if is_dismiss {
+                                crate::debug_log::log(&format!(
+                                    "overlay.close key={key:?} reason=ctrl-]"
+                                ));
                                 overlay_open.remove(&key);
                                 overlay_manual_close_until.insert(
                                     key,
@@ -1347,6 +1457,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     Ok(pty) => {
                                         let spawn_id = next_spawn_id;
                                         next_spawn_id += 1;
+                                        crate::debug_log::log(&format!(
+                                            "driver.spawn account={} cwd={:?} spawn_id={spawn_id} snapshot_n={}",
+                                            account.name,
+                                            cwd,
+                                            snapshot.len()
+                                        ));
                                         let placeholder_key = (
                                             account.name.clone(),
                                             format!("{}{}", PLACEHOLDER_PREFIX, spawn_id),
@@ -1406,18 +1522,133 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         driver_input_focused = false;
                                     }
                                     (KeyCode::Enter, _) => {
-                                        if !driver_input.is_empty() {
-                                            let mut bytes = driver_input.as_bytes().to_vec();
-                                            bytes.push(b'\r');
-                                            match pty.send_keys(&bytes) {
+                                        if driver_input.is_empty() {
+                                            crate::debug_log::log(&format!(
+                                                "driver_input.enter-empty key={key:?}"
+                                            ));
+                                        } else {
+                                            let screen = pty.screen_snapshot();
+                                            // Slash-command grace gate: if a
+                                            // previous send armed a deadline,
+                                            // hold until it passes. Avoids
+                                            // racing claude's post-/clear
+                                            // internal reset where stdin is
+                                            // briefly drained-and-discarded.
+                                            let grace_blocks = driver_send_grace_until
+                                                .get(&key)
+                                                .is_some_and(|t| Instant::now() < *t);
+                                            if grace_blocks {
+                                                crate::debug_log::log(&format!(
+                                                    "driver_input.send-rejected key={key:?} reason=slash-grace"
+                                                ));
+                                                driver_status = Some((
+                                                    "wait — claude is still settling after the last slash command".into(),
+                                                    Instant::now(),
+                                                ));
+                                                continue;
+                                            }
+                                            // Render the screen to plain rows
+                                            // for diagnostic logging. Shows
+                                            // what claude is actually
+                                            // *displaying* (popup overlays,
+                                            // slash-command suggestions etc.),
+                                            // unlike the ring which is raw
+                                            // ANSI noise.
+                                            let (rows, cols) = screen.size();
+                                            let mut screen_dump = String::new();
+                                            for r in 0..rows {
+                                                let mut row_str = String::with_capacity(cols as usize);
+                                                for c in 0..cols {
+                                                    match screen.cell(r, c) {
+                                                        Some(cell) if cell.has_contents() => {
+                                                            row_str.push_str(cell.contents())
+                                                        }
+                                                        _ => row_str.push(' '),
+                                                    }
+                                                }
+                                                screen_dump.push_str(row_str.trim_end());
+                                                screen_dump.push('\n');
+                                            }
+                                            crate::debug_log::log(&format!(
+                                                "driver_input.screen-at-send key={key:?}\n----SCREEN----\n{}----END----",
+                                                screen_dump
+                                            ));
+                                            let text_bytes =
+                                                driver_input.as_bytes().to_vec();
+                                            let preview: String =
+                                                driver_input.chars().take(60).collect();
+                                            crate::debug_log::log(&format!(
+                                                "driver_input.send key={key:?} bytes_len={} preview={:?}",
+                                                text_bytes.len() + 1,
+                                                preview
+                                            ));
+                                            let ring_before = pty.ring_snapshot();
+                                            let tail_before: String =
+                                                String::from_utf8_lossy(
+                                                    &ring_before[ring_before
+                                                        .len()
+                                                        .saturating_sub(160)..],
+                                                )
+                                                .chars()
+                                                .filter(|c| !c.is_control() || *c == '\n')
+                                                .collect();
+                                            crate::debug_log::log(&format!(
+                                                "driver_input.ring-tail-before key={key:?} tail={tail_before:?}"
+                                            ));
+                                            let was_slash_cmd =
+                                                driver_input.starts_with('/');
+                                            // Split text + \r into TWO
+                                            // writes with a tiny pause —
+                                            // claude's input handler
+                                            // treats a multi-byte chunk
+                                            // as a paste and inserts the
+                                            // trailing \r as a literal
+                                            // newline (multi-line input)
+                                            // instead of submitting.
+                                            // Separating the \r makes it
+                                            // arrive in a distinct read()
+                                            // and register as a discrete
+                                            // Enter keystroke that
+                                            // triggers submit.
+                                            let send_result = pty
+                                                .send_keys(&text_bytes)
+                                                .and_then(|_| {
+                                                    std::thread::sleep(
+                                                        Duration::from_millis(30),
+                                                    );
+                                                    pty.send_keys(b"\r")
+                                                });
+                                            match send_result {
                                                 Ok(_) => {
+                                                    crate::debug_log::log(&format!(
+                                                        "driver_input.send-ok key={key:?} slash={was_slash_cmd}"
+                                                    ));
                                                     driver_input.clear();
+                                                    // Arm a grace window
+                                                    // after a slash command
+                                                    // so the NEXT send
+                                                    // (rejected via the
+                                                    // gate above) doesn't
+                                                    // race claude's
+                                                    // internal reset.
+                                                    if was_slash_cmd {
+                                                        driver_send_grace_until.insert(
+                                                            key.clone(),
+                                                            Instant::now()
+                                                                + Duration::from_millis(
+                                                                    1500,
+                                                                ),
+                                                        );
+                                                    }
                                                     driver_status = Some((
                                                         "prompt sent".into(),
                                                         Instant::now(),
                                                     ));
                                                 }
                                                 Err(e) => {
+                                                    crate::debug_log::log(&format!(
+                                                        "driver_input.send-err key={key:?} err={e}"
+                                                    ));
                                                     driver_status = Some((
                                                         format!("send failed: {e}"),
                                                         Instant::now(),
@@ -1457,6 +1688,14 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             &mut driver_status,
                                         );
                                     }
+                                    // Drop other Ctrl/Alt chord keys
+                                    // instead of inserting the bare char
+                                    // (Ctrl-L appending `l` to the buffer
+                                    // is worse than no-op).
+                                    (KeyCode::Char(_), m)
+                                        if m.intersects(
+                                            KeyModifiers::CONTROL | KeyModifiers::ALT,
+                                        ) => {}
                                     (KeyCode::Char(c), _) => {
                                         driver_input.push(c);
                                     }
@@ -1466,8 +1705,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                         }
                         // Pinned session was reaped while focused — drop focus
-                        // so the next keypress hits the global handler.
+                        // and consume this keystroke so the global handler
+                        // doesn't misinterpret it (e.g. `q` would quit
+                        // mewxi, Esc would close the pin) when the user
+                        // was mid-type into the driver input.
                         driver_input_focused = false;
+                        continue;
                     }
                     // Shift-Tab handled here regardless of `k.code`
                     // form because terminals disagree: some send
@@ -1828,6 +2071,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     .as_ref()
                                     .is_some_and(|k| drivers.contains_key(k)) =>
                         {
+                            let key = pinned_session
+                                .as_ref()
+                                .expect("driven session ⇒ pinned set");
+                            crate::debug_log::log(&format!(
+                                "driver_input.focus key={key:?}"
+                            ));
                             driver_input_focused = true;
                         }
                         KeyCode::Char('d')
