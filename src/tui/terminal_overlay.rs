@@ -32,16 +32,28 @@ use vt100::Screen;
 /// match — never name a cursor char here, claude uses one of several
 /// and reusing the input-prompt glyph would re-introduce the every-
 /// keystroke false positive.
-const PROMPT_MARKERS: &[&str] = &[
+/// Specific markers that almost never appear in chat prose; trigger
+/// from anywhere on the screen.
+const PROMPT_MARKERS_SPECIFIC: &[&str] = &[
     "[y/N]",
     "[Y/n]",
     "(y/n)",
     "(Y/n)",
+    "Esc to cancel",   // picker hint footer
+    "Enter to select", // picker hint footer
+];
+
+/// Common-English markers that DO appear in claude's chat prose
+/// ("Press y to confirm", "Use this approach instead"). Only trigger
+/// when the match row is inside a box-drawn popup (border line within
+/// 3 rows above or below) — chat output is plain text with no box
+/// chars near it.
+const PROMPT_MARKERS_PROSE: &[&str] = &[
     "Continue?",
     "Press y ",
-    "Use this ",        // accept-edit prompt
-    "Esc to cancel",    // picker hint footer
-    "Enter to select",  // picker hint footer
+    "Use this ",     // accept-edit prompt
+    "Do you trust",  // startup trust dialog for unrecognised folders
+    "trust the files", // alternate phrasing the trust dialog uses
 ];
 
 /// Max overlay height in PTY rows. The widest popup we've seen is the
@@ -60,6 +72,26 @@ const MAX_POPUP_ROWS: u16 = 20;
 /// (model switch, plan acceptance, plan-mode pick).
 pub fn prompt_visible(screen: &Screen, _awaiting_marker: bool) -> bool {
     find_marker_row(screen).is_some()
+}
+
+/// Diagnostic helper: when the overlay is currently triggered, return
+/// the matched marker (row, marker string, full row text) so callers
+/// can log why detection fired. Returns `None` when no marker hit.
+/// Mirrors [`find_marker_row`]'s gating rules exactly.
+pub fn matched_marker(screen: &Screen) -> Option<(u16, &'static str, String)> {
+    let (rows, cols) = screen.size();
+    for r in (0..rows).rev() {
+        let txt = row_text(screen, r, cols);
+        if let Some(m) = PROMPT_MARKERS_SPECIFIC.iter().find(|m| txt.contains(*m)) {
+            return Some((r, m, txt));
+        }
+        if let Some(m) = PROMPT_MARKERS_PROSE.iter().find(|m| txt.contains(*m)) {
+            if row_near_box_border(screen, r, cols) {
+                return Some((r, m, txt));
+            }
+        }
+    }
+    None
 }
 
 /// Picker row detection by **shape**, not by digit prefix. Used only
@@ -152,21 +184,46 @@ fn is_box_char(c: char) -> bool {
 /// session`) matches `is_picker_sibling_line` — so structural
 /// detection fires constantly on normal chat. Real claude pickers
 /// always render a `↑/↓ navigate · Esc to cancel · Enter to select`
-/// hint footer; the matching substrings live in `PROMPT_MARKERS`.
+/// hint footer; the matching substrings live in `PROMPT_MARKERS_SPECIFIC`
+/// and `PROMPT_MARKERS_PROSE` (the latter additionally requires a box
+/// border within 3 rows to suppress chat-prose false positives).
 fn find_marker_row(screen: &Screen) -> Option<u16> {
     let (rows, cols) = screen.size();
     for r in (0..rows).rev() {
         let txt = row_text(screen, r, cols);
-        if PROMPT_MARKERS.iter().any(|m| txt.contains(m)) {
+        if PROMPT_MARKERS_SPECIFIC.iter().any(|m| txt.contains(m)) {
+            return Some(r);
+        }
+        if PROMPT_MARKERS_PROSE.iter().any(|m| txt.contains(m))
+            && row_near_box_border(screen, r, cols)
+        {
             return Some(r);
         }
     }
     None
 }
 
+/// True when row `r` is inside a box-drawn popup — i.e. any row within
+/// 3 lines above OR below contains a box-drawing character. Real
+/// claude prompts always render with ratatui-style borders; chat
+/// prose has no box chars within several rows.
+fn row_near_box_border(screen: &Screen, r: u16, cols: u16) -> bool {
+    let lo = r.saturating_sub(3);
+    let hi = r.saturating_add(3);
+    for rr in lo..=hi {
+        let txt = row_text(screen, rr, cols);
+        if txt.chars().any(is_box_char) {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_horizontal_separator(line: &str) -> bool {
     let t = line.trim();
-    t.len() >= 4 && t.chars().all(|c| matches!(c, '─' | '━' | '-' | '═'))
+    // Char count, not byte length — `─` is 3 bytes, so byte-length
+    // comparison would call a 2-glyph `──` a separator.
+    t.chars().count() >= 4 && t.chars().all(|c| matches!(c, '─' | '━' | '-' | '═'))
 }
 
 /// Render the popup the way mewxi prefers: if the prompt is a numbered
@@ -529,18 +586,22 @@ fn strip_leading_number(s: &str) -> String {
 /// `(row_top, row_bot, col_left, col_right)` inclusive. None when no
 /// prompt marker is present (caller falls back to a generic region).
 ///
-/// Expansion tolerates a single blank row so we keep the header +
-/// description of un-boxed pickers (e.g. claude's "Switch model?"
-/// dialog separates header from options with a blank line). Stops at
-/// 2 consecutive blanks, a horizontal separator, a box corner, or the
-/// height cap.
+/// Anchors the upward walk on the **picker cursor row** when one is
+/// found above the marker — Claude's AskUserQuestion picker leaves
+/// ≥2 blank rows between the options block and the footer hint, so a
+/// marker-anchored walk hits its blank-row stop before reaching the
+/// cursor / options / header. Non-picker prompts (y/N, accept-edit,
+/// trust dialog) have no cursor row and fall back to anchoring on the
+/// marker. Expansion still stops at a horizontal separator, a box
+/// corner, two consecutive blanks, or the height cap.
 fn find_popup_region(screen: &Screen) -> Option<(u16, u16, u16, u16)> {
     let (rows, cols) = screen.size();
     let marker_row = find_marker_row(screen)?;
+    let anchor_top = scan_cursor_row_above(screen, marker_row, cols).unwrap_or(marker_row);
 
-    let mut top = marker_row;
+    let mut top = anchor_top;
     let mut blanks_up = 0u16;
-    while top > 0 && marker_row.saturating_sub(top) < MAX_POPUP_ROWS {
+    while top > 0 && anchor_top.saturating_sub(top) < MAX_POPUP_ROWS {
         let prev = top - 1;
         let txt = row_text(screen, prev, cols);
         if is_horizontal_separator(&txt) {
@@ -560,7 +621,7 @@ fn find_popup_region(screen: &Screen) -> Option<(u16, u16, u16, u16)> {
         }
     }
     // Trim leading blank rows.
-    while top < marker_row && row_text(screen, top, cols).trim().is_empty() {
+    while top < anchor_top && row_text(screen, top, cols).trim().is_empty() {
         top += 1;
     }
 
@@ -593,15 +654,47 @@ fn find_popup_region(screen: &Screen) -> Option<(u16, u16, u16, u16)> {
         bot -= 1;
     }
 
-    // Hard cap height: anchor on marker so the user sees the prompt.
+    // Hard cap height: anchor on the cursor (the action point of a
+    // picker) when present, else the marker. Centering on `anchor_top`
+    // keeps the most relevant rows visible in pathological cases where
+    // the cursor and marker are far apart.
     if bot - top + 1 > MAX_POPUP_ROWS {
         let half = MAX_POPUP_ROWS.saturating_sub(4);
-        top = marker_row.saturating_sub(half);
+        top = anchor_top.saturating_sub(half);
         bot = (top + MAX_POPUP_ROWS - 1).min(rows - 1);
     }
 
     let (left, right) = column_bounds(screen, top, bot, cols)?;
     Some((top, bot, left, right))
+}
+
+/// Scan upward from `marker_row` (capped at `MAX_POPUP_ROWS`) for the
+/// closest picker cursor row — i.e. a row [`picker_cursor_info`] hits
+/// **and** that has at least one matching sibling immediately above or
+/// below. Used by [`find_popup_region`] so the upward expansion can
+/// anchor on the picker's structural action row, not just the footer
+/// hint that triggered the overlay.
+///
+/// The sibling requirement is the false-positive guard: chat
+/// scrollback bullets (`●`, `›`) match the cursor shape on their own,
+/// so a lone bullet far above the marker would otherwise hijack the
+/// anchor and drag the region into chat scrollback. Real pickers
+/// always have ≥2 option rows, so we always have a sibling next to the
+/// cursor.
+fn scan_cursor_row_above(screen: &Screen, marker_row: u16, cols: u16) -> Option<u16> {
+    let lo = marker_row.saturating_sub(MAX_POPUP_ROWS);
+    for r in (lo..marker_row).rev() {
+        let txt = row_text(screen, r, cols);
+        let Some((_, prefix)) = picker_cursor_info(&txt) else { continue };
+        let has_sib_above = r > 0
+            && is_picker_sibling_line(&row_text(screen, r - 1, cols), &prefix);
+        let has_sib_below = r + 1 < marker_row
+            && is_picker_sibling_line(&row_text(screen, r + 1, cols), &prefix);
+        if has_sib_above || has_sib_below {
+            return Some(r);
+        }
+    }
+    None
 }
 
 /// Fallback: bottom-most contiguous block of non-blank rows. Used when
@@ -1011,8 +1104,46 @@ mod tests {
     }
 
     #[test]
-    fn detects_continue_prompt() {
-        let p = parse(b"Continue conversation? Continue?");
+    fn detects_continue_prompt_inside_box() {
+        // Real claude prompts always render inside a ratatui box; the
+        // prose-prone marker only triggers when a box border is within
+        // a few rows.
+        let mut bytes = String::new();
+        bytes.push_str("╭──────────────╮\r\n");
+        bytes.push_str("│ Continue?    │\r\n");
+        bytes.push_str("╰──────────────╯\r\n");
+        let p = parse(bytes.as_bytes());
+        assert!(prompt_visible(p.screen(), false));
+    }
+
+    #[test]
+    fn continue_prompt_in_chat_prose_does_not_trigger() {
+        // Regression: a chat message containing "Continue?" (no box
+        // border anywhere near) must NOT pop the overlay — otherwise
+        // every keystroke goes to the PTY and the user has to find
+        // Ctrl-] to recover.
+        let p = parse(b"chat line\r\nWould you like me to Continue? Probably yes.\r\nchat line\r\n");
+        assert!(!prompt_visible(p.screen(), false));
+    }
+
+    #[test]
+    fn use_this_in_chat_prose_does_not_trigger() {
+        // Same gating for the accept-edit marker.
+        let p = parse(b"chat\r\nUse this approach instead of the other one.\r\nchat\r\n");
+        assert!(!prompt_visible(p.screen(), false));
+    }
+
+    #[test]
+    fn trust_dialog_detected_when_in_box() {
+        // claude's startup trust dialog renders inside a box.
+        let mut bytes = String::new();
+        bytes.push_str("╭───────────────────────────────────╮\r\n");
+        bytes.push_str("│ Do you trust the files in this    │\r\n");
+        bytes.push_str("│ folder?                           │\r\n");
+        bytes.push_str("│ 1. Yes, proceed                   │\r\n");
+        bytes.push_str("│ 2. No, exit                       │\r\n");
+        bytes.push_str("╰───────────────────────────────────╯\r\n");
+        let p = parse(bytes.as_bytes());
         assert!(prompt_visible(p.screen(), false));
     }
 
@@ -1041,12 +1172,72 @@ mod tests {
     #[test]
     fn popup_region_handles_no_box_around_marker() {
         // Marker without a surrounding box — region should still pick
-        // up the marker row and tightly clip horizontally.
-        let p = parse(b"Continue?  ");
+        // up the marker row and tightly clip horizontally. Uses a
+        // specific marker (`[y/N]`) since prose-prone markers like
+        // `Continue?` now require a box border to trigger.
+        let p = parse(b"[y/N]  ");
         let (top, bot, left, right) = find_popup_region(p.screen()).expect("popup found");
         assert_eq!(top, bot);
-        // "Continue?" is 9 chars wide.
-        assert_eq!(right - left + 1, 9);
+        // "[y/N]" is 5 chars wide.
+        assert_eq!(right - left + 1, 5);
+    }
+
+    #[test]
+    fn popup_region_spans_blanks_between_options_and_footer() {
+        // Regression: AskUserQuestion picker leaves blank rows between
+        // its option block and the footer hint. Pre-fix, the upward
+        // walk halted at those blanks and only captured the footer,
+        // so parse_picker fell through and render_pty_crop emitted a
+        // 2-row sliver. Anchoring on the cursor row pulls the header
+        // and all options back into the region.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JWhat scope?\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("  Create a simple script\r\n");
+        bytes.push_str("  Make a more complete tool\r\n");
+        bytes.push_str("❯ Refactor existing code\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\r\n");
+        let p = parse(bytes.as_bytes());
+        let (top, bot, _, _) = find_popup_region(p.screen()).expect("popup found");
+        let txt: Vec<String> = (top..=bot)
+            .map(|r| row_text(p.screen(), r, p.screen().size().1))
+            .collect();
+        assert!(
+            txt.iter().any(|l| l.contains("What scope?")),
+            "expected header in region: {txt:?}"
+        );
+        assert!(
+            txt.iter().any(|l| l.contains("Create a simple script")),
+            "expected first option in region: {txt:?}"
+        );
+        assert!(
+            txt.iter().any(|l| l.contains("Refactor existing code")),
+            "expected cursor option in region: {txt:?}"
+        );
+        // parse_picker now succeeds (was None pre-fix because the
+        // cursor row wasn't in the region).
+        let picker = parse_picker(p.screen()).expect("picker parsed");
+        assert_eq!(picker.options.len(), 3);
+        assert_eq!(picker.selected, 2);
+    }
+
+    #[test]
+    fn cursor_anchor_ignores_lone_bullet_in_scrollback() {
+        // A stray `●` in chat scrollback with no sibling must not be
+        // chosen as the picker anchor — otherwise the region would be
+        // dragged into chat scrollback far above any real popup.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2J● Some chat line about something\r\n");
+        bytes.push_str("More chat content here\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("[y/N]\r\n");
+        let p = parse(bytes.as_bytes());
+        let (_, cols) = p.screen().size();
+        let marker_row = find_marker_row(p.screen()).expect("marker found");
+        assert!(scan_cursor_row_above(p.screen(), marker_row, cols).is_none());
     }
 
     #[test]
