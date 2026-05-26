@@ -112,27 +112,87 @@ pub struct SessionRef {
 struct DriverOptimistic {
     mode: Option<String>,
     mode_baseline: Option<String>,
+    /// Mode we believed was current when we last sent Shift-Tab. Paired
+    /// with `cycle_auto` so the reconcile path can record
+    /// `cycle_prev → actual_next` into the learned cycle map once the
+    /// transcript catches up. Cleared on observation.
+    cycle_prev: Option<String>,
+    cycle_auto: Option<bool>,
     model: Option<String>,
     model_baseline: Option<String>,
 }
 
-/// Cycle order matches Claude Code's Shift-Tab handler. `auto` only
-/// appears when both:
-///   * the account has opted into auto-mode-by-default via
+/// Hardcoded fallback cycle order — used only on the very first
+/// Shift-Tab from a given (mode, auto) state, before [`ModeCycle`] has
+/// observed claude's actual transition.
+///
+/// Verified against claude 2.1.150's `dRH` (telemetry: `tengu_mode_cycle`)
+/// which encodes:
+///   default → acceptEdits → plan → {bypassPermissions|auto|default}
+/// When auto is available and bypass is not, the cycle becomes
+/// `default → acceptEdits → plan → auto → default`. Without auto it
+/// collapses to the 3-cycle.
+///
+/// `auto_available` requires both:
+///   * the account opted into auto-mode-by-default via
 ///     `skipAutoPermissionPrompt`, and
 ///   * the current model is one claude itself allows auto on (Opus and
-///     Sonnet; Haiku is explicitly rejected by claude with "auto mode
-///     unavailable for this model").
-/// When either gate fails the cycle is three modes long, matching what
-/// claude's own UI would land on.
+///     Sonnet; Haiku is rejected with "auto mode unavailable").
+///
+/// Don't add knowledge to this function — extend the hardcoded list
+/// reluctantly. The forward-compatible mechanism is [`ModeCycle`]: it
+/// observes the actual next mode that lands in the transcript and from
+/// then on predicts from observation, not from this fallback. So if a
+/// future claude shuffles the order, mewxi self-corrects after one
+/// cycle per affected source mode.
 fn cycle_mode(current: &str, auto_available: bool) -> &'static str {
     let cycle: &[&str] = if auto_available {
-        &["default", "auto", "acceptEdits", "plan"]
+        &["default", "acceptEdits", "plan", "auto"]
     } else {
         &["default", "acceptEdits", "plan"]
     };
     let idx = cycle.iter().position(|m| *m == current).unwrap_or(0);
     cycle[(idx + 1) % cycle.len()]
+}
+
+/// Learned next-mode map keyed by `(current_mode, auto_available)`.
+/// Populated from real claude transitions observed in the transcript
+/// after a Shift-Tab; queried before [`cycle_mode`] so a fallback that
+/// goes stale (because claude shuffled its cycle) costs at most one
+/// wrong prediction per source mode per process lifetime.
+///
+/// Not persisted across restarts — claude rewrites the permission-mode
+/// record on every Shift-Tab, so a fresh process re-learns within a
+/// keystroke or two of the user touching the feature.
+#[derive(Default)]
+struct ModeCycle {
+    next: HashMap<(String, bool), String>,
+}
+
+impl ModeCycle {
+    /// Best guess for the mode claude lands on after Shift-Tab from
+    /// `current`. Prefers a learned transition, falls back to the
+    /// hardcoded [`cycle_mode`] when we've never seen one.
+    fn predict(&self, current: &str, auto_available: bool) -> String {
+        if let Some(next) = self.next.get(&(current.to_string(), auto_available)) {
+            return next.clone();
+        }
+        cycle_mode(current, auto_available).to_string()
+    }
+
+    /// Record an observed `prev → actual` transition for future
+    /// predictions. No-op when either side is empty, when they match
+    /// (no transition happened), or when `actual` is a transient
+    /// pseudo-mode we don't model. `auto_available` reflects the state
+    /// at the time of the keystroke, not now — pass through what the
+    /// cycle handler saw.
+    fn observe(&mut self, prev: &str, actual: &str, auto_available: bool) {
+        if prev.is_empty() || actual.is_empty() || prev == actual {
+            return;
+        }
+        self.next
+            .insert((prev.to_string(), auto_available), actual.to_string());
+    }
 }
 
 /// True when claude would accept auto mode on this model. Mirrors
@@ -171,6 +231,7 @@ fn cycle_mode_via_pty(
     key: &(String, String),
     per_account: &[PerAccount],
     optimistic: &mut HashMap<(String, String), DriverOptimistic>,
+    mode_cycle: &ModeCycle,
     status: &mut Option<(String, Instant)>,
 ) {
     if pty.send_keys(b"\x1b[Z").is_err() {
@@ -195,9 +256,17 @@ fn cycle_mode_via_pty(
         .clone()
         .or_else(|| transcript_mode.clone())
         .unwrap_or_else(|| "default".into());
-    let next = cycle_mode(&current, auto_available).to_string();
+    let next = mode_cycle.predict(&current, auto_available);
     opt.mode_baseline = transcript_mode;
     opt.mode = Some(next.clone());
+    // Remember what we *thought* was current and which cycle variant
+    // applied, so the reconcile pass can teach [`ModeCycle`] the actual
+    // next mode claude lands on. Pinning `auto_available` here matters:
+    // if the user switches models between the keystroke and the
+    // transcript update, the gate may flip but the observation still
+    // belongs to the cycle variant that was live at keystroke time.
+    opt.cycle_prev = Some(current);
+    opt.cycle_auto = Some(auto_available);
     *status = Some((format!("mode → {}", mode_label(&next)), Instant::now()));
 }
 
@@ -659,6 +728,13 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut driver_input_focused: bool = false;
     let mut driver_status: Option<(String, Instant)> = None;
     let mut driver_optimistic: HashMap<(String, String), DriverOptimistic> = HashMap::new();
+    // Self-learning Shift-Tab cycle. Seeded empty; the reconcile pass
+    // populates it the first time each `(prev_mode, auto_available)`
+    // pair is observed transitioning. From then on predictions use
+    // claude's actual behaviour instead of [`cycle_mode`]'s fallback,
+    // so a future claude shuffling its cycle costs at most one
+    // mispredicted keystroke per source mode.
+    let mut mode_cycle = ModeCycle::default();
 
     // Terminal overlay: when claude pops a TUI prompt (model-switch
     // continue, multiselect, accept-edit y/N), surface its rendered PTY
@@ -1255,8 +1331,22 @@ fn run_loop<B: ratatui::backend::Backend>(
                     if opt.mode.is_some()
                         && opt.mode_baseline.as_deref() != ls.permission_mode.as_deref()
                     {
+                        // Teach the learner what claude actually did
+                        // before we forget the `prev` snapshot. The
+                        // transcript's new value is authoritative; our
+                        // optimistic `opt.mode` may have been wrong,
+                        // which is exactly the case learning fixes.
+                        if let (Some(prev), Some(auto), Some(actual)) = (
+                            opt.cycle_prev.as_deref(),
+                            opt.cycle_auto,
+                            ls.permission_mode.as_deref(),
+                        ) {
+                            mode_cycle.observe(prev, actual, auto);
+                        }
                         opt.mode = None;
                         opt.mode_baseline = None;
+                        opt.cycle_prev = None;
+                        opt.cycle_auto = None;
                     }
                 }
                 opt.mode.is_some() || opt.model.is_some()
@@ -1676,6 +1766,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             &key,
                                             &per_account,
                                             &mut driver_optimistic,
+                                            &mode_cycle,
                                             &mut driver_status,
                                         );
                                     }
@@ -1685,6 +1776,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             &key,
                                             &per_account,
                                             &mut driver_optimistic,
+                                            &mode_cycle,
                                             &mut driver_status,
                                         );
                                     }
@@ -1735,6 +1827,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         &key,
                                         &per_account,
                                         &mut driver_optimistic,
+                                        &mode_cycle,
                                         &mut driver_status,
                                     );
                                     continue;
@@ -2713,7 +2806,7 @@ fn flatten_sessions(
 
 #[cfg(test)]
 mod tests {
-    use super::{cycle_mode, model_supports_auto};
+    use super::{cycle_mode, model_supports_auto, ModeCycle};
 
     #[test]
     fn cycle_mode_three_step_without_auto() {
@@ -2723,17 +2816,61 @@ mod tests {
     }
 
     #[test]
-    fn cycle_mode_four_step_with_auto() {
-        assert_eq!(cycle_mode("default", true), "auto");
-        assert_eq!(cycle_mode("auto", true), "acceptEdits");
+    fn cycle_mode_four_step_with_auto_matches_claude_2_1_150() {
+        // Mirrors claude's `dRH` switch: default → acceptEdits → plan
+        // → auto → default. Auto is reached *after* plan, not after
+        // default — getting this wrong was the bug that motivated
+        // [`ModeCycle`].
+        assert_eq!(cycle_mode("default", true), "acceptEdits");
         assert_eq!(cycle_mode("acceptEdits", true), "plan");
-        assert_eq!(cycle_mode("plan", true), "default");
+        assert_eq!(cycle_mode("plan", true), "auto");
+        assert_eq!(cycle_mode("auto", true), "default");
     }
 
     #[test]
     fn cycle_mode_unknown_starts_from_default() {
         assert_eq!(cycle_mode("garbage", false), "acceptEdits");
-        assert_eq!(cycle_mode("", true), "auto");
+        assert_eq!(cycle_mode("", true), "acceptEdits");
+    }
+
+    #[test]
+    fn mode_cycle_falls_back_when_unlearned() {
+        let cycle = ModeCycle::default();
+        assert_eq!(cycle.predict("default", false), "acceptEdits");
+        assert_eq!(cycle.predict("plan", true), "auto");
+    }
+
+    #[test]
+    fn mode_cycle_learned_beats_fallback() {
+        // Simulate a future claude shuffle: `default` no longer goes
+        // to `acceptEdits`. After one observation the learner wins
+        // and the wrong fallback never fires again for that source.
+        let mut cycle = ModeCycle::default();
+        cycle.observe("default", "plan", false);
+        assert_eq!(cycle.predict("default", false), "plan");
+        // Untaught source still uses the fallback.
+        assert_eq!(cycle.predict("acceptEdits", false), "plan");
+    }
+
+    #[test]
+    fn mode_cycle_keys_by_auto_availability() {
+        // The cycle variant changes when auto is unlocked, so
+        // observations from one variant must not leak into the other.
+        let mut cycle = ModeCycle::default();
+        cycle.observe("plan", "default", false);
+        cycle.observe("plan", "auto", true);
+        assert_eq!(cycle.predict("plan", false), "default");
+        assert_eq!(cycle.predict("plan", true), "auto");
+    }
+
+    #[test]
+    fn mode_cycle_ignores_noop_and_empty_observations() {
+        let mut cycle = ModeCycle::default();
+        cycle.observe("plan", "plan", false); // no transition
+        cycle.observe("", "plan", false); // empty prev
+        cycle.observe("plan", "", false); // empty actual
+        // Nothing learned → falls back.
+        assert_eq!(cycle.predict("plan", false), "default");
     }
 
     #[test]
