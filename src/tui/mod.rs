@@ -437,6 +437,17 @@ fn run_loop<B: ratatui::backend::Backend>(
     // session whenever another session's activity moves it ahead.
     let mut pinned_session: Option<(String, String)> = None;
     let mut chat_scroll: usize = 0;
+    // `None` means follow tail (selection tracks the latest change row);
+    // `Some(i)` pins to a concrete index. j/k transitions out of follow
+    // mode; G / End re-enters it. The render function writes the row
+    // count back here so key handlers can resolve "one before tail"
+    // without needing to load the transcript themselves.
+    let mut changes_selection: Option<usize> = None;
+    let mut last_change_count: usize = 0;
+    // Lines scrolled down within the currently selected change's
+    // detail pane. Reset to 0 whenever the selection changes so
+    // each row starts at the top of its input.
+    let mut detail_scroll: usize = 0;
     let mut selected_account: usize = 0;
     let mut selected_setup: usize = 0;
     // View 1's session selection highlight fades out after a short
@@ -558,6 +569,8 @@ fn run_loop<B: ratatui::backend::Backend>(
 
         if selected_session != last_selected_session {
             chat_scroll = 0;
+            changes_selection = None;
+            detail_scroll = 0;
             last_selected_session = selected_session;
         }
 
@@ -569,6 +582,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                 &visible_sessions,
                 selected_session,
                 &mut chat_scroll,
+                &mut changes_selection,
+                &mut last_change_count,
+                &mut detail_scroll,
                 visible_selection,
                 selected_account,
                 selected_setup,
@@ -843,6 +859,36 @@ fn run_loop<B: ratatui::backend::Backend>(
                         }
                         KeyCode::End if mode == ViewMode::SessionDetail => {
                             chat_scroll = 0;
+                            // Resume tailing the latest change row too.
+                            changes_selection = None;
+                            detail_scroll = 0;
+                        }
+                        KeyCode::Char('k') if mode == ViewMode::SessionDetail => {
+                            let tail = last_change_count.saturating_sub(1);
+                            let cur = changes_selection.unwrap_or(tail);
+                            changes_selection = Some(cur.saturating_sub(1));
+                            detail_scroll = 0;
+                        }
+                        KeyCode::Char('j') if mode == ViewMode::SessionDetail => {
+                            let tail = last_change_count.saturating_sub(1);
+                            let cur = changes_selection.unwrap_or(tail);
+                            let next = (cur + 1).min(tail);
+                            changes_selection = Some(next);
+                            detail_scroll = 0;
+                        }
+                        KeyCode::Char('g') if mode == ViewMode::SessionDetail => {
+                            changes_selection = Some(0);
+                            detail_scroll = 0;
+                        }
+                        KeyCode::Char('G') if mode == ViewMode::SessionDetail => {
+                            changes_selection = None;
+                            detail_scroll = 0;
+                        }
+                        KeyCode::Char('K') if mode == ViewMode::SessionDetail => {
+                            detail_scroll = detail_scroll.saturating_sub(1);
+                        }
+                        KeyCode::Char('J') if mode == ViewMode::SessionDetail => {
+                            detail_scroll = detail_scroll.saturating_add(1);
                         }
                         _ => {}
                     }
@@ -861,6 +907,9 @@ fn render(
     sessions: &[&SessionRef],
     selected_session: usize,
     chat_scroll: &mut usize,
+    changes_selection: &mut Option<usize>,
+    last_change_count: &mut usize,
+    detail_scroll: &mut usize,
     visible_session_selection: Option<usize>,
     selected_account: usize,
     selected_setup: usize,
@@ -909,7 +958,16 @@ fn render(
             view_all::render(f, view_area, accounts, sessions, visible_session_selection)
         }
         ViewMode::SessionDetail => {
-            view_session::render(f, view_area, accounts, sessions.get(selected_session).copied(), chat_scroll)
+            view_session::render(
+                f,
+                view_area,
+                accounts,
+                sessions.get(selected_session).copied(),
+                chat_scroll,
+                changes_selection,
+                last_change_count,
+                detail_scroll,
+            )
         }
         ViewMode::AccountDetail => {
             if let Some(pa) = accounts.get(selected_account) {

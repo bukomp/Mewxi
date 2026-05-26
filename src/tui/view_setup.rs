@@ -48,7 +48,7 @@ pub fn render(
         }
     }
     render_message(f, rows[3], last_message);
-    render_footer(f, rows[4], "s wire/unwire · i ignore · w toggle watcher · a apply all · R recheck");
+    render_footer(f, rows[4], "4", "↑/↓ select · s wire/unwire · i ignore · w toggle watcher · a apply all · R recheck · Esc back");
 }
 
 fn render_header(f: &mut Frame, area: Rect, snap: Option<&SetupSnapshot>) {

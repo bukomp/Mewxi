@@ -16,7 +16,7 @@ pub enum EntryKind {
     User,
     Assistant,
     Thinking,
-    ToolUse { name: String, input_summary: String },
+    ToolUse { name: String, input: Value },
     ToolResult { ok: bool },
     System,
 }
@@ -147,13 +147,10 @@ fn parse_record(v: &Value, out: &mut Vec<ChatEntry>) {
                             .and_then(|x| x.as_str())
                             .unwrap_or("?")
                             .to_string();
-                        let summary = tool_input_summary(&name, item.get("input"));
+                        let input = item.get("input").cloned().unwrap_or(Value::Null);
                         out.push(ChatEntry {
                             ts,
-                            kind: EntryKind::ToolUse {
-                                name,
-                                input_summary: summary,
-                            },
+                            kind: EntryKind::ToolUse { name, input },
                             text: String::new(),
                         });
                     }
@@ -249,7 +246,7 @@ fn closing_tag(open: &str) -> &'static str {
 }
 
 /// One-line summary of a tool_use input so the chat view stays scannable.
-fn tool_input_summary(name: &str, input: Option<&Value>) -> String {
+pub fn tool_input_summary(name: &str, input: Option<&Value>) -> String {
     let Some(input) = input else {
         return String::new();
     };
@@ -274,19 +271,26 @@ fn tool_result_text(content: Option<&Value>) -> String {
         return String::new();
     };
     if let Some(s) = c.as_str() {
-        return one_line(s, 200);
+        return s.to_string();
     }
     if let Some(arr) = c.as_array() {
+        // Concatenate every text block so the changes panel can show
+        // the full output. Inline rendering will collapse this to one
+        // line via `one_line`.
+        let mut parts: Vec<&str> = Vec::new();
         for item in arr {
             if let Some(t) = item.get("text").and_then(|x| x.as_str()) {
-                return one_line(t, 200);
+                parts.push(t);
             }
+        }
+        if !parts.is_empty() {
+            return parts.join("\n");
         }
     }
     String::new()
 }
 
-fn one_line(s: &str, max: usize) -> String {
+pub fn one_line(s: &str, max: usize) -> String {
     let collapsed: String = s
         .lines()
         .map(|l| l.trim())

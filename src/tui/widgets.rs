@@ -452,26 +452,78 @@ pub fn render_by_project(f: &mut Frame, area: Rect, agg: &Aggregate) {
     f.render_widget(table, area);
 }
 
-pub fn render_footer(f: &mut Frame, area: Rect, hint: &str) {
-    let p = Paragraph::new(Line::from(vec![
-        Span::styled(" 1 ", Style::default().fg(Color::Black).bg(Color::Gray)),
-        Span::raw(" all  "),
-        Span::styled(" 2 ", Style::default().fg(Color::Black).bg(Color::Gray)),
-        Span::raw(" session  "),
-        Span::styled(" 3 ", Style::default().fg(Color::Black).bg(Color::Gray)),
-        Span::raw(" account  "),
-        Span::styled(" 4 ", Style::default().fg(Color::Black).bg(Color::Gray)),
-        Span::raw(" setup  "),
-        Span::styled(" m ", Style::default().fg(Color::Black).bg(Color::Magenta)),
-        Span::raw(" mewxi  "),
-        Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::Gray)),
-        Span::raw(" next  "),
-        Span::styled(" r ", Style::default().fg(Color::Black).bg(Color::Gray)),
-        Span::raw(" reload  "),
-        Span::styled(" q ", Style::default().fg(Color::Black).bg(Color::Gray)),
-        Span::raw(" quit  "),
-        Span::styled(hint, Style::default().fg(Color::DarkGray)),
-    ]));
-    f.render_widget(p, area);
+/// Render the footer key-hint bar. `active` is one of "1" / "2" / "3"
+/// / "4" / "m" — the matching nav chip gets a highlighted style so the
+/// user can see which view they're in. `hint` carries view-specific
+/// extra keys appended at the end (already styled dim).
+///
+/// Width-aware: on narrow terminals the per-chip labels collapse,
+/// then the hint truncates with `…`, so the bar stays useful at any
+/// size instead of clipping mid-word.
+pub fn render_footer(f: &mut Frame, area: Rect, active: &str, hint: &str) {
+    let inactive = Style::default().fg(Color::Black).bg(Color::Gray);
+    let active_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let mewxi_inactive = Style::default().fg(Color::Black).bg(Color::Magenta);
+    let chip_style = |key: &str| -> Style {
+        if key == active {
+            active_style
+        } else if key == "m" {
+            mewxi_inactive
+        } else {
+            inactive
+        }
+    };
+    let chips: [(&str, &str); 7] = [
+        ("1", "all"),
+        ("2", "session"),
+        ("3", "account"),
+        ("4", "setup"),
+        ("m", "mewxi"),
+        ("r", "reload"),
+        ("q", "quit"),
+    ];
+
+    let total_w = area.width as usize;
+    // Width with labels: sum of `" K " + " label  "` per chip.
+    let labeled_w: usize = chips
+        .iter()
+        .map(|(_, l)| 3 + 1 + l.chars().count() + 2)
+        .sum();
+
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(chips.len() * 2 + 2);
+    let labels_fit = labeled_w + 2 <= total_w; // need at least 2 cols slack for hint
+    let mut used: usize = 0;
+    for (k, l) in chips {
+        spans.push(Span::styled(format!(" {} ", k), chip_style(k)));
+        used += 3;
+        if labels_fit {
+            let seg = format!(" {}  ", l);
+            used += seg.chars().count();
+            spans.push(Span::raw(seg));
+        } else {
+            spans.push(Span::raw(" "));
+            used += 1;
+        }
+    }
+    // Truncate hint to whatever width is left.
+    let remaining = total_w.saturating_sub(used);
+    let hint_str: String = if hint.chars().count() <= remaining {
+        hint.to_string()
+    } else if remaining == 0 {
+        String::new()
+    } else {
+        let take = remaining.saturating_sub(1);
+        let mut s: String = hint.chars().take(take).collect();
+        s.push('…');
+        s
+    };
+    if !hint_str.is_empty() {
+        spans.push(Span::styled(hint_str, Style::default().fg(Color::DarkGray)));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 

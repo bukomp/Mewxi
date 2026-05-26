@@ -43,7 +43,7 @@ pub fn render(
 
     render_account_stack(f, rows[0], accounts);
     render_sessions_table(f, rows[1], sessions, selected);
-    render_footer(f, rows[2], "1 here · 2 session · 3 account · 4 setup · m mewxi");
+    render_footer(f, rows[2], "1", "↑/↓ Tab select · Enter open session");
 }
 
 fn render_account_stack(f: &mut Frame, area: Rect, accounts: &[&PerAccount]) {

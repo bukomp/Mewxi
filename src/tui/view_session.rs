@@ -7,11 +7,13 @@
 use super::widgets::{self, fmt_tokens_compact};
 use super::{PerAccount, SessionRef};
 use crate::chat_log::{self, ChatEntry, EntryKind};
+use serde_json::Value;
+use std::path::Path;
 use crate::live_session::SessionState;
 use crate::stats::fmt_num;
 use chrono::Utc;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
@@ -22,6 +24,9 @@ pub fn render(
     accounts: &[&PerAccount],
     session: Option<&SessionRef>,
     chat_scroll: &mut usize,
+    changes_selection: &mut Option<usize>,
+    last_change_count: &mut usize,
+    detail_scroll: &mut usize,
 ) {
     let Some(session) = session else {
         let p = Paragraph::new(Line::from(Span::styled(
@@ -64,8 +69,21 @@ pub fn render(
 
     render_session_table(f, rows[2], session);
     render_meta_panel(f, rows[3], session);
-    render_chat_log(f, rows[4], session, chat_scroll);
-    widgets::render_footer(f, rows[5], "1 all  3 account  PgUp/PgDn scroll  End live");
+    render_chat_log(
+        f,
+        rows[4],
+        session,
+        chat_scroll,
+        changes_selection,
+        last_change_count,
+        detail_scroll,
+    );
+    widgets::render_footer(
+        f,
+        rows[5],
+        "2",
+        "↑/↓ Tab switch session · PgUp/PgDn chat · j/k actions · J/K detail · End re-tail · Esc back",
+    );
 }
 
 fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
@@ -160,29 +178,77 @@ fn render_meta_panel(f: &mut Frame, area: Rect, s: &SessionRef) {
 
 const LABEL_W: usize = 9; // "you      ", "claude   ", "tool→    ", etc.
 
-fn render_chat_log(f: &mut Frame, area: Rect, s: &SessionRef, scroll: &mut usize) {
-    let entries = chat_log::read(&s.transcript_path);
-    let width = area.width.saturating_sub(2) as usize;
-    let body_w = width.saturating_sub(LABEL_W).max(10);
-    let target_h = area.height.saturating_sub(2) as usize;
+const WIDE_BREAKPOINT: u16 = 130;
 
-    // Build all visible-style lines so we can compute total + scroll
-    // bounds. (Cheap enough; transcripts are bounded by a session.)
+struct ChangeRow {
+    ok: Option<bool>,
+    name: String,
+    input: Value,
+    result: Option<String>,
+}
+
+fn collect_change_rows(entries: &[ChatEntry]) -> Vec<ChangeRow> {
+    let mut rows: Vec<ChangeRow> = Vec::new();
+    for e in entries {
+        match &e.kind {
+            EntryKind::ToolUse { name, input } => {
+                rows.push(ChangeRow {
+                    ok: None,
+                    name: name.clone(),
+                    input: input.clone(),
+                    result: None,
+                });
+            }
+            EntryKind::ToolResult { ok } => {
+                if let Some(r) = rows.iter_mut().rev().find(|r| r.ok.is_none()) {
+                    r.ok = Some(*ok);
+                    r.result = Some(e.text.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
+}
+
+fn render_chat_log(
+    f: &mut Frame,
+    area: Rect,
+    s: &SessionRef,
+    scroll: &mut usize,
+    changes_selection: &mut Option<usize>,
+    last_change_count: &mut usize,
+    detail_scroll: &mut usize,
+) {
+    let entries = chat_log::read(&s.transcript_path);
+
+    let wide = area.width >= WIDE_BREAKPOINT;
+    let (chat_area, changes_area) = if wide {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(area);
+        (cols[0], Some(cols[1]))
+    } else {
+        (area, None)
+    };
+
+    let width = chat_area.width.saturating_sub(2) as usize;
+    let body_w = width.saturating_sub(LABEL_W).max(10);
+    let target_h = chat_area.height.saturating_sub(2) as usize;
+
     let mut all: Vec<Line<'static>> = Vec::with_capacity(entries.len() * 2);
     for e in &entries {
-        all.extend(entry_to_lines(e, body_w));
+        all.extend(entry_to_lines(e, body_w, &s.cwd));
     }
     let total = all.len();
     let max_scroll = total.saturating_sub(target_h);
-    // Clamp the caller's state so repeated PgUp at the top (or PgDn at
-    // the bottom) doesn't pile up off-screen scroll the user then has to
-    // unwind before anything visibly happens.
     if *scroll > max_scroll {
         *scroll = max_scroll;
     }
     let clamped = *scroll;
 
-    let title = if clamped == 0 {
+    let mut title = if clamped == 0 {
         format!("Chat log ({} entries) — tailing", entries.len())
     } else {
         format!(
@@ -192,9 +258,12 @@ fn render_chat_log(f: &mut Frame, area: Rect, s: &SessionRef, scroll: &mut usize
             max_scroll
         )
     };
+    if wide {
+        title.push_str(" · actions →");
+    }
     let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = block.inner(chat_area);
+    f.render_widget(block, chat_area);
 
     if entries.is_empty() {
         let hint = Paragraph::new(Line::from(Span::styled(
@@ -202,16 +271,540 @@ fn render_chat_log(f: &mut Frame, area: Rect, s: &SessionRef, scroll: &mut usize
             Style::default().fg(Color::DarkGray),
         )));
         f.render_widget(hint, inner);
+    } else {
+        let end = total.saturating_sub(clamped);
+        let start = end.saturating_sub(target_h);
+        let visible: Vec<Line<'static>> = all[start..end].to_vec();
+        f.render_widget(Paragraph::new(visible), inner);
+    }
+
+    if let Some(panel_area) = changes_area {
+        let rows = collect_change_rows(&entries);
+        *last_change_count = rows.len();
+        // Resolve "follow tail" (None) and clamp explicit indices that
+        // outran the current row count (e.g. transcript was reloaded).
+        let resolved = if rows.is_empty() {
+            0
+        } else {
+            match *changes_selection {
+                None => rows.len() - 1,
+                Some(i) if i >= rows.len() => rows.len() - 1,
+                Some(i) => i,
+            }
+        };
+
+        let panel_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(panel_area);
+        render_changes_list(f, panel_rows[0], &rows, resolved, &s.cwd);
+        render_changes_detail(f, panel_rows[1], &rows, resolved, detail_scroll, &s.cwd);
+    } else {
+        *last_change_count = 0;
+    }
+}
+
+fn render_changes_list(
+    f: &mut Frame,
+    area: Rect,
+    rows: &[ChangeRow],
+    selection: usize,
+    cwd: &Path,
+) {
+    let title = if rows.is_empty() {
+        "Actions".to_string()
+    } else {
+        format!("Actions ({}/{})", selection + 1, rows.len())
+    };
+    let hint = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("j/k", Style::default().fg(Color::Yellow)),
+        Span::styled(" move ", Style::default().fg(Color::DarkGray)),
+        Span::styled("g/G", Style::default().fg(Color::Yellow)),
+        Span::styled(" top/tail ", Style::default().fg(Color::DarkGray)),
+    ])
+    .alignment(Alignment::Right);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title(hint);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if rows.is_empty() {
+        let hint = Paragraph::new(Line::from(Span::styled(
+            "no tool activity yet",
+            Style::default().fg(Color::DarkGray),
+        )));
+        f.render_widget(hint, inner);
         return;
     }
 
-    let end = total.saturating_sub(clamped);
-    let start = end.saturating_sub(target_h);
-    let visible: Vec<Line<'static>> = all[start..end].to_vec();
+    let width = inner.width as usize;
+    let target_h = inner.height as usize;
+
+    // Middle-anchor the cursor so the highlighted row visibly moves
+    // when j/k is pressed (instead of sticking to the bottom edge).
+    // Near the top/bottom of the list the window pins naturally via
+    // the clamps.
+    let max_start = rows.len().saturating_sub(target_h);
+    let half = target_h / 2;
+    let start = selection.saturating_sub(half).min(max_start);
+    let end = (start + target_h).min(rows.len());
+    let visible = &rows[start..end];
+
+    let lines: Vec<Line<'static>> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let abs_idx = start + i;
+            let selected = abs_idx == selection;
+            let (glyph, glyph_style) = match r.ok {
+                Some(true) => ("✓", Style::default().fg(Color::Green)),
+                Some(false) => ("✗", Style::default().fg(Color::Red)),
+                None => ("·", Style::default().fg(Color::DarkGray)),
+            };
+            let name_style = tool_name_style(&r.name);
+            let summary = shorten_summary_paths(
+                &chat_log::tool_input_summary(&r.name, Some(&r.input)),
+                cwd,
+            );
+            let prefix_w = 2 + r.name.chars().count() + 1;
+            let body_w = width.saturating_sub(prefix_w).max(4);
+            let summary = truncate_chars(&summary, body_w);
+            let mut spans = vec![
+                Span::styled(format!("{glyph} "), glyph_style),
+                Span::styled(r.name.clone(), name_style),
+                Span::raw(" "),
+            ];
+            if r.name.eq_ignore_ascii_case("bash") {
+                // Highlight executable(s) and shell separators in the
+                // bash one-liner so commands like `grep ...` or
+                // `find ... | xargs ...` are scannable at a glance.
+                let normal = Style::default().fg(Color::Gray);
+                let exec_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+                let sep_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+                spans.extend(bash_spans(&summary, exec_style, sep_style, normal));
+            } else {
+                spans.push(Span::styled(summary, Style::default().fg(Color::Gray)));
+            }
+            if selected {
+                for s in &mut spans {
+                    s.style = s.style.add_modifier(Modifier::REVERSED);
+                }
+            }
+            Line::from(spans)
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_changes_detail(
+    f: &mut Frame,
+    area: Rect,
+    rows: &[ChangeRow],
+    selection: usize,
+    detail_scroll: &mut usize,
+    cwd: &Path,
+) {
+    let Some(row) = rows.get(selection) else {
+        let block = Block::default().borders(Borders::ALL).title("Detail");
+        f.render_widget(block, area);
+        return;
+    };
+    let status = match row.ok {
+        Some(true) => " ✓",
+        Some(false) => " ✗",
+        None => " ·",
+    };
+    // Title gets filled in once we know the clamped scroll position.
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let width = inner_w;
+    let mut lines = format_tool_detail(&row.name, &row.input, width, cwd);
+
+    // Append the actual command/tool output below the input. For a
+    // Bash row this is stdout/stderr; for Read it's the file content
+    // claude saw; for Edit it's the success / error message.
+    let separator_style = Style::default().fg(Color::DarkGray);
+    let header_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let body_style = match row.ok {
+        Some(false) => Style::default().fg(Color::Red),
+        _ => Style::default().fg(Color::Gray),
+    };
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(width.max(1)),
+        separator_style,
+    )));
+    let header = match row.ok {
+        Some(true) => "output",
+        Some(false) => "error",
+        None => "output (pending…)",
+    };
+    lines.push(Line::from(Span::styled(header, header_style)));
+    lines.push(Line::raw(""));
+
+    match &row.result {
+        Some(text) if !text.is_empty() => {
+            push_plain(&mut lines, text, width, body_style);
+        }
+        Some(_) => {
+            lines.push(Line::from(Span::styled(
+                "(empty)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "(no result yet)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    let target_h = inner_h;
+    let total = lines.len();
+    let max_scroll = total.saturating_sub(target_h);
+    if *detail_scroll > max_scroll {
+        *detail_scroll = max_scroll;
+    }
+    let start = *detail_scroll;
+    let end = (start + target_h).min(total);
+
+    let title = if max_scroll > 0 {
+        format!(
+            "Detail · {}{}  [scroll {}/{}]",
+            row.name, status, start, max_scroll
+        )
+    } else {
+        format!("Detail · {}{}", row.name, status)
+    };
+    let hint = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("J/K", Style::default().fg(Color::Yellow)),
+        Span::styled(" scroll ", Style::default().fg(Color::DarkGray)),
+    ])
+    .alignment(Alignment::Right);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title(hint);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let visible: Vec<Line<'static>> = lines.drain(start..end).collect();
     f.render_widget(Paragraph::new(visible), inner);
 }
 
-fn entry_to_lines(e: &ChatEntry, body_w: usize) -> Vec<Line<'static>> {
+fn format_tool_detail(
+    name: &str,
+    input: &Value,
+    width: usize,
+    cwd: &Path,
+) -> Vec<Line<'static>> {
+    let lower = name.to_ascii_lowercase();
+    let body_w = width.max(10);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let str_field = |v: &Value, key: &str| -> Option<String> {
+        v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
+    };
+    let path_field = |v: &Value, key: &str| -> Option<String> {
+        str_field(v, key).map(|p| shorten_path(&p, cwd))
+    };
+
+    match lower.as_str() {
+        "bash" => {
+            if let Some(desc) = str_field(input, "description") {
+                for w in wrap_text(&desc, body_w) {
+                    out.push(Line::from(Span::styled(
+                        w,
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    )));
+                }
+                out.push(Line::raw(""));
+            }
+            if let Some(cmd) = str_field(input, "command") {
+                push_bash_command(&mut out, &cmd, body_w);
+            } else {
+                push_pretty_json(&mut out, input, body_w);
+            }
+        }
+        "edit" => {
+            if let Some(fp) = path_field(input, "file_path") {
+                out.push(file_header(&fp));
+                out.push(Line::raw(""));
+            }
+            let old = str_field(input, "old_string").unwrap_or_default();
+            let new = str_field(input, "new_string").unwrap_or_default();
+            push_diff(&mut out, &old, &new, body_w);
+        }
+        "multiedit" => {
+            if let Some(fp) = path_field(input, "file_path") {
+                out.push(file_header(&fp));
+            }
+            if let Some(edits) = input.get("edits").and_then(|v| v.as_array()) {
+                for (i, e) in edits.iter().enumerate() {
+                    out.push(Line::raw(""));
+                    out.push(Line::from(Span::styled(
+                        format!("@@ edit {} @@", i + 1),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    let old = str_field(e, "old_string").unwrap_or_default();
+                    let new = str_field(e, "new_string").unwrap_or_default();
+                    push_diff(&mut out, &old, &new, body_w);
+                }
+            }
+        }
+        "write" => {
+            if let Some(fp) = path_field(input, "file_path") {
+                out.push(file_header(&fp));
+                out.push(Line::raw(""));
+            }
+            let content = str_field(input, "content").unwrap_or_default();
+            push_plain(&mut out, &content, body_w, Style::default().fg(Color::White));
+        }
+        "notebookedit" => {
+            for key in ["notebook_path", "cell_id", "edit_mode", "cell_type"] {
+                let val = if key == "notebook_path" {
+                    path_field(input, key)
+                } else {
+                    str_field(input, key)
+                };
+                if let Some(v) = val {
+                    out.push(Line::from(vec![
+                        Span::styled(
+                            format!("{key}: "),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(v, Style::default().fg(Color::Cyan)),
+                    ]));
+                }
+            }
+            if let Some(src) = str_field(input, "new_source") {
+                out.push(Line::raw(""));
+                push_plain(&mut out, &src, body_w, Style::default().fg(Color::White));
+            }
+        }
+        _ => {
+            push_pretty_json(&mut out, input, body_w);
+        }
+    }
+    out
+}
+
+/// If `p` is an absolute path inside `cwd`, return the path relative
+/// to `cwd`; otherwise return `p` unchanged. Returns the input as-is
+/// for non-absolute paths so we don't mangle things like `node_modules`
+/// or bare filenames coming back from tools.
+fn shorten_path(p: &str, cwd: &Path) -> String {
+    let path = Path::new(p);
+    if !path.is_absolute() {
+        return p.to_string();
+    }
+    match path.strip_prefix(cwd) {
+        Ok(rel) => {
+            let s = rel.display().to_string();
+            if s.is_empty() { ".".to_string() } else { s }
+        }
+        Err(_) => p.to_string(),
+    }
+}
+
+/// `tool_input_summary` returns a single field's value; when that field
+/// is a file path (Edit/Write/etc.), shorten it relative to the
+/// session's cwd. Detected by leading `/`.
+fn shorten_summary_paths(summary: &str, cwd: &Path) -> String {
+    if summary.starts_with('/') {
+        shorten_path(summary, cwd)
+    } else {
+        summary.to_string()
+    }
+}
+
+fn file_header(path: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        path.to_string(),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn push_plain(out: &mut Vec<Line<'static>>, text: &str, width: usize, style: Style) {
+    for src in text.split('\n') {
+        if src.is_empty() {
+            out.push(Line::raw(""));
+            continue;
+        }
+        let wrapped = wrap_text(src, width);
+        if wrapped.is_empty() {
+            out.push(Line::raw(""));
+        }
+        for w in wrapped {
+            out.push(Line::from(Span::styled(w, style)));
+        }
+    }
+}
+
+/// Render a bash `command` field with the executable name(s)
+/// highlighted. Each `\n`-separated source line and each pipeline /
+/// list segment (split by `|`, `&&`, `||`, `;`) gets its first
+/// non-whitespace word colored bold cyan; the separator itself is
+/// rendered in magenta. Wrapping is honored on the first wrapped
+/// sub-line only — continuation lines stay plain so the highlight
+/// always reflects the actual start of a command.
+fn push_bash_command(out: &mut Vec<Line<'static>>, cmd: &str, width: usize) {
+    let exec_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let sep_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    let normal = Style::default().fg(Color::White);
+
+    for raw in cmd.split('\n') {
+        if raw.is_empty() {
+            out.push(Line::raw(""));
+            continue;
+        }
+        let wrapped = wrap_text(raw, width);
+        if wrapped.is_empty() {
+            out.push(Line::raw(""));
+            continue;
+        }
+        // First wrapped sub-line: scan for executable tokens and
+        // shell separators. Subsequent sub-lines render plain so the
+        // highlight stays anchored to the real start of commands.
+        out.push(Line::from(bash_spans(&wrapped[0], exec_style, sep_style, normal)));
+        for cont in &wrapped[1..] {
+            out.push(Line::from(Span::styled(cont.clone(), normal)));
+        }
+    }
+}
+
+fn bash_spans(
+    line: &str,
+    exec_style: Style,
+    sep_style: Style,
+    normal: Style,
+) -> Vec<Span<'static>> {
+    const SEPS: &[&str] = &["&&", "||", "|", ";"];
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut rest = line;
+    let mut expect_exec = true;
+
+    while !rest.is_empty() {
+        // Consume any leading whitespace into a normal span so the
+        // executable still gets its color.
+        let trimmed = rest.trim_start();
+        if trimmed.len() < rest.len() {
+            let ws_len = rest.len() - trimmed.len();
+            spans.push(Span::styled(rest[..ws_len].to_string(), normal));
+            rest = &rest[ws_len..];
+            if rest.is_empty() {
+                break;
+            }
+        }
+        // Match a separator at the current position.
+        let mut matched_sep: Option<&str> = None;
+        for s in SEPS {
+            if rest.starts_with(s) {
+                matched_sep = Some(s);
+                break;
+            }
+        }
+        if let Some(s) = matched_sep {
+            spans.push(Span::styled(s.to_string(), sep_style));
+            rest = &rest[s.len()..];
+            expect_exec = true;
+            continue;
+        }
+        // Take the next whitespace-or-separator-delimited token.
+        let mut tok_end = rest.len();
+        for (i, ch) in rest.char_indices() {
+            if ch.is_whitespace() {
+                tok_end = i;
+                break;
+            }
+            // Don't split mid-token if a separator starts here — but
+            // *do* end the token if a separator begins immediately.
+            if i > 0 && SEPS.iter().any(|s| rest[i..].starts_with(s)) {
+                tok_end = i;
+                break;
+            }
+        }
+        let token = &rest[..tok_end];
+        let style = if expect_exec { exec_style } else { normal };
+        spans.push(Span::styled(token.to_string(), style));
+        rest = &rest[tok_end..];
+        expect_exec = false;
+    }
+    spans
+}
+
+fn push_diff(out: &mut Vec<Line<'static>>, old: &str, new: &str, width: usize) {
+    let minus = Style::default().fg(Color::Red);
+    let plus = Style::default().fg(Color::Green);
+    let body_w = width.saturating_sub(2).max(8);
+    for src in old.split('\n') {
+        for w in wrap_or_empty(src, body_w) {
+            out.push(Line::from(vec![
+                Span::styled("- ", minus),
+                Span::styled(w, minus),
+            ]));
+        }
+    }
+    for src in new.split('\n') {
+        for w in wrap_or_empty(src, body_w) {
+            out.push(Line::from(vec![
+                Span::styled("+ ", plus),
+                Span::styled(w, plus),
+            ]));
+        }
+    }
+}
+
+fn wrap_or_empty(s: &str, width: usize) -> Vec<String> {
+    if s.is_empty() {
+        return vec![String::new()];
+    }
+    let w = wrap_text(s, width);
+    if w.is_empty() { vec![String::new()] } else { w }
+}
+
+fn push_pretty_json(out: &mut Vec<Line<'static>>, v: &Value, width: usize) {
+    let pretty = serde_json::to_string_pretty(v).unwrap_or_default();
+    let style = Style::default().fg(Color::Gray);
+    for src in pretty.split('\n') {
+        for w in wrap_or_empty(src, width) {
+            out.push(Line::from(Span::styled(w, style)));
+        }
+    }
+}
+
+fn tool_name_style(name: &str) -> Style {
+    let lower = name.to_ascii_lowercase();
+    let color = match lower.as_str() {
+        "edit" | "write" | "multiedit" | "notebookedit" => Color::Yellow,
+        "bash" => Color::Magenta,
+        "read" | "grep" | "glob" => Color::Cyan,
+        _ => Color::Gray,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    let take = max.saturating_sub(1);
+    let mut out: String = chars.into_iter().take(take).collect();
+    out.push('…');
+    out
+}
+
+fn entry_to_lines(e: &ChatEntry, body_w: usize, cwd: &Path) -> Vec<Line<'static>> {
     let (label, label_style, body_style) = match &e.kind {
         EntryKind::User => (
             "you      ",
@@ -228,11 +821,15 @@ fn entry_to_lines(e: &ChatEntry, body_w: usize) -> Vec<Line<'static>> {
             Style::default().fg(Color::Magenta),
             Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
         ),
-        EntryKind::ToolUse { name, input_summary } => {
-            let head = if input_summary.is_empty() {
+        EntryKind::ToolUse { name, input } => {
+            let summary = shorten_summary_paths(
+                &chat_log::tool_input_summary(name, Some(input)),
+                cwd,
+            );
+            let head = if summary.is_empty() {
                 name.clone()
             } else {
-                format!("{name}  {input_summary}")
+                format!("{name}  {summary}")
             };
             return build_lines(
                 "tool→    ",
@@ -245,11 +842,15 @@ fn entry_to_lines(e: &ChatEntry, body_w: usize) -> Vec<Line<'static>> {
         EntryKind::ToolResult { ok } => {
             let marker = if *ok { "tool✓    " } else { "tool✗    " };
             let color = if *ok { Color::DarkGray } else { Color::Red };
+            // Inline view collapses the (now full) result text to a
+            // single short line; the Changes detail pane shows it in
+            // full.
+            let snippet = chat_log::one_line(&e.text, 200);
             return build_lines(
                 marker,
                 Style::default().fg(color),
                 Style::default().fg(color),
-                &e.text,
+                &snippet,
                 body_w,
             );
         }
