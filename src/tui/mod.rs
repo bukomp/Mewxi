@@ -17,10 +17,12 @@
 //!  - On every event-loop tick we drain channels, debounce dirty
 //!    reloads to ≥500ms per account, and rescan live sessions.
 
+mod kill_confirm_modal;
 mod markdown;
 mod model_picker_modal;
 mod new_session_modal;
 mod terminal_overlay;
+mod text_input;
 mod view_account;
 mod view_all;
 mod view_mewxi;
@@ -28,6 +30,7 @@ mod view_session;
 mod view_setup;
 mod widgets;
 
+use kill_confirm_modal::{KillConfirmModal, KillConfirmOutcome};
 use model_picker_modal::{ModelOutcome, ModelPickerModal};
 use new_session_modal::{ModalOutcome, NewSessionModal};
 
@@ -567,12 +570,6 @@ const POLLER_TICK: Duration = Duration::from_secs(5);
 /// dashboard doesn't leave a stale highlight pinned to an arbitrary row.
 const SELECTION_VISIBLE: Duration = Duration::from_secs(5);
 
-/// How long the user has between the first `K` (arms the confirmation
-/// banner) and the second `K` (executes the kill). Long enough to read
-/// the banner, short enough that the armed state doesn't outlive the
-/// user's attention.
-const KILL_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
-
 /// How long a live-fetch error stays in the footer before it auto-hides.
 /// The user can also dismiss it earlier with `x`.
 const ERROR_VISIBLE: Duration = Duration::from_secs(10);
@@ -724,7 +721,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     // to appear so we can pin them by session_id.
     let mut drivers: HashMap<(String, String), PtySession> = HashMap::new();
     let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
-    let mut driver_input: String = String::new();
+    let mut driver_input = text_input::TextInput::new();
     let mut driver_input_focused: bool = false;
     let mut driver_status: Option<(String, Instant)> = None;
     let mut driver_optimistic: HashMap<(String, String), DriverOptimistic> = HashMap::new();
@@ -763,11 +760,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     // when the user confirms. Opened with `m` in driven-session scope.
     let mut model_picker: Option<ModelPickerModal> = None;
 
-    // Two-press confirmation for `K`-to-kill. First press captures the
-    // target; second press within KILL_CONFIRM_WINDOW executes. Killing
-    // someone else's claude is destructive (loses any unsaved /compact
-    // work, prompts in progress) so we don't do it on a single keypress.
-    let mut pending_kill: Option<(String, String, u32, Instant)> = None;
+    let mut kill_confirm_modal: Option<KillConfirmModal> = None;
 
     // Refresh the launchd watcher if it's still running the previous
     // binary in memory — otherwise it will keep overwriting our cache
@@ -1126,19 +1119,25 @@ fn run_loop<B: ratatui::backend::Backend>(
         } else {
             None
         };
-        // Account config dir for the active overlay session, used to
-        // surface plan content from `<dir>/plans/` for plan-mode pickers.
-        let overlay_account_dir: Option<std::path::PathBuf> = overlay_screen
-            .as_ref()
-            .and(pinned_session.as_ref())
-            .and_then(|k| per_account.iter().find(|p| p.account.name == k.0))
-            .map(|p| p.account.dir.clone());
+        // Plan content for the active overlay session. Driven by the
+        // session's JSONL — specifically, the `input.plan` of the most
+        // recent `ExitPlanMode` tool_use that hasn't been resolved by a
+        // matching tool_result. This is a protocol-level signal (tool
+        // names are part of the API, not UI prose) so it doesn't depend
+        // on how claude words the acceptance picker.
+        let overlay_plan_content: Option<String> = overlay_screen.as_ref().and_then(|_| {
+            let k = pinned_session.as_ref()?;
+            let pa = per_account.iter().find(|p| p.account.name == k.0)?;
+            let ls = pa.live_sessions.iter().find(|s| s.session_id == k.1)?;
+            crate::chat_log::pending_plan_content(&ls.transcript_path)
+        });
         let overlay_active_here = pinned_session
             .as_ref()
             .is_some_and(|k| overlay_open.contains(k));
         let driver_pane = if is_driven && !overlay_active_here {
             Some(view_session::DriverPane {
                 input: driver_input.as_str(),
+                cursor: driver_input.cursor_byte(),
                 focused: driver_input_focused,
                 overlay_active: false,
             })
@@ -1182,32 +1181,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                     })
             });
 
-        // Expire pending-kill confirmation if the user didn't press K
-        // again in time. Keeping it armed past its window would be
-        // surprising — a stray K minutes later shouldn't kill a session.
-        if let Some((_, _, _, armed_at)) = &pending_kill {
-            if armed_at.elapsed() > KILL_CONFIRM_WINDOW {
-                pending_kill = None;
-            }
-        }
-
-        // Build the transient banner. Pending-kill takes priority since
-        // it's actionable; then driver status; then setup message.
-        let combined_message: Option<String> = if let Some((_, sid, pid, armed_at)) = &pending_kill {
-            let remaining = KILL_CONFIRM_WINDOW
-                .saturating_sub(armed_at.elapsed())
-                .as_secs()
-                + 1;
-            Some(format!(
-                "kill claude pid {pid} (session {})? press K again within {remaining}s to confirm",
-                short_sid(sid),
-            ))
-        } else {
-            match (&driver_status, &setup_message) {
-                (Some((m, t)), _) if t.elapsed() < Duration::from_secs(8) => Some(m.clone()),
-                (_, Some(m)) => Some(m.clone()),
-                _ => None,
-            }
+        let combined_message: Option<String> = match (&driver_status, &setup_message) {
+            (Some((m, t)), _) if t.elapsed() < Duration::from_secs(8) => Some(m.clone()),
+            (_, Some(m)) => Some(m.clone()),
+            _ => None,
         };
 
         terminal.draw(|f| {
@@ -1241,7 +1218,7 @@ fn run_loop<B: ratatui::backend::Backend>(
             // render fn auto-sizes a small box around just the popup
             // region — it does not take over the full mewxi view.
             if let Some(screen) = overlay_screen.as_ref() {
-                terminal_overlay::render(f, f.area(), screen, overlay_account_dir.as_deref());
+                terminal_overlay::render(f, f.area(), screen, overlay_plan_content.as_deref());
             }
             // Modal overlays everything else when open. Render last so
             // it sits on top with Clear + its own border.
@@ -1249,6 +1226,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                 modal.render(f, f.area());
             }
             if let Some(modal) = model_picker.as_ref() {
+                modal.render(f, f.area());
+            }
+            if let Some(modal) = kill_confirm_modal.as_ref() {
                 modal.render(f, f.area());
             }
         })?;
@@ -1447,6 +1427,50 @@ fn run_loop<B: ratatui::backend::Backend>(
                             continue;
                         }
                     }
+                    // Kill confirm modal owns every keystroke while open.
+                    if let Some(modal) = kill_confirm_modal.as_ref() {
+                        match modal.handle_key(k) {
+                            KillConfirmOutcome::Cancel => {
+                                kill_confirm_modal = None;
+                            }
+                            KillConfirmOutcome::Confirm => {
+                                let acct = modal.acct.clone();
+                                let sid = modal.sid.clone();
+                                let pid = modal.pid;
+                                kill_confirm_modal = None;
+                                let key = (acct.clone(), sid.clone());
+                                let msg = if let Some(mut pty) = drivers.remove(&key) {
+                                    let _ = pty.kill();
+                                    format!(
+                                        "killed driven session {} (pid {})",
+                                        short_sid(&sid),
+                                        pid
+                                    )
+                                } else {
+                                    match std::process::Command::new("kill")
+                                        .arg(pid.to_string())
+                                        .status()
+                                    {
+                                        Ok(s) if s.success() => format!(
+                                            "sent SIGTERM to {} (pid {})",
+                                            short_sid(&sid),
+                                            pid
+                                        ),
+                                        Ok(s) => format!(
+                                            "kill {pid} exited {}",
+                                            s.code()
+                                                .map(|c| c.to_string())
+                                                .unwrap_or_else(|| "signal".into())
+                                        ),
+                                        Err(e) => format!("kill {pid} failed: {e}"),
+                                    }
+                                };
+                                driver_status = Some((msg, Instant::now()));
+                            }
+                            KillConfirmOutcome::Stay => {}
+                        }
+                        continue;
+                    }
                     // Model picker owns every keystroke while open.
                     // Dispatched ahead of the new-session modal,
                     // driver input, and globals — the two modals are
@@ -1595,7 +1619,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                     }
                     // Driver input mode owns the keyboard exclusively: chars
                     // become PTY keystrokes, Enter submits, Esc unfocuses,
-                    // Ctrl-D ends the session, Ctrl-C clears the buffer.
+                    // Ctrl-D ends the session, Ctrl-C interrupts claude
+                    // (and discards any composed input).
                     if driver_input_focused {
                         if let Some(key) = pinned_session.clone() {
                             if let Some(pty) = drivers.get_mut(&key) {
@@ -1604,7 +1629,28 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         driver_input_focused = false;
                                     }
                                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                                        // ESC byte → claude treats it as
+                                        // "interrupt the current request"
+                                        // (the same key the standalone CLI
+                                        // uses). Clear the input too so a
+                                        // single keystroke aborts both the
+                                        // in-flight run and the message
+                                        // the user was composing.
                                         driver_input.clear();
+                                        match pty.cancel_execution() {
+                                            Ok(_) => {
+                                                driver_status = Some((
+                                                    "cancel sent — claude should interrupt".into(),
+                                                    Instant::now(),
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                driver_status = Some((
+                                                    format!("cancel failed: {e}"),
+                                                    Instant::now(),
+                                                ));
+                                            }
+                                        }
                                     }
                                     (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
                                         let _ = pty.kill();
@@ -1664,9 +1710,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 screen_dump
                                             ));
                                             let text_bytes =
-                                                driver_input.as_bytes().to_vec();
+                                                driver_input.as_str().as_bytes().to_vec();
                                             let preview: String =
-                                                driver_input.chars().take(60).collect();
+                                                driver_input.as_str().chars().take(60).collect();
                                             crate::debug_log::log(&format!(
                                                 "driver_input.send key={key:?} bytes_len={} preview={:?}",
                                                 text_bytes.len() + 1,
@@ -1686,7 +1732,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 "driver_input.ring-tail-before key={key:?} tail={tail_before:?}"
                                             ));
                                             let was_slash_cmd =
-                                                driver_input.starts_with('/');
+                                                driver_input.as_str().starts_with('/');
                                             // Split text + \r into TWO
                                             // writes with a tiny pause —
                                             // claude's input handler
@@ -1747,9 +1793,6 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             }
                                         }
                                     }
-                                    (KeyCode::Backspace, _) => {
-                                        driver_input.pop();
-                                    }
                                     // Shift-Tab. crossterm reports it
                                     // as either `BackTab` (legacy
                                     // terminals) or `(Tab, SHIFT)`
@@ -1780,18 +1823,19 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             &mut driver_status,
                                         );
                                     }
-                                    // Drop other Ctrl/Alt chord keys
-                                    // instead of inserting the bare char
-                                    // (Ctrl-L appending `l` to the buffer
-                                    // is worse than no-op).
-                                    (KeyCode::Char(_), m)
-                                        if m.intersects(
-                                            KeyModifiers::CONTROL | KeyModifiers::ALT,
-                                        ) => {}
-                                    (KeyCode::Char(c), _) => {
-                                        driver_input.push(c);
+                                    // Everything else routes through the
+                                    // shared readline-style editor:
+                                    // char insert, Backspace/Delete,
+                                    // arrows + Ctrl/Alt arrows for word
+                                    // jumps, Home/End, Ctrl-A/E/W/U/K,
+                                    // Alt-B/F/D, Ctrl-H. Unrecognised
+                                    // Ctrl/Alt chords return Passthrough
+                                    // and are dropped here, so e.g.
+                                    // Ctrl-L doesn't append `l` to the
+                                    // buffer.
+                                    _ => {
+                                        let _ = driver_input.handle_edit_key(k);
                                     }
-                                    _ => {}
                                 }
                                 continue;
                             }
@@ -2148,10 +2192,6 @@ fn run_loop<B: ratatui::backend::Backend>(
                             changes_selection = None;
                             detail_scroll = 0;
                         }
-                        // Note: K is reserved for the kill flow below
-                        // (the footer in SessionDetail advertises `K kill
-                        // (2×)`). Use PageUp/Down or Home/End for detail
-                        // scroll in this view.
                         KeyCode::Char('J') if mode == ViewMode::SessionDetail => {
                             detail_scroll = detail_scroll.saturating_add(1);
                         }
@@ -2217,14 +2257,33 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
-                        // Capital K only — lowercase k is reserved for
-                        // future navigation use, and case sensitivity
-                        // matches the muscle-memory "destructive action
-                        // wants Shift" rule (Vim's D vs d, etc.).
-                        KeyCode::Char('K') => {
-                            // Resolve the target: in view 2 it's the
-                            // pinned session; in view 1 the highlighted
-                            // row. Other views: no target.
+                        // Cancel claude's in-flight execution. Esc is
+                        // mewxi's "back to view 1" key, so Ctrl-C takes
+                        // the role Esc plays inside a standalone claude.
+                        KeyCode::Char('c')
+                            if k.modifiers.contains(KeyModifiers::CONTROL)
+                                && mode == ViewMode::SessionDetail =>
+                        {
+                            if let Some(key) = pinned_session.clone() {
+                                if let Some(pty) = drivers.get_mut(&key) {
+                                    match pty.cancel_execution() {
+                                        Ok(_) => {
+                                            driver_status = Some((
+                                                "cancel sent — claude should interrupt".into(),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            driver_status = Some((
+                                                format!("cancel failed: {e}"),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Delete => {
                             let target: Option<(String, String, u32)> = match mode {
                                 ViewMode::SessionDetail => pinned_session
                                     .as_ref()
@@ -2239,59 +2298,15 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     .map(|s| (s.account_name.clone(), s.session_id.clone(), s.pid)),
                                 _ => None,
                             };
-                            let Some((acct, sid, pid)) = target else {
-                                driver_status = Some((
-                                    "no session selected to kill".into(),
-                                    Instant::now(),
-                                ));
-                                continue;
-                            };
-                            match &pending_kill {
-                                // Second press on the same session within
-                                // the window: do the kill.
-                                Some((p_acct, p_sid, p_pid, armed_at))
-                                    if p_acct == &acct
-                                        && p_sid == &sid
-                                        && armed_at.elapsed() <= KILL_CONFIRM_WINDOW =>
-                                {
-                                    let key = (acct.clone(), sid.clone());
-                                    // If mewxi owns the PTY, kill through
-                                    // PtySession so the registry stays
-                                    // consistent. Otherwise SIGTERM the
-                                    // pid directly.
-                                    let msg = if let Some(mut pty) = drivers.remove(&key) {
-                                        let _ = pty.kill();
-                                        format!(
-                                            "killed driven session {} (pid {})",
-                                            short_sid(&sid),
-                                            p_pid
-                                        )
-                                    } else {
-                                        match std::process::Command::new("kill")
-                                            .arg(p_pid.to_string())
-                                            .status()
-                                        {
-                                            Ok(s) if s.success() => format!(
-                                                "sent SIGTERM to {} (pid {})",
-                                                short_sid(&sid),
-                                                p_pid
-                                            ),
-                                            Ok(s) => format!(
-                                                "kill {p_pid} exited {}",
-                                                s.code()
-                                                    .map(|c| c.to_string())
-                                                    .unwrap_or_else(|| "signal".into())
-                                            ),
-                                            Err(e) => format!("kill {p_pid} failed: {e}"),
-                                        }
-                                    };
-                                    driver_status = Some((msg, Instant::now()));
-                                    pending_kill = None;
+                            match target {
+                                Some((acct, sid, pid)) => {
+                                    kill_confirm_modal = Some(KillConfirmModal::new(acct, sid, pid));
                                 }
-                                // First press, or armed on a different
-                                // session: arm the confirmation.
-                                _ => {
-                                    pending_kill = Some((acct, sid, pid, Instant::now()));
+                                None => {
+                                    driver_status = Some((
+                                        "no session selected to kill".into(),
+                                        Instant::now(),
+                                    ));
                                 }
                             }
                         }

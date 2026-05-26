@@ -26,6 +26,10 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 pub struct DriverPane<'a> {
     /// What the user has typed but not yet submitted.
     pub input: &'a str,
+    /// Byte index of the edit cursor within `input`. Always sits on a
+    /// char boundary; equals `input.len()` when the cursor is past the
+    /// last character.
+    pub cursor: usize,
     /// True while the input row has keyboard focus. Renders a bright
     /// cursor; otherwise the row is dim with an `i to type` hint.
     pub focused: bool,
@@ -123,7 +127,7 @@ pub fn render(
         detail_rect,
     );
     let default_hint =
-        "↑/↓ Tab switch · PgUp/PgDn chat · j/k actions · J/K detail · K kill (2×) · Esc back";
+        "↑/↓ Tab switch · PgUp/PgDn chat · j/k actions · J/K detail · Del kill · Esc back";
     let footer_hint = match driver {
         Some(d) if d.overlay_active => {
             "claude is asking — keys pass through  ·  Ctrl-] dismiss"
@@ -132,7 +136,7 @@ pub fn render(
             "Enter send  Shift-Tab cycle mode  Esc unfocus  Ctrl-D end  Ctrl-C cancel"
         }
         Some(_) => {
-            "i type  m model  Shift-Tab cycle mode  Ctrl-D end  K kill (2×)  1 all"
+            "i type  m model  Shift-Tab cycle mode  Ctrl-C cancel  Ctrl-D end  Del kill  1 all"
         }
         None => default_hint,
     };
@@ -290,14 +294,45 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &DriverPane<'_>) {
                 Style::default().fg(Color::DarkGray),
             ));
         }
-    } else {
-        spans.push(Span::raw(d.input.to_string()));
-        if d.focused {
+    } else if d.focused {
+        // Split around the cursor so mid-string edits actually show the
+        // caret where the next keystroke will land. Clamp the byte
+        // index defensively in case the caller passes a stale value.
+        let cursor = d.cursor.min(d.input.len());
+        let cursor = if d.input.is_char_boundary(cursor) {
+            cursor
+        } else {
+            d.input.len()
+        };
+        let pre = &d.input[..cursor];
+        if !pre.is_empty() {
+            spans.push(Span::raw(pre.to_string()));
+        }
+        if cursor < d.input.len() {
+            // Cursor sits over a real char: render it with reversed
+            // colours so it reads as a block cursor without losing the
+            // glyph underneath.
+            let next = next_char_boundary(d.input, cursor);
+            spans.push(Span::styled(
+                d.input[cursor..next].to_string(),
+                Style::default()
+                    .bg(Color::Green)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            let rest = &d.input[next..];
+            if !rest.is_empty() {
+                spans.push(Span::raw(rest.to_string()));
+            }
+        } else {
+            // Cursor past the last char — append the trailing block.
             spans.push(Span::styled(
                 "█",
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             ));
         }
+    } else {
+        spans.push(Span::raw(d.input.to_string()));
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)).block(
@@ -307,6 +342,14 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &DriverPane<'_>) {
         ),
         area,
     );
+}
+
+fn next_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx + 1;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i.min(s.len())
 }
 
 // Mirrors view_all.rs's `activity_display` so the same word reads the
