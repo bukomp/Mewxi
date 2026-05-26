@@ -20,6 +20,7 @@ mod accounts;
 mod agent_control;
 mod auth;
 mod chat_log;
+mod debug_log;
 mod live_session;
 mod live_usage;
 mod mcp;
