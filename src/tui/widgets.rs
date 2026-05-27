@@ -480,7 +480,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, active: &str, hint: &str) {
         ("1", "all"),
         ("2", "session"),
         ("3", "account"),
-        ("4", "setup"),
+        ("4", "config"),
         ("m", "mewxi"),
         ("r", "reload"),
         ("q", "quit"),

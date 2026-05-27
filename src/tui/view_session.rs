@@ -180,7 +180,7 @@ pub fn render(
             "Enter send  Ctrl-E editor  Shift-Tab cycle mode  Esc unfocus  Ctrl-D end  Ctrl-C cancel"
         }
         Some((false, false)) => {
-            "i type  m model  Shift-Tab cycle mode  Ctrl-C cancel  Ctrl-D end  Del kill  1 all"
+            "i type  m model  / skill  Shift-Tab cycle mode  Ctrl-C cancel  Ctrl-D end  Del kill"
         }
         None => default_hint,
     };
@@ -1002,7 +1002,7 @@ fn render_chat_log(
     };
     *chat_rect = Some(chat_area);
 
-    let width = chat_area.width.saturating_sub(2) as usize;
+    let width = chat_area.width.saturating_sub(4) as usize;
     let body_w = width.saturating_sub(LABEL_W).max(10);
     // Reserve 2 rows for top/bottom borders plus 2 rows of persistent
     // inner padding (one at the top, one at the bottom) so messages
@@ -1143,11 +1143,11 @@ fn render_chat_log(
         f.render_widget(Paragraph::new(Line::from(cat_span)), cat_rect);
     }
 
-    // Persistent 1-row padding at top and bottom of the chat viewport.
+    // Persistent 1-cell padding around the chat viewport (top/bottom/left/right).
     let inner = Rect {
-        x: block_inner.x,
+        x: block_inner.x.saturating_add(1),
         y: block_inner.y.saturating_add(1),
-        width: block_inner.width,
+        width: block_inner.width.saturating_sub(2),
         height: block_inner.height.saturating_sub(2),
     };
 

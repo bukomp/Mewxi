@@ -21,6 +21,7 @@ mod kill_confirm_modal;
 mod markdown;
 mod model_picker_modal;
 mod new_session_modal;
+mod skill_picker_modal;
 mod terminal_overlay;
 mod text_input;
 mod view_account;
@@ -33,6 +34,7 @@ mod widgets;
 use kill_confirm_modal::{KillConfirmModal, KillConfirmOutcome};
 use model_picker_modal::{ModelOutcome, ModelPickerModal};
 use new_session_modal::{ModalOutcome, NewSessionModal};
+use skill_picker_modal::{SkillOutcome, SkillPickerModal};
 
 use crate::accounts::{self, Account, AccountsView};
 use crate::agent_control::{self, PtySession};
@@ -902,6 +904,13 @@ fn run_loop<B: ratatui::backend::Backend>(
     // when the user confirms. Opened with `m` in driven-session scope.
     let mut model_picker: Option<ModelPickerModal> = None;
 
+    // Skill-picker modal state. Lists skills + commands discovered from
+    // the account's CLAUDE_CONFIG_DIR (user + plugin scope) and from
+    // .claude/ in the session cwd (project scope), so the user can
+    // browse and inject one as `/<name>\r`. Opened with `k` in
+    // driven-session scope.
+    let mut skill_picker: Option<SkillPickerModal> = None;
+
     let mut kill_confirm_modal: Option<KillConfirmModal> = None;
 
     // Refresh the launchd watcher if it's still running the previous
@@ -1428,6 +1437,9 @@ fn run_loop<B: ratatui::backend::Backend>(
             if let Some(modal) = model_picker.as_ref() {
                 modal.render(f, f.area());
             }
+            if let Some(modal) = skill_picker.as_ref() {
+                modal.render(f, f.area());
+            }
             if let Some(modal) = kill_confirm_modal.as_ref() {
                 modal.render(f, f.area());
             }
@@ -1897,6 +1909,54 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 format!("model send failed: {e}"),
                                                 Instant::now(),
                                             ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    // Skill picker owns every keystroke while open. On
+                    // confirm we inject `/<name>\r` into the driven PTY
+                    // exactly the way the user would type it themselves;
+                    // claude resolves the rest (slash-command lookup,
+                    // skill expansion).
+                    if let Some(modal) = skill_picker.as_mut() {
+                        match modal.handle_key(k) {
+                            SkillOutcome::Stay => {}
+                            SkillOutcome::Cancel => {
+                                skill_picker = None;
+                            }
+                            SkillOutcome::Confirm { name } => {
+                                skill_picker = None;
+                                if let Some(key) = pinned_session.clone() {
+                                    if let Some(pty) = drivers.get_mut(&key) {
+                                        let mut bytes =
+                                            format!("/{name}").into_bytes();
+                                        bytes.push(b'\r');
+                                        match pty.send_keys(&bytes) {
+                                            Ok(_) => {
+                                                // Same slash-command grace
+                                                // window we arm after a
+                                                // manual /command send —
+                                                // claude flushes stdin
+                                                // briefly on these.
+                                                driver_send_grace_until.insert(
+                                                    key.clone(),
+                                                    Instant::now()
+                                                        + Duration::from_millis(1500),
+                                                );
+                                                driver_status = Some((
+                                                    format!("/{name} sent"),
+                                                    Instant::now(),
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                driver_status = Some((
+                                                    format!("skill send failed: {e}"),
+                                                    Instant::now(),
+                                                ));
+                                            }
                                         }
                                     }
                                 }
@@ -2448,6 +2508,49 @@ fn run_loop<B: ratatui::backend::Backend>(
                             } else {
                                 mode = ViewMode::Mewxi;
                                 pinned_session = None;
+                            }
+                        }
+                        KeyCode::Char('/') => {
+                            // `/` opens the skill picker in a driven
+                            // session — same key that prefixes every
+                            // slash command so the muscle memory is
+                            // already there. Discovery runs at
+                            // open time (cheap — a few directory reads),
+                            // so newly-installed skills appear without
+                            // a TUI restart.
+                            let driven = mode == ViewMode::SessionDetail
+                                && pinned_session
+                                    .as_ref()
+                                    .is_some_and(|k| drivers.contains_key(k));
+                            if driven {
+                                if let Some(key) = pinned_session.clone() {
+                                    let account = per_account
+                                        .iter()
+                                        .find(|p| p.account.name == key.0)
+                                        .map(|p| p.account.clone());
+                                    let cwd = per_account
+                                        .iter()
+                                        .find(|p| p.account.name == key.0)
+                                        .and_then(|p| {
+                                            p.live_sessions
+                                                .iter()
+                                                .find(|s| s.session_id == key.1)
+                                                .map(|s| s.cwd.clone())
+                                        })
+                                        .unwrap_or_else(|| {
+                                            std::env::current_dir()
+                                                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                                        });
+                                    if let Some(acct) = account {
+                                        let bin = agent_control::resolve_claude_bin(&acct);
+                                        let skills = crate::skills::discover(
+                                            &acct.dir,
+                                            &cwd,
+                                            Some(&bin),
+                                        );
+                                        skill_picker = Some(SkillPickerModal::new(skills));
+                                    }
+                                }
                             }
                         }
                         KeyCode::Char('R') if mode == ViewMode::Setup => {

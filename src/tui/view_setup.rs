@@ -83,12 +83,12 @@ fn render_preferences(f: &mut Frame, area: Rect, defocus_input_after_send: bool)
 fn render_header(f: &mut Frame, area: Rect, snap: Option<&SetupSnapshot>) {
     let banner = match snap {
         None => Line::from(vec![Span::styled(
-            "Setup",
+            "Config",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )]),
         Some(s) if s.fully_ok() => Line::from(vec![
             Span::styled(
-                "Setup",
+                "Config",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
@@ -110,7 +110,7 @@ fn render_header(f: &mut Frame, area: Rect, snap: Option<&SetupSnapshot>) {
             };
             Line::from(vec![
                 Span::styled(
-                    "Setup",
+                    "Config",
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("   "),

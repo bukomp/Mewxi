@@ -26,6 +26,7 @@ mod live_usage;
 mod mcp;
 mod pricing;
 mod setup;
+mod skills;
 mod stats;
 mod tui;
 mod watch;
