@@ -26,7 +26,12 @@ use std::time::Duration;
 use crate::accounts::Account;
 
 pub const PTY_ROWS: u16 = 40;
-pub const PTY_COLS: u16 = 120;
+// 160 (not 120) so claude has room for the AskUserQuestion side-by-side
+// preview layout — at 120 the option list and preview pane fight for
+// width and the modal wraps awkwardly. mewxi's terminal_overlay re-parses
+// pickers natively, so the wider PTY is purely about giving claude
+// breathing room to lay out cleanly before we re-render.
+pub const PTY_COLS: u16 = 160;
 
 /// A running interactive `claude` child whose PTY mewxi owns.
 pub struct PtySession {
@@ -40,8 +45,8 @@ pub struct PtySession {
     /// thread trims to [`PTY_RING_BYTES`].
     ring: Arc<Mutex<Vec<u8>>>,
     /// vt100 parser fed in parallel with the ring. Maintains the
-    /// authoritative 40×120 screen grid so the TUI can render claude's
-    /// terminal overlays (prompts, pickers) when needed.
+    /// authoritative PTY_ROWS×PTY_COLS screen grid so the TUI can render
+    /// claude's terminal overlays (prompts, pickers) when needed.
     parser: Arc<Mutex<vt100::Parser>>,
 }
 
@@ -349,7 +354,8 @@ mod tests {
             key_event_to_bytes(ck(KeyCode::Char('a'), KeyModifiers::CONTROL)),
             vec![0x01]
         );
-        // Ctrl-] = 0x1d, our reserved escape from terminal-overlay passthrough.
+        // Ctrl-] = 0x1d. No longer reserved by mewxi (overlay dismiss
+        // is F10 now); kept here to lock in the byte-encoding contract.
         assert_eq!(
             key_event_to_bytes(ck(KeyCode::Char(']'), KeyModifiers::CONTROL)),
             vec![0x1d]

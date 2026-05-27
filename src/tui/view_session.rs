@@ -67,7 +67,7 @@ pub struct DriverPane<'a> {
     /// cursor; otherwise the row is dim with an `i to type` hint.
     pub focused: bool,
     /// True when the terminal overlay (claude's PTY screen) is up. The
-    /// footer hint switches to advertise passthrough + Ctrl-] dismiss.
+    /// footer hint switches to advertise passthrough + F10 dismiss.
     pub overlay_active: bool,
     /// Persistent horizontal scroll offset (in chars) for long inputs.
     /// Owned by the run loop so it survives across frames; render only
@@ -175,7 +175,7 @@ pub fn render(
         "↑/↓ Tab switch · PgUp/PgDn chat · j/k actions · J/K detail · Del kill · Esc back";
     let driver_flags = driver.as_ref().map(|d| (d.overlay_active, d.focused));
     let footer_hint = match driver_flags {
-        Some((true, _)) => "claude is asking — keys pass through  ·  Ctrl-] dismiss",
+        Some((true, _)) => "claude is asking — keys pass through  ·  F10 dismiss",
         Some((false, true)) => {
             "Enter send  Ctrl-E editor  Shift-Tab cycle mode  Esc unfocus  Ctrl-D end  Ctrl-C cancel"
         }
@@ -498,6 +498,86 @@ fn activity_badge(a: &Activity) -> (String, Color) {
     (a.label(), color)
 }
 
+/// Playful animated cat. Kneads + occasional blink while the agent is
+/// doing anything; curls up with accumulating `ᶻ`s when waiting. Frame
+/// is wall-clock derived so it advances correctly across the variable
+/// redraw cadence (session view redraws at ~5fps minimum).
+///
+/// The 5-cell body `^•ﻌ•^` is anchored at columns 2–6 of the returned
+/// span; column 1 is reserved for the left paw (a space when absent)
+/// so the body doesn't jerk sideways when paws flash. Columns 0 and
+/// the trailing column give one cell of breathing room on each side
+/// so the cat doesn't sit flush against the bottom-border `─` chars.
+/// Right-side extras (right paw or sleep ᶻ's) sit between the body
+/// and the trailing breathing cell.
+fn cat_indicator(activity: &Activity) -> (Span<'static>, u16) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if matches!(activity, Activity::Waiting) {
+        // 0 → 1 → 2 → 3 ᶻ's so the snoring count climbs smoothly
+        // instead of jumping from 1 to 3. Sleep slot is padded to a
+        // fixed [`SLEEP_SLOT`] width: max-z body (10 cells: 2 leading
+        // + 5 body + 3 ᶻ's) + 2 trailing breathing cells. Fixed width
+        // keeps the cat's right edge from creeping outward as ᶻ's
+        // accumulate.
+        const SLEEP_Z: [&str; 4] = ["", "ᶻ", "ᶻᶻ", "ᶻᶻᶻ"];
+        const SLEEP_SLOT: usize = 12;
+        let zs = SLEEP_Z[((millis / 1200) % SLEEP_Z.len() as u128) as usize];
+        // 2 leading + 5 body + ᶻ's, then pad to SLEEP_SLOT.
+        let mut s = format!("  ^-ﻌ-^{zs}");
+        let core_w = 7 + zs.chars().count();
+        for _ in core_w..SLEEP_SLOT {
+            s.push(' ');
+        }
+        return (
+            Span::styled(s, Style::default().fg(Color::DarkGray)),
+            SLEEP_SLOT as u16,
+        );
+    }
+    // Busy: 24-beat × 400ms = 9.6s cycle. Pattern: `-B-B-B-----LLL---RRR----`
+    // — three quick blinks (single beats) up front, then alternating paw
+    // flashes (3 beats each). 400ms aligns with the session view's 200ms
+    // poll cadence so beats land evenly.
+    let beat = (millis / 400) % 24;
+    let (paw_left, paw_right, eyes) = match beat {
+        1 | 3 | 5 => (false, false, '-'),   // blink
+        11 | 12 | 13 => (true, false, '•'), // left paw
+        17 | 18 | 19 => (false, true, '•'), // right paw
+        _ => (false, false, '•'),           // rest
+    };
+    // All busy frames render as a fixed 9-cell slot: outer breathing
+    // cell + left-paw slot + 5-cell body + right-paw slot + outer
+    // breathing cell. Paws light up their reserved slot in place of a
+    // space, so the body (and the cat's overall right edge) stays
+    // anchored across rest/blink/left-paw/right-paw transitions.
+    let mut out = String::with_capacity(16);
+    out.push(' '); // col 0 — outer breathing
+    out.push(if paw_left { 'ฅ' } else { ' ' }); // col 1
+    out.push('^'); // col 2
+    out.push(eyes); // col 3
+    out.push('ﻌ'); // col 4 — mouth, stable anchor
+    out.push(eyes); // col 5
+    out.push('^'); // col 6
+    out.push(if paw_right { 'ฅ' } else { ' ' }); // col 7
+    out.push(' '); // col 8 — outer breathing
+    let w = 9u16;
+    // Constant cat colour while busy so it reads as the same critter
+    // regardless of activity — the activity badge already carries the
+    // colour signal. Sleep stays dim (handled above).
+    (
+        Span::styled(
+            out,
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        w as u16,
+    )
+}
+
 /// Map a raw permission-mode string from the transcript to the badge
 /// label + colour shown in the header. `default` reads as "manual"
 /// because that's how Claude Code presents it to users.
@@ -567,7 +647,7 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
 }
 
 /// Spans for the ephemeral status indicators (`[mode]`, `[activity]`,
-/// `[idle for Nm]`, transient `via <model>`). Rendered as the chat-log
+/// `[idle]`, transient `via <model>`). Rendered as the chat-log
 /// block's bottom-title overlay so the live state sits visually attached
 /// to the chat it describes. Returns an empty vec when nothing notable
 /// is happening — callers should then skip the `title_bottom` call so
@@ -576,7 +656,11 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let push_sep = |spans: &mut Vec<Span<'static>>| {
         if !spans.is_empty() {
-            spans.push(Span::raw("  "));
+            // Box-drawing horizontals rendered with the default
+            // foreground so they read at the same weight as the
+            // chat box's own border — the badges look strung along
+            // a continuous bottom edge: `[…]──[…]──[…]`.
+            spans.push(Span::raw("──"));
         }
     };
     // Thinking effort sits to the left of the permission-mode badge so
@@ -627,14 +711,69 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
         ));
     }
     if s.state == SessionState::Idle {
-        let mins = (Utc::now() - s.state_since).num_minutes().max(0);
         push_sep(&mut spans);
         spans.push(Span::styled(
-            format!("[idle for {mins}m]"),
+            "[idle]",
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
     }
     spans
+}
+
+/// Worst-case width (in cells) of [`build_status_spans`] given the
+/// session's current *badge structure*. Per-badge content that
+/// fluctuates rapidly (activity-label flaps, idle-minute increments,
+/// mode label swaps) is replaced with its largest plausible value so
+/// the cat anchor downstream stays stable across those changes. Only
+/// structural changes — a badge appearing or disappearing — shift it.
+fn build_status_reserve_width(s: &SessionRef) -> usize {
+    // Widest known fixed-set labels (recompute if new variants are added).
+    const MAX_MODE_LABEL: usize = 12; // "accept edits"
+    const MAX_ACTIVITY_LABEL: usize = 10; // "delegating" / "compacting"
+    let mut w = 0usize;
+    let push_sep = |w: &mut usize| {
+        if *w > 0 {
+            // "──" — must match the separator emitted by
+            // `build_status_spans`.
+            *w += 2;
+        }
+    };
+    if let Some(eff) = s.effort.as_deref() {
+        push_sep(&mut w);
+        let model_w = if s.model.is_empty() {
+            "default".len()
+        } else {
+            s.model.chars().count()
+        };
+        // "[model:effort]"
+        w += 2 + model_w + 1 + eff.chars().count();
+    }
+    if s.permission_mode.is_some() {
+        push_sep(&mut w);
+        w += 2 + MAX_MODE_LABEL;
+    }
+    if !matches!(s.activity, Activity::Waiting) {
+        push_sep(&mut w);
+        let label_w = match &s.activity {
+            // Tool name is set per turn and doesn't flap beat-to-beat;
+            // use the current width.
+            Activity::Tool(n) => n.chars().count(),
+            _ => MAX_ACTIVITY_LABEL,
+        };
+        w += 2 + label_w;
+    }
+    if !s.active_model.is_empty()
+        && !s.model.is_empty()
+        && !models_match(&s.model, &s.active_model)
+    {
+        push_sep(&mut w);
+        w += 4 + s.active_model.chars().count(); // "via <model>"
+    }
+    if s.state == SessionState::Idle {
+        push_sep(&mut w);
+        w += "[idle]".chars().count();
+    }
+    w
 }
 
 fn render_session_table(f: &mut Frame, area: Rect, s: &SessionRef) {
@@ -950,15 +1089,59 @@ fn render_chat_log(
     }
     // Live status (mode/activity/via/idle) overlays the chat-log's
     // bottom border so it sits visually attached to the conversation
-    // it describes. Skip the bottom title when nothing notable is
-    // happening so the box keeps a clean border.
+    // it describes. The cat rides on the same border row, rendered
+    // as a *separate* 1-row widget — title spans paint every cell
+    // (including spaces) opaquely, so to keep the box's `─` chars
+    // visible between status and cat we have to leave those cells
+    // unrendered by either widget.
+    //
+    // `build_status_reserve_width` returns the worst-case width for
+    // the current badge structure (max activity-label width, max
+    // plausible idle-minute digits, max mode-label width); the cat
+    // anchors to that so per-beat label flaps (`[thinking]` ↔
+    // `[running]`) and per-minute idle ticks don't yank it sideways.
+    // It only shifts on structural changes — a badge appearing or
+    // disappearing.
     let status = build_status_spans(s);
+    let actual_w: usize = status.iter().map(|s| s.content.chars().count()).sum();
+    let reserve_w = build_status_reserve_width(s).max(actual_w);
     let mut block = Block::default().borders(Borders::ALL).title(title);
     if !status.is_empty() {
         block = block.title_bottom(Line::from(status));
     }
     let block_inner = block.inner(chat_area);
     f.render_widget(block, chat_area);
+    // Cat: anchor at chat_area.x + 1 (skip corner) + reserve_w + GAP,
+    // then nudge [`CAT_SHIFT_LEFT`] cells leftward so the cat sits
+    // visually closer to the typical (sub-reserve) status. Floored at
+    // `actual_w + min_gap` so it never overlaps a status that has
+    // grown into the reserved slack. Skipped when the chat box is too
+    // narrow to host both status and cat.
+    const CAT_GAP: u16 = 2;
+    const CAT_SHIFT_LEFT: u16 = 10;
+    let (cat_span, cat_w) = cat_indicator(&s.activity);
+    let cat_offset_base = 1u16
+        .saturating_add(reserve_w as u16)
+        .saturating_add(CAT_GAP);
+    let cat_offset_shifted = cat_offset_base.saturating_sub(CAT_SHIFT_LEFT);
+    let cat_offset_min = 1u16
+        .saturating_add(actual_w as u16)
+        .saturating_add(CAT_GAP);
+    let cat_offset = cat_offset_shifted.max(cat_offset_min);
+    let cat_x = chat_area.x.saturating_add(cat_offset);
+    let cat_y = chat_area
+        .y
+        .saturating_add(chat_area.height.saturating_sub(1));
+    let right_corner = chat_area.x.saturating_add(chat_area.width.saturating_sub(1));
+    if cat_x.saturating_add(cat_w) < right_corner {
+        let cat_rect = Rect {
+            x: cat_x,
+            y: cat_y,
+            width: cat_w,
+            height: 1,
+        };
+        f.render_widget(Paragraph::new(Line::from(cat_span)), cat_rect);
+    }
 
     // Persistent 1-row padding at top and bottom of the chat viewport.
     let inner = Rect {

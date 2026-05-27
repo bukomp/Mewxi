@@ -19,12 +19,14 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use vt100::Screen;
 
 /// Substring markers that strongly suggest claude has popped a TUI
 /// overlay (y/N prompts, accept-edit, continue dialog). Pattern-based
 /// and intentionally easy to extend — false positives are recoverable
-/// with Ctrl-]. Anything added here **must not** appear in claude's
+/// with F10. Anything added here **must not** appear in claude's
 /// normal chat input box, otherwise the overlay triggers on every
 /// keystroke. Picker UIs (numbered or unnumbered options with a cursor)
 /// are detected structurally by [`picker_cursor_col`] + sibling indent
@@ -71,6 +73,30 @@ const MAX_POPUP_ROWS: u16 = 20;
 /// (model switch, plan acceptance, plan-mode pick).
 pub fn prompt_visible(screen: &Screen, _awaiting_marker: bool) -> bool {
     find_marker_row(screen).is_some()
+}
+
+/// Stable identity of the currently-visible popup, used to remember
+/// "the user dismissed *this* popup" across frames without burning a
+/// time-based cooldown. Returns `None` when no popup is on-screen.
+///
+/// The hash covers every row of the popup region; cursor moves or
+/// option-text edits change it (correct — claude has shown a different
+/// state), but unrelated scrollback churn outside the region does not.
+/// A popup that disappears and later re-renders identical bytes will
+/// hash the same, so the dismiss-loop in `tui/mod.rs` clears the
+/// stored signature on the `!visible` transition: vanishing the popup
+/// counts as "answered" and the next appearance is fair game.
+pub fn popup_signature(screen: &Screen) -> Option<u64> {
+    let (top, bot, _, _) = find_popup_region(screen)?;
+    let cols = screen.size().1;
+    let mut hasher = DefaultHasher::new();
+    for r in top..=bot {
+        row_text(screen, r, cols).hash(&mut hasher);
+        // Row delimiter so two adjacent rows can't be confused with one
+        // doubled-width row that happens to contain the same bytes.
+        0u8.hash(&mut hasher);
+    }
+    Some(hasher.finish())
 }
 
 /// Diagnostic helper: when the overlay is currently triggered, return
@@ -246,7 +272,9 @@ fn is_horizontal_separator(line: &str) -> bool {
 /// of pattern-matching the picker's prose means rewordings of claude's
 /// plan-acceptance dialog don't silently disable the plan view.
 pub fn render(frame: &mut Frame, area: Rect, screen: &Screen, plan_content: Option<&str>) {
-    if let Some(picker) = parse_picker(screen) {
+    if let Some(split) = parse_split_picker(screen) {
+        render_native_split_picker(frame, area, &split);
+    } else if let Some(picker) = parse_picker(screen) {
         render_native_picker(frame, area, &picker, plan_content);
     } else {
         render_pty_crop(frame, area, screen);
@@ -269,7 +297,7 @@ fn render_pty_crop(frame: &mut Frame, area: Rect, screen: &Screen) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(" claude is asking — Ctrl-] to dismiss ");
+        .title(" claude is asking — F10 to dismiss ");
     let inner = block.inner(outer);
     frame.render_widget(block, outer);
 
@@ -291,7 +319,7 @@ fn render_native_picker(
     // Border title stays short + stable so it never overflows on
     // narrow screens; the actual question is rendered prominently
     // inside the modal body.
-    let border_title = " claude is asking — Ctrl-] dismiss ";
+    let border_title = " claude is asking — F10 dismiss ";
 
     // Modal size: cap at ~90 % of the available area so we keep a
     // visual margin from the surrounding mewxi UI, and clamp width to
@@ -419,6 +447,347 @@ fn render_native_picker(
         chunks[0],
     );
     frame.render_widget(Paragraph::new(option_lines), chunks[1]);
+}
+
+/// Structured view of an AskUserQuestion side-by-side picker (options
+/// list on the left, focused option's preview on the right, split by a
+/// vertical box-drawing column). Captured off the PTY screen so we can
+/// re-render it as a native mewxi modal with proper proportions —
+/// claude's 160-col layout for the split picker doesn't crop well into
+/// mewxi's view area.
+struct SplitPickerContent {
+    title: Option<String>,
+    body: Vec<String>,
+    /// Option labels with cursor/numbering stripped, in render order.
+    options: Vec<String>,
+    /// 0-based index of the option claude has its cursor on.
+    selected: usize,
+    /// Right-pane content (the focused option's preview), trimmed of
+    /// surrounding box border and whitespace. Captured verbatim — no
+    /// parsing, since previews are free-form ASCII art / code.
+    preview: Vec<String>,
+}
+
+/// Locate a vertical box-drawing column that runs through the body of
+/// the popup region. Returns `Some(col)` when the same column carries a
+/// `│` (or thick `┃`) glyph on ≥3 rows AND ≥40 % of rows in `top..=bot`
+/// — the structural signature of the side-by-side preview layout. The
+/// threshold isn't 100 % because the divider only spans the body rows
+/// (option list + preview), not the title row above or the
+/// `Esc to cancel` hint row below. Other pickers (numbered, y/N,
+/// accept-edit) never paint such a column.
+///
+/// We sample with [`cell_is_vertical_divider`] (cell-level vt100 access)
+/// instead of substring-matching `row_text`, because chat content can
+/// legitimately contain `│` and only a near-full-height run is the
+/// divider.
+fn find_vertical_divider(
+    screen: &Screen,
+    top: u16,
+    bot: u16,
+    left: u16,
+    right: u16,
+) -> Option<u16> {
+    if right <= left + 8 || bot <= top + 2 {
+        return None;
+    }
+    let total = (bot - top + 1) as usize;
+    // Skip the outer 4 cols on each side so the popup's own left/right
+    // border (`│ ... │`) can't masquerade as the divider.
+    let inner_left = left + 4;
+    let inner_right = right.saturating_sub(4);
+    for c in inner_left..=inner_right {
+        let hits = (top..=bot)
+            .filter(|r| cell_is_vertical_divider(screen, *r, c))
+            .count();
+        if hits >= 3 && hits * 5 >= total * 2 {
+            return Some(c);
+        }
+    }
+    None
+}
+
+fn cell_is_vertical_divider(screen: &Screen, r: u16, c: u16) -> bool {
+    screen
+        .cell(r, c)
+        .filter(|cell| cell.has_contents())
+        .is_some_and(|cell| {
+            let s = cell.contents();
+            s == "│" || s == "┃" || s == "║"
+        })
+}
+
+/// Parse an AskUserQuestion side-by-side picker. Returns `None` when
+/// the popup region has no vertical divider — the caller then falls
+/// through to `parse_picker` for the single-column shape.
+///
+/// Strategy: locate the divider, slice each row into (left, right)
+/// halves at the divider's byte offset, then run the existing
+/// cursor/sibling detection on the left halves only. The right halves
+/// get collected verbatim as the preview pane content. This reuses all
+/// the per-row picker logic without forking it.
+fn parse_split_picker(screen: &Screen) -> Option<SplitPickerContent> {
+    let (top, bot, left, right) = find_popup_region(screen)?;
+    let (_, cols) = screen.size();
+    let div_col = find_vertical_divider(screen, top, bot, left, right)?;
+
+    // Build (left_text, right_text) per row. left_text drives picker
+    // structure detection; right_text feeds the preview pane.
+    let halves: Vec<(String, String)> = (top..=bot)
+        .map(|r| split_row_at_col(screen, r, cols, div_col))
+        .collect();
+
+    // Run picker_cursor_info / is_picker_sibling_line on left halves.
+    let lefts: Vec<&String> = halves.iter().map(|(l, _)| l).collect();
+    let (cursor_idx, cursor_col, cursor_prefix) = lefts
+        .iter()
+        .enumerate()
+        .find_map(|(i, l)| picker_cursor_info(l).map(|(c, p)| (i, c, p)))?;
+
+    let mut option_lines: Vec<(usize, bool)> = Vec::new();
+    let mut i = cursor_idx;
+    while i > 0 {
+        let prev = i - 1;
+        if is_picker_sibling_line(lefts[prev], &cursor_prefix) {
+            option_lines.insert(0, (prev, false));
+            i = prev;
+        } else {
+            break;
+        }
+    }
+    option_lines.push((cursor_idx, true));
+    for j in (cursor_idx + 1)..lefts.len() {
+        if is_picker_sibling_line(lefts[j], &cursor_prefix) {
+            option_lines.push((j, false));
+        } else {
+            break;
+        }
+    }
+    if option_lines.len() < 2 {
+        return None;
+    }
+
+    // Header lines: everything above the first option row on the LEFT
+    // half. The question typically spans the full width above the
+    // divider start, so trimming is enough.
+    let first_opt_idx = option_lines[0].0;
+    let header_full: Vec<String> = (top..top + first_opt_idx as u16)
+        .map(|r| row_text(screen, r, cols))
+        .map(|l| l.trim().trim_matches(|c: char| is_box_char(c)).trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let (title, body) = match header_full.split_first() {
+        Some((t, rest)) => (Some(t.clone()), rest.to_vec()),
+        None => (None, Vec::new()),
+    };
+
+    let mut options = Vec::with_capacity(option_lines.len());
+    let mut selected = 0;
+    for (slot, (line_idx, is_selected)) in option_lines.iter().enumerate() {
+        options.push(extract_option_text(lefts[*line_idx], cursor_col, *is_selected));
+        if *is_selected {
+            selected = slot;
+        }
+    }
+
+    // Preview pane: right halves of rows inside the body region,
+    // trimmed of box chars / whitespace, leading/trailing blanks pruned.
+    let preview = halves
+        .iter()
+        .map(|(_, r)| {
+            r.trim_end()
+                .trim_start_matches(|c: char| c.is_whitespace() || is_box_char(c))
+                .trim_end_matches(|c: char| c.is_whitespace() || is_box_char(c))
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let preview = trim_blank_ends(preview);
+
+    Some(SplitPickerContent {
+        title,
+        body,
+        options,
+        selected,
+        preview,
+    })
+}
+
+/// Slice a PTY row at column `div_col`, returning (left, right) as
+/// strings of cell contents. The divider cell itself is dropped.
+fn split_row_at_col(screen: &Screen, row: u16, cols: u16, div_col: u16) -> (String, String) {
+    let mut left = String::with_capacity(div_col as usize);
+    let mut right = String::with_capacity((cols - div_col) as usize);
+    for c in 0..cols {
+        let ch = match screen.cell(row, c) {
+            Some(cell) if cell.has_contents() => cell.contents().to_string(),
+            _ => " ".to_string(),
+        };
+        if c < div_col {
+            left.push_str(&ch);
+        } else if c > div_col {
+            right.push_str(&ch);
+        }
+    }
+    (left, right)
+}
+
+fn trim_blank_ends(mut v: Vec<String>) -> Vec<String> {
+    while v.first().is_some_and(|s| s.trim().is_empty()) {
+        v.remove(0);
+    }
+    while v.last().is_some_and(|s| s.trim().is_empty()) {
+        v.pop();
+    }
+    v
+}
+
+/// Render the side-by-side AskUserQuestion picker natively. Reuses the
+/// same chrome as [`render_native_picker`] but splits the body
+/// horizontally so options and preview live next to each other instead
+/// of stacking. Uses a wider width cap and the full vertical area —
+/// the [`MAX_POPUP_ROWS`] cap that applies to `render_pty_crop` does
+/// NOT apply here, because we're laying out content directly into
+/// ratatui's space.
+fn render_native_split_picker(frame: &mut Frame, area: Rect, picker: &SplitPickerContent) {
+    let border_title = " claude is asking — Ctrl-] dismiss ";
+
+    // Allow up to ~95 % of width / height — the split layout needs
+    // room for two columns. Wider hard-cap (140) than the single-column
+    // picker since previews are typically multi-line ASCII art.
+    let max_w = (((area.width.saturating_sub(2)) as u32 * 95) / 100).min(140) as u16;
+    let max_h = (((area.height.saturating_sub(2)) as u32 * 95) / 100) as u16;
+
+    let options_w_hint = picker
+        .options
+        .iter()
+        .map(|o| o.chars().count() + 4)
+        .max()
+        .unwrap_or(20) as u16;
+    let preview_w_hint = picker
+        .preview
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(20) as u16;
+    let want_w = options_w_hint
+        .saturating_add(preview_w_hint)
+        .saturating_add(8); // borders + divider gap
+    let w = want_w.clamp(60, max_w.max(60)).min(area.width);
+
+    let mut content_lines: Vec<Line<'static>> = Vec::new();
+    if let Some(q) = picker.title.as_deref() {
+        content_lines.push(Line::from(Span::styled(
+            q.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+    for body in &picker.body {
+        content_lines.push(Line::from(Span::styled(
+            body.clone(),
+            Style::default().fg(Color::Gray),
+        )));
+    }
+
+    let option_lines: Vec<Line<'static>> = picker
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            let selected = i == picker.selected;
+            let (cursor, style) = if selected {
+                (
+                    " ▶ ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("   ", Style::default().fg(Color::White))
+            };
+            Line::from(vec![
+                Span::styled(cursor, style),
+                Span::styled(opt.clone(), style),
+            ])
+        })
+        .collect();
+
+    let preview_lines: Vec<Line<'static>> = picker
+        .preview
+        .iter()
+        .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(Color::Gray))))
+        .collect();
+
+    let inner_w = w.saturating_sub(2).max(1) as usize;
+    let header_h: usize = content_lines
+        .iter()
+        .map(|line| {
+            let len = line
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+                .max(1);
+            len.div_ceil(inner_w).max(1)
+        })
+        .sum();
+    let body_h = option_lines.len().max(preview_lines.len()) as u16;
+    let want_h = header_h as u16 + body_h + 3; // +3 borders + header gap
+    let min_h = body_h + 4;
+    let h = want_h.clamp(min_h, max_h.max(min_h)).min(area.height);
+
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let outer = Rect { x, y, width: w, height: h };
+
+    frame.render_widget(Clear, outer);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(Span::styled(
+            border_title,
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(outer);
+    frame.render_widget(block, outer);
+
+    // Vertical split: header on top (wrapping), body below (horizontal
+    // split between options + preview).
+    let header_used = (header_h as u16).min(inner.height.saturating_sub(body_h));
+    let vchunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_used),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(content_lines).wrap(Wrap { trim: false }),
+        vchunks[0],
+    );
+
+    // Width split: options pane on the left sized to its widest line,
+    // preview takes the rest.
+    let opt_pane_w = (options_w_hint + 2).min(vchunks[1].width.saturating_sub(2));
+    let hchunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(opt_pane_w),
+            Constraint::Min(1),
+        ])
+        .split(vchunks[1]);
+    frame.render_widget(Paragraph::new(option_lines), hchunks[0]);
+    frame.render_widget(
+        Paragraph::new(preview_lines).wrap(Wrap { trim: false }),
+        hchunks[1],
+    );
 }
 
 /// Structured view of a numbered picker pulled off the PTY screen.
@@ -1019,7 +1388,7 @@ mod tests {
         // Stale awaiting markers (e.g. after Esc-interrupting a
         // tool-use prompt) must NOT keep the overlay open when the
         // screen has no prompt content — otherwise we paint an empty
-        // input box overlay that blocks every keystroke until Ctrl-].
+        // input box overlay that blocks every keystroke until F10.
         let p = parse(b"");
         assert!(!prompt_visible(p.screen(), true));
     }
@@ -1052,7 +1421,7 @@ mod tests {
         // Regression: a chat message containing "Continue?" (no box
         // border anywhere near) must NOT pop the overlay — otherwise
         // every keystroke goes to the PTY and the user has to find
-        // Ctrl-] to recover.
+        // F10 to recover.
         let p = parse(b"chat line\r\nWould you like me to Continue? Probably yes.\r\nchat line\r\n");
         assert!(!prompt_visible(p.screen(), false));
     }
@@ -1184,5 +1553,116 @@ mod tests {
         let p = parse(bytes.as_bytes());
         let (top, bot, _, _) = find_popup_region(p.screen()).expect("popup found");
         assert!(bot - top + 1 <= MAX_POPUP_ROWS, "rows {top}..={bot}");
+    }
+
+    #[test]
+    fn popup_signature_none_when_no_popup() {
+        // Plain chat scrollback, no marker → no popup → no signature.
+        let p = parse(b"hello world\r\n> ");
+        assert_eq!(popup_signature(p.screen()), None);
+    }
+
+    #[test]
+    fn popup_signature_stable_for_same_popup() {
+        // Two parsers fed the same bytes must hash identically — the
+        // dismiss-suppression in tui/mod.rs depends on equality across
+        // frames of the same on-screen content.
+        let bytes = b"\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\r\n\xe2\x94\x82 Continue?    \xe2\x94\x82\r\n\xe2\x94\x82 [y/N]        \xe2\x94\x82\r\n\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\r\n";
+        let a = parse(bytes);
+        let b = parse(bytes);
+        let sig_a = popup_signature(a.screen()).expect("signature");
+        let sig_b = popup_signature(b.screen()).expect("signature");
+        assert_eq!(sig_a, sig_b);
+    }
+
+    #[test]
+    fn split_picker_parses_side_by_side_layout() {
+        // AskUserQuestion with preview previews renders a side-by-side
+        // layout: options list on the left, focused option's preview on
+        // the right, separated by a vertical `│` column. The single-
+        // column parse_picker walks rows whose left side has the
+        // picker shape and treats the divider+right side as preview.
+        //
+        // Fixture mimics claude's structure: 4 options, option 2 is
+        // focused, the right pane shows that option's ASCII preview.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2J");
+        bytes.push_str("Which indicator?                                                              \r\n");
+        bytes.push_str("                                                                              \r\n");
+        bytes.push_str("  Cat ear                            │  ฅ^•ﻌ•^ฅ                              \r\n");
+        bytes.push_str("❯ Braille spinner                    │  ⠋ ⠙ ⠹ ⠸ ⠼ ⠴                          \r\n");
+        bytes.push_str("  Heartbeat                          │  (preview hidden — not focused)        \r\n");
+        bytes.push_str("  Yarn ball                          │                                        \r\n");
+        bytes.push_str("                                                                              \r\n");
+        bytes.push_str("↑/↓ navigate · Esc to cancel · Enter to select                                \r\n");
+        let p = parse(bytes.as_bytes());
+
+        let split = parse_split_picker(p.screen())
+            .expect("split picker should parse with vertical divider present");
+        assert_eq!(split.options.len(), 4, "got {:?}", split.options);
+        assert_eq!(split.options[0], "Cat ear");
+        assert_eq!(split.options[1], "Braille spinner");
+        assert_eq!(split.options[2], "Heartbeat");
+        assert_eq!(split.options[3], "Yarn ball");
+        assert_eq!(split.selected, 1);
+        assert_eq!(split.title.as_deref(), Some("Which indicator?"));
+        assert!(
+            split.preview.iter().any(|l| l.contains("⠋")),
+            "preview should capture right-pane content, got {:?}",
+            split.preview,
+        );
+    }
+
+    #[test]
+    fn split_picker_returns_none_without_divider() {
+        // The plain single-column AskUserQuestion shape has no vertical
+        // divider — parse_split_picker must decline so the caller falls
+        // through to parse_picker.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JWhat scope?\r\n");
+        bytes.push_str("❯ Quick fix\r\n");
+        bytes.push_str("  Full refactor\r\n");
+        bytes.push_str("  Skip for now\r\n");
+        bytes.push_str("\r\nEsc to cancel\r\n");
+        let p = parse(bytes.as_bytes());
+        assert!(parse_split_picker(p.screen()).is_none());
+        // ...and the single-column parser still works on this shape.
+        assert!(parse_picker(p.screen()).is_some());
+    }
+
+    #[test]
+    fn split_picker_ignores_incidental_vertical_bar() {
+        // A `│` glyph appearing on just one or two rows (e.g. inside a
+        // single body sentence) is NOT a divider. Must not promote the
+        // popup to split-picker rendering.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2JPick one?\r\n");
+        bytes.push_str("Some prose with a │ glyph in it.\r\n");
+        bytes.push_str("❯ Apple\r\n");
+        bytes.push_str("  Banana\r\n");
+        bytes.push_str("\r\nEsc to cancel\r\n");
+        let p = parse(bytes.as_bytes());
+        assert!(parse_split_picker(p.screen()).is_none());
+    }
+
+    #[test]
+    fn popup_signature_changes_when_question_changes() {
+        // Different question text → different hash, so a new popup
+        // overrides the dismissed-signature gate and re-pops.
+        let mut a_bytes = String::new();
+        a_bytes.push_str("╭──────────────╮\r\n");
+        a_bytes.push_str("│ Continue?    │\r\n");
+        a_bytes.push_str("│ [y/N]        │\r\n");
+        a_bytes.push_str("╰──────────────╯\r\n");
+        let mut b_bytes = String::new();
+        b_bytes.push_str("╭──────────────╮\r\n");
+        b_bytes.push_str("│ Use this?    │\r\n");
+        b_bytes.push_str("│ [y/N]        │\r\n");
+        b_bytes.push_str("╰──────────────╯\r\n");
+        let a = parse(a_bytes.as_bytes());
+        let b = parse(b_bytes.as_bytes());
+        let sig_a = popup_signature(a.screen()).expect("sig a");
+        let sig_b = popup_signature(b.screen()).expect("sig b");
+        assert_ne!(sig_a, sig_b);
     }
 }

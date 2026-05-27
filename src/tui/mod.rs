@@ -804,7 +804,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     // session whenever another session's activity moves it ahead.
     let mut pinned_session: Option<(String, String)> = None;
     // Last frame's `pinned_session`. Used to detect view-change so we can
-    // drop a stale Ctrl-] cooldown (see `overlay_manual_close_until`) when
+    // drop a stale dismiss-signature (see `overlay_dismissed_sig`) when
     // the user navigates back to a session whose modal they dismissed —
     // the "don't re-pop" intent only applies while the user is still
     // viewing that session.
@@ -875,11 +875,14 @@ fn run_loop<B: ratatui::backend::Backend>(
     // Terminal overlay: when claude pops a TUI prompt (model-switch
     // continue, multiselect, accept-edit y/N), surface its rendered PTY
     // screen on top of the chat-log view and route keystrokes straight
-    // to the PTY. The hysteresis map gives Ctrl-] a 2-second window
-    // before re-detection can reopen the overlay, so a dismissed overlay
-    // doesn't immediately re-pop.
+    // to the PTY. `overlay_dismissed_sig` records the content hash of
+    // a popup the user dismissed with F10 so re-detection stays
+    // suppressed for as long as the popup stays on screen unchanged.
+    // The entry is dropped when the popup vanishes (counted as
+    // "answered") or when its content hash changes (a different
+    // popup), so the next genuine new prompt re-pops the overlay.
     let mut overlay_open: HashSet<(String, String)> = HashSet::new();
-    let mut overlay_manual_close_until: HashMap<(String, String), Instant> = HashMap::new();
+    let mut overlay_dismissed_sig: HashMap<(String, String), u64> = HashMap::new();
     // After a slash command is sent (e.g. /clear, /compact), claude
     // performs an internal session reset and may briefly drain stdin.
     // Hold the next send until this deadline to give the reset time to
@@ -1142,7 +1145,7 @@ fn run_loop<B: ratatui::backend::Backend>(
         for k in &expired_placeholders {
             driver_optimistic.remove(k);
             overlay_open.remove(k);
-            overlay_manual_close_until.remove(k);
+            overlay_dismissed_sig.remove(k);
             if pinned_session.as_ref() == Some(k) {
                 pinned_session = None;
                 mode = ViewMode::AllSessions;
@@ -1163,7 +1166,7 @@ fn run_loop<B: ratatui::backend::Backend>(
             drivers.remove(k);
             driver_optimistic.remove(k);
             overlay_open.remove(k);
-            overlay_manual_close_until.remove(k);
+            overlay_dismissed_sig.remove(k);
             driver_send_grace_until.remove(k);
             driver_status = Some((
                 format!("driven session {} ended", short_sid(&k.1)),
@@ -1207,8 +1210,8 @@ fn run_loop<B: ratatui::backend::Backend>(
             if overlay_open.remove(&old_key) {
                 overlay_open.insert(new_key.clone());
             }
-            if let Some(t) = overlay_manual_close_until.remove(&old_key) {
-                overlay_manual_close_until.insert(new_key.clone(), t);
+            if let Some(t) = overlay_dismissed_sig.remove(&old_key) {
+                overlay_dismissed_sig.insert(new_key.clone(), t);
             }
             if let Some(t) = driver_send_grace_until.remove(&old_key) {
                 driver_send_grace_until.insert(new_key.clone(), t);
@@ -1219,12 +1222,12 @@ fn run_loop<B: ratatui::backend::Backend>(
         }
 
         // View-change reset: when the user navigates away from a session
-        // (pinned_session changes), drop any Ctrl-] cooldowns. The
-        // "don't immediately re-pop" intent only holds while the user is
-        // still looking at the same view — once they leave and come
-        // back, a still-up prompt should re-surface its modal.
+        // (pinned_session changes), drop any dismiss signatures. The
+        // "don't re-pop" intent only holds while the user is still
+        // looking at the same view — once they leave and come back, a
+        // still-up prompt should re-surface its modal.
         if pinned_session != last_pinned_session {
-            overlay_manual_close_until.clear();
+            overlay_dismissed_sig.clear();
             // Different session in the chat pane → previous selection
             // points at unrelated text. Drop it.
             chat_selection = None;
@@ -1241,13 +1244,11 @@ fn run_loop<B: ratatui::backend::Backend>(
         // Terminal-overlay detection. Sweep every driven session's vt100
         // screen looking for prompt markers; auto-open the overlay when
         // claude is asking for input, auto-close when the prompt clears.
-        // The hysteresis map keeps the overlay closed for 2 s after a
-        // manual Ctrl-] dismiss so the heuristic can't immediately
-        // re-pop on the same screen state.
+        // A dismissed signature suppresses re-opening for as long as
+        // the popup's content hash stays the same — so the same popup
+        // never re-pops on its own, but a genuinely different popup
+        // (different text, different cursor row, new question) does.
         for (key, pty) in drivers.iter() {
-            let in_cooldown = overlay_manual_close_until
-                .get(key)
-                .is_some_and(|t| Instant::now() < *t);
             let awaiting = per_account
                 .iter()
                 .find(|p| p.account.name == key.0)
@@ -1256,32 +1257,45 @@ fn run_loop<B: ratatui::backend::Backend>(
             let screen = pty.screen_snapshot();
             let visible = terminal_overlay::prompt_visible(&screen, awaiting);
             let was_open = overlay_open.contains(key);
-            if visible && !in_cooldown {
-                overlay_open.insert(key.clone());
-                if !was_open {
-                    if let Some((row, marker, snippet)) =
-                        terminal_overlay::matched_marker(&screen)
-                    {
-                        crate::debug_log::log(&format!(
-                            "overlay.open key={key:?} row={row} marker={marker:?} awaiting={awaiting} snippet={snippet:?}"
-                        ));
-                    } else {
-                        crate::debug_log::log(&format!(
-                            "overlay.open key={key:?} awaiting={awaiting} marker=<unknown>"
-                        ));
+            if visible {
+                let current_sig = terminal_overlay::popup_signature(&screen);
+                let dismissed = overlay_dismissed_sig.get(key).copied();
+                let suppressed = matches!((dismissed, current_sig), (Some(d), Some(c)) if d == c);
+                if suppressed {
+                    overlay_open.remove(key);
+                } else {
+                    // Popup content changed since last dismiss → stale
+                    // signature, clear it so a future re-dismiss of the
+                    // new popup overrides the old hash.
+                    if dismissed.is_some() {
+                        overlay_dismissed_sig.remove(key);
+                    }
+                    overlay_open.insert(key.clone());
+                    if !was_open {
+                        if let Some((row, marker, snippet)) =
+                            terminal_overlay::matched_marker(&screen)
+                        {
+                            crate::debug_log::log(&format!(
+                                "overlay.open key={key:?} row={row} marker={marker:?} awaiting={awaiting} snippet={snippet:?}"
+                            ));
+                        } else {
+                            crate::debug_log::log(&format!(
+                                "overlay.open key={key:?} awaiting={awaiting} marker=<unknown>"
+                            ));
+                        }
                     }
                 }
-            } else if !visible {
+            } else {
                 overlay_open.remove(key);
+                // Popup gone → treat as answered. Drop the stored
+                // signature so the next popup (even if identical bytes)
+                // gets surfaced.
+                overlay_dismissed_sig.remove(key);
                 if was_open {
                     crate::debug_log::log(&format!("overlay.close key={key:?} reason=marker-gone"));
                 }
             }
         }
-        // Trim expired cooldown entries so the map doesn't grow without
-        // bound across the session lifetime.
-        let now_inst = Instant::now();
-        overlay_manual_close_until.retain(|_, t| now_inst < *t);
 
         // Compute the driver pane state to hand to view_session.
         let is_driven = mode == ViewMode::SessionDetail
@@ -1665,26 +1679,28 @@ fn run_loop<B: ratatui::backend::Backend>(
                     // currently-pinned driven session, every keystroke
                     // goes verbatim to the PTY so the user can answer
                     // claude's prompt naturally (y/n, arrows, Enter).
-                    // The only mewxi-reserved key is Ctrl-], which
-                    // dismisses the overlay and starts a 2 s cooldown
-                    // before re-detection can re-pop it.
+                    // The only mewxi-reserved key is F10, which
+                    // dismisses the overlay and records the popup's
+                    // content signature — re-detection stays suppressed
+                    // until the popup changes or vanishes.
                     if mode == ViewMode::SessionDetail {
                         if let Some(key) = pinned_session
                             .as_ref()
                             .filter(|k| overlay_open.contains(*k))
                             .cloned()
                         {
-                            let is_dismiss = matches!(k.code, KeyCode::Char(']'))
-                                && k.modifiers.contains(KeyModifiers::CONTROL);
+                            let is_dismiss = matches!(k.code, KeyCode::F(10));
                             if is_dismiss {
                                 crate::debug_log::log(&format!(
-                                    "overlay.close key={key:?} reason=ctrl-]"
+                                    "overlay.close key={key:?} reason=f10"
                                 ));
                                 overlay_open.remove(&key);
-                                overlay_manual_close_until.insert(
-                                    key,
-                                    Instant::now() + Duration::from_secs(2),
-                                );
+                                if let Some(sig) = drivers
+                                    .get(&key)
+                                    .and_then(|pty| terminal_overlay::popup_signature(&pty.screen_snapshot()))
+                                {
+                                    overlay_dismissed_sig.insert(key, sig);
+                                }
                             } else if let Some(pty) = drivers.get_mut(&key) {
                                 if let Err(e) = pty.send_key_event(k) {
                                     driver_status =
