@@ -16,6 +16,7 @@ pub fn render(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     last_message: Option<&str>,
+    defocus_input_after_send: bool,
     setup_rect: &mut Option<Rect>,
 ) {
     let rows = Layout::default()
@@ -24,6 +25,7 @@ pub fn render(
             Constraint::Length(3),  // header
             Constraint::Min(6),     // accounts table
             Constraint::Length(3),  // watcher row
+            Constraint::Length(3),  // preferences row
             Constraint::Length(3),  // last-action message
             Constraint::Length(1),  // footer
         ])
@@ -49,8 +51,33 @@ pub fn render(
             );
         }
     }
-    render_message(f, rows[3], last_message);
-    render_footer(f, rows[4], "4", "↑/↓ select · s wire/unwire · i ignore · w toggle watcher · a apply all · R recheck · Esc back");
+    render_preferences(f, rows[3], defocus_input_after_send);
+    render_message(f, rows[4], last_message);
+    render_footer(f, rows[5], "4", "↑/↓ select · s wire/unwire · i ignore · w watcher · t toggle defocus · a apply all · R recheck · Esc back");
+}
+
+fn render_preferences(f: &mut Frame, area: Rect, defocus_input_after_send: bool) {
+    let (state_text, state_color) = if defocus_input_after_send {
+        ("✓ on", Color::Green)
+    } else {
+        ("off", Color::Yellow)
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            "Defocus input after send  ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            state_text,
+            Style::default().fg(state_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("   "),
+        Span::styled("press t to toggle", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(
+        Paragraph::new(line).block(Block::default().borders(Borders::ALL).title("Preferences")),
+        area,
+    );
 }
 
 fn render_header(f: &mut Frame, area: Rect, snap: Option<&SetupSnapshot>) {

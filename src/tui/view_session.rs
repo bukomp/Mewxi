@@ -19,6 +19,39 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+/// Mouse-drag text selection within the chat log. Coordinates are
+/// terminal-screen cells (the same frame crossterm's mouse events use)
+/// so highlight and copy share one frame of reference. `anchor` is
+/// where the drag started; `cursor` follows the mouse. Either ordering
+/// is allowed — [`rect`] normalizes to top-left → bottom-right.
+#[derive(Clone, Copy, Debug)]
+pub struct ChatSelection {
+    pub anchor: (u16, u16),
+    pub cursor: (u16, u16),
+}
+
+impl ChatSelection {
+    /// Returns `(col_start, row_start, col_end_exclusive, row_end)`
+    /// with start <= end on both axes. The end column is exclusive so
+    /// a zero-length selection (anchor == cursor) yields an empty
+    /// range and won't render a stray highlight.
+    pub fn rect(&self) -> (u16, u16, u16, u16) {
+        let (a_col, a_row) = self.anchor;
+        let (c_col, c_row) = self.cursor;
+        let (col_start, col_end) = if a_col <= c_col {
+            (a_col, c_col + 1)
+        } else {
+            (c_col, a_col + 1)
+        };
+        let (row_start, row_end) = if a_row <= c_row {
+            (a_row, c_row)
+        } else {
+            (c_row, a_row)
+        };
+        (col_start, row_start, col_end, row_end)
+    }
+}
+
 /// Driver pane state passed in from [`super::run_loop`] when the
 /// currently-pinned session is one mewxi spawned and owns the PTY for.
 /// `None` means the session is just being observed; the input row is
@@ -36,6 +69,12 @@ pub struct DriverPane<'a> {
     /// True when the terminal overlay (claude's PTY screen) is up. The
     /// footer hint switches to advertise passthrough + Ctrl-] dismiss.
     pub overlay_active: bool,
+    /// Persistent horizontal scroll offset (in chars) for long inputs.
+    /// Owned by the run loop so it survives across frames; render only
+    /// nudges it the minimum amount needed to keep the cursor on
+    /// screen. That way the caret can roam freely inside the window
+    /// without the text snapping back to the start on every left edit.
+    pub scroll: &'a mut usize,
 }
 
 /// Placeholder pane for a session mewxi spawned but whose JSONL
@@ -61,7 +100,10 @@ pub fn render(
     chat_rect: &mut Option<Rect>,
     actions_rect: &mut Option<Rect>,
     detail_rect: &mut Option<Rect>,
-    driver: Option<&DriverPane<'_>>,
+    chat_selection: Option<ChatSelection>,
+    chat_inner_out: &mut Option<Rect>,
+    chat_visible_out: &mut Vec<String>,
+    driver: Option<&mut DriverPane<'_>>,
     pending: Option<&PendingPane>,
 ) {
     if let Some(p) = pending {
@@ -125,17 +167,19 @@ pub fn render(
         chat_rect,
         actions_rect,
         detail_rect,
+        chat_selection,
+        chat_inner_out,
+        chat_visible_out,
     );
     let default_hint =
         "↑/↓ Tab switch · PgUp/PgDn chat · j/k actions · J/K detail · Del kill · Esc back";
-    let footer_hint = match driver {
-        Some(d) if d.overlay_active => {
-            "claude is asking — keys pass through  ·  Ctrl-] dismiss"
+    let driver_flags = driver.as_ref().map(|d| (d.overlay_active, d.focused));
+    let footer_hint = match driver_flags {
+        Some((true, _)) => "claude is asking — keys pass through  ·  Ctrl-] dismiss",
+        Some((false, true)) => {
+            "Enter send  Ctrl-E editor  Shift-Tab cycle mode  Esc unfocus  Ctrl-D end  Ctrl-C cancel"
         }
-        Some(d) if d.focused => {
-            "Enter send  Shift-Tab cycle mode  Esc unfocus  Ctrl-D end  Ctrl-C cancel"
-        }
-        Some(_) => {
+        Some((false, false)) => {
             "i type  m model  Shift-Tab cycle mode  Ctrl-C cancel  Ctrl-D end  Del kill  1 all"
         }
         None => default_hint,
@@ -276,12 +320,40 @@ fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &Pendi
     );
 }
 
-fn render_driver_input(f: &mut Frame, area: Rect, d: &DriverPane<'_>) {
+fn render_driver_input(f: &mut Frame, area: Rect, d: &mut DriverPane<'_>) {
     let border_color = if d.focused { Color::Green } else { Color::DarkGray };
     let mut spans: Vec<Span> = vec![Span::styled(
         "> ",
         Style::default().fg(if d.focused { Color::Green } else { Color::DarkGray }),
     )];
+    // Multi-line buffers (from Alt-e editor) don't fit a single-line
+    // composer. Render the first line + a "+N more" badge so the user
+    // sees something is staged; full content is preserved in the
+    // buffer and round-trips via Alt-e for editing.
+    if d.input.contains('\n') {
+        let extra = d.input.matches('\n').count();
+        let first_line = d.input.split('\n').next().unwrap_or("");
+        spans.push(Span::raw(first_line.to_string()));
+        spans.push(Span::styled(
+            format!("  +{} more line{}", extra, if extra == 1 { "" } else { "s" }),
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        ));
+        if d.focused {
+            spans.push(Span::styled(
+                " █",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color)),
+            ),
+            area,
+        );
+        return;
+    }
     if d.input.is_empty() {
         if d.focused {
             spans.push(Span::styled(
@@ -304,35 +376,87 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &DriverPane<'_>) {
         } else {
             d.input.len()
         };
-        let pre = &d.input[..cursor];
+
+        // Horizontal scroll: nudge the persistent scroll offset just
+        // enough to keep the cursor visible. The caret roams freely
+        // inside the window — the view only slides when the cursor
+        // would otherwise fall off the left or right edge.
+        // `area.width` includes the 2-col border; the "> " prefix above
+        // eats another 2 cols. Reserve 1 more col for the trailing
+        // block when the cursor sits past the last char.
+        let inner = (area.width as usize).saturating_sub(2 + 2);
+        let chars: Vec<(usize, char)> = d.input.char_indices().collect();
+        let cursor_char = d.input[..cursor].chars().count();
+        let total_chars = chars.len();
+        let cursor_at_end = cursor >= d.input.len();
+        let budget = if cursor_at_end { inner.saturating_sub(1) } else { inner }.max(1);
+
+        let mut start = *d.scroll;
+        // Clamp first: if the buffer shrank (e.g. Ctrl-U), the previous
+        // offset may now point past the end. Pull it back so the window
+        // shows the tail of what's left.
+        let max_start = total_chars.saturating_sub(budget);
+        if start > max_start {
+            start = max_start;
+        }
+        // Cursor walked off the left edge → slide the window left so
+        // the cursor lands on the leftmost visible column.
+        if cursor_char < start {
+            start = cursor_char;
+        }
+        // Cursor walked off the right edge → slide the window right so
+        // the cursor lands on the rightmost visible column.
+        if cursor_char >= start + budget {
+            start = (cursor_char + 1).saturating_sub(budget);
+        }
+        *d.scroll = start;
+
+        let start_char = start;
+        let end_char = (start_char + budget).min(total_chars);
+        let start_byte = chars.get(start_char).map(|(b, _)| *b).unwrap_or(d.input.len());
+        let end_byte = chars.get(end_char).map(|(b, _)| *b).unwrap_or(d.input.len());
+
+        let pre = &d.input[start_byte..cursor.min(end_byte).max(start_byte)];
         if !pre.is_empty() {
             spans.push(Span::raw(pre.to_string()));
         }
-        if cursor < d.input.len() {
-            // Cursor sits over a real char: render it with reversed
-            // colours so it reads as a block cursor without losing the
-            // glyph underneath.
+        if cursor < d.input.len() && cursor < end_byte {
+            // Cursor sits over a real visible char: render it with
+            // reversed colours so it reads as a block cursor without
+            // losing the glyph underneath.
             let next = next_char_boundary(d.input, cursor);
             spans.push(Span::styled(
-                d.input[cursor..next].to_string(),
+                d.input[cursor..next.min(end_byte)].to_string(),
                 Style::default()
                     .bg(Color::Green)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD),
             ));
-            let rest = &d.input[next..];
-            if !rest.is_empty() {
-                spans.push(Span::raw(rest.to_string()));
+            let rest_end = end_byte;
+            let rest_start = next.min(rest_end);
+            if rest_start < rest_end {
+                spans.push(Span::raw(d.input[rest_start..rest_end].to_string()));
             }
         } else {
-            // Cursor past the last char — append the trailing block.
+            // Cursor past the last visible char — append the trailing
+            // block. (Mid-string cursor scrolled past the right edge
+            // can't happen because the scroll window keeps it in view.)
             spans.push(Span::styled(
                 "█",
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             ));
         }
     } else {
-        spans.push(Span::raw(d.input.to_string()));
+        // Unfocused: still clamp to the available width so a long
+        // staged prompt doesn't overflow the border.
+        let inner = (area.width as usize).saturating_sub(2 + 2).max(1);
+        let chars: Vec<(usize, char)> = d.input.char_indices().collect();
+        if chars.len() <= inner {
+            spans.push(Span::raw(d.input.to_string()));
+        } else {
+            let end_byte = chars[inner].0;
+            spans.push(Span::raw(d.input[..end_byte].to_string()));
+        }
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)).block(
@@ -637,6 +761,78 @@ fn collect_change_rows(entries: &[ChatEntry]) -> Vec<ChangeRow> {
     rows
 }
 
+/// Splits each visible chat line at the selection boundary and
+/// REVERSE-modifies the spans that fall inside the rectangle. Column
+/// math uses `chars().count()` — accurate for ASCII / Latin text and
+/// only slightly off for wide-character runs, which the chat log
+/// rarely contains.
+fn apply_selection_highlight(
+    visible: &mut Vec<Line<'static>>,
+    inner: Rect,
+    sel: ChatSelection,
+) {
+    let (col_start, row_start, col_end, row_end) = sel.rect();
+    // Clamp the selection to the inner area; nothing outside it can
+    // be highlighted (or copied) by design.
+    let inner_x_end = inner.x.saturating_add(inner.width);
+    let inner_y_end = inner.y.saturating_add(inner.height);
+    let cs = col_start.max(inner.x).min(inner_x_end);
+    let ce = col_end.max(inner.x).min(inner_x_end);
+    if ce <= cs {
+        return;
+    }
+    let rs = row_start.max(inner.y).min(inner_y_end);
+    let re = row_end.max(inner.y).min(inner_y_end);
+    let i_start = rs.saturating_sub(inner.y) as usize;
+    let i_end = re.saturating_sub(inner.y) as usize;
+    let col_lo = cs.saturating_sub(inner.x) as usize;
+    let col_hi = ce.saturating_sub(inner.x) as usize;
+    for i in i_start..=i_end {
+        if i >= visible.len() {
+            break;
+        }
+        visible[i] = highlight_line(&visible[i], col_lo, col_hi);
+    }
+}
+
+fn highlight_line(line: &Line<'static>, col_lo: usize, col_hi: usize) -> Line<'static> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+    let mut col = 0usize;
+    for span in &line.spans {
+        let w = span.content.chars().count();
+        let span_start = col;
+        let span_end = col + w;
+        col = span_end;
+        if w == 0 {
+            out.push(span.clone());
+            continue;
+        }
+        if span_end <= col_lo || span_start >= col_hi {
+            out.push(span.clone());
+            continue;
+        }
+        let chars: Vec<char> = span.content.chars().collect();
+        let mid_lo = col_lo.saturating_sub(span_start);
+        let mid_hi = col_hi.saturating_sub(span_start).min(w);
+        if mid_lo > 0 {
+            let s: String = chars[..mid_lo].iter().collect();
+            out.push(Span::styled(s, span.style));
+        }
+        let s_mid: String = chars[mid_lo..mid_hi].iter().collect();
+        out.push(Span::styled(
+            s_mid,
+            span.style.add_modifier(Modifier::REVERSED),
+        ));
+        if mid_hi < w {
+            let s: String = chars[mid_hi..].iter().collect();
+            out.push(Span::styled(s, span.style));
+        }
+    }
+    let mut new_line = Line::from(out);
+    new_line.alignment = line.alignment;
+    new_line
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_chat_log(
     f: &mut Frame,
@@ -649,6 +845,9 @@ fn render_chat_log(
     chat_rect: &mut Option<Rect>,
     actions_rect: &mut Option<Rect>,
     detail_rect: &mut Option<Rect>,
+    chat_selection: Option<ChatSelection>,
+    chat_inner_out: &mut Option<Rect>,
+    chat_visible_out: &mut Vec<String>,
 ) {
     let entries = chat_log::read(&s.transcript_path);
 
@@ -666,11 +865,61 @@ fn render_chat_log(
 
     let width = chat_area.width.saturating_sub(2) as usize;
     let body_w = width.saturating_sub(LABEL_W).max(10);
-    let target_h = chat_area.height.saturating_sub(2) as usize;
+    // Reserve 2 rows for top/bottom borders plus 2 rows of persistent
+    // inner padding (one at the top, one at the bottom) so messages
+    // never sit flush against the chat-log border, even mid-scroll.
+    let target_h = chat_area.height.saturating_sub(4) as usize;
 
+    // Track chat-line ranges per ToolUse so the currently-selected
+    // action in the right pane can be visually echoed in the chat log.
     let mut all: Vec<Line<'static>> = Vec::with_capacity(entries.len() * 2);
+    let mut action_line_ranges: Vec<(usize, usize)> = Vec::new();
     for e in &entries {
+        let start = all.len();
         all.extend(entry_to_lines(e, body_w, &s.cwd));
+        if matches!(e.kind, EntryKind::ToolUse { .. }) {
+            action_line_ranges.push((start, all.len()));
+        }
+    }
+
+    // Resolve the action selection up front (mirrors the logic used by
+    // the Actions pane below) so we can apply the matching highlight
+    // to the chat log before it's sliced for rendering. Only highlight
+    // when the user has explicitly selected a row — None means "follow
+    // tail" and shouldn't drag a highlight onto every new tool call.
+    let row_count = entries
+        .iter()
+        .filter(|e| matches!(e.kind, EntryKind::ToolUse { .. }))
+        .count();
+    if let Some(sel) = *changes_selection {
+        let resolved = if row_count == 0 { 0 } else { sel.min(row_count - 1) };
+        if let Some(&(rs, re)) = action_line_ranges.get(resolved) {
+            for line in &mut all[rs..re] {
+                for span in &mut line.spans {
+                    span.style = span.style.add_modifier(Modifier::REVERSED);
+                }
+            }
+            // Drag the chat viewport along with the highlighted action so
+            // navigating j/k in the Actions pane never strands the
+            // selection off-screen. `scroll` counts lines back from the
+            // tail; visible window is `[total - scroll - target_h, total - scroll)`.
+            let total = all.len();
+            let max_scroll = total.saturating_sub(target_h);
+            let cur_end = total.saturating_sub(*scroll);
+            let cur_start = cur_end.saturating_sub(target_h);
+            if target_h > 0 && (rs < cur_start || re > cur_end) {
+                // Center the block in the viewport when it fits;
+                // otherwise anchor its start at the top.
+                let span = re.saturating_sub(rs);
+                let desired_end = if span <= target_h {
+                    let mid = rs + span / 2;
+                    (mid + target_h / 2).min(total).max(re)
+                } else {
+                    (rs + target_h).min(total)
+                };
+                *scroll = total.saturating_sub(desired_end).min(max_scroll);
+            }
+        }
     }
     let total = all.len();
     let max_scroll = total.saturating_sub(target_h);
@@ -708,9 +957,19 @@ fn render_chat_log(
     if !status.is_empty() {
         block = block.title_bottom(Line::from(status));
     }
-    let inner = block.inner(chat_area);
+    let block_inner = block.inner(chat_area);
     f.render_widget(block, chat_area);
 
+    // Persistent 1-row padding at top and bottom of the chat viewport.
+    let inner = Rect {
+        x: block_inner.x,
+        y: block_inner.y.saturating_add(1),
+        width: block_inner.width,
+        height: block_inner.height.saturating_sub(2),
+    };
+
+    *chat_inner_out = Some(inner);
+    chat_visible_out.clear();
     if entries.is_empty() {
         let hint = Paragraph::new(Line::from(Span::styled(
             "no chat content yet — waiting for transcript",
@@ -720,7 +979,20 @@ fn render_chat_log(
     } else {
         let end = total.saturating_sub(clamped);
         let start = end.saturating_sub(target_h);
-        let visible: Vec<Line<'static>> = all[start..end].to_vec();
+        let mut visible: Vec<Line<'static>> = all[start..end].to_vec();
+        // Stash plain text for each visible row (one entry per row)
+        // so the parent can extract selected text without re-walking
+        // the transcript or coping with split spans.
+        for line in &visible {
+            let mut s = String::new();
+            for span in &line.spans {
+                s.push_str(&span.content);
+            }
+            chat_visible_out.push(s);
+        }
+        if let Some(sel) = chat_selection {
+            apply_selection_highlight(&mut visible, inner, sel);
+        }
         f.render_widget(Paragraph::new(visible), inner);
     }
 
@@ -1220,19 +1492,59 @@ fn push_bash_command(out: &mut Vec<Line<'static>>, cmd: &str, width: usize) {
             out.push(Line::raw(""));
             continue;
         }
-        let wrapped = wrap_text(raw, width);
-        if wrapped.is_empty() {
-            out.push(Line::raw(""));
-            continue;
-        }
-        // First wrapped sub-line: scan for executable tokens and
-        // shell separators. Subsequent sub-lines render plain so the
-        // highlight stays anchored to the real start of commands.
-        out.push(Line::from(bash_spans(&wrapped[0], exec_style, sep_style, normal)));
-        for cont in &wrapped[1..] {
-            out.push(Line::from(Span::styled(cont.clone(), normal)));
+        // Visual sugar: break the command at top-level shell
+        // separators (`&&`, `||`, `|`, `;`) so each action sits on
+        // its own line with the separator leading the next line.
+        for (idx, (sep, body)) in split_bash_by_separators(raw).into_iter().enumerate() {
+            let line_text = match (idx, sep) {
+                (0, _) => body,
+                (_, Some(s)) => format!(" {s} {body}"),
+                (_, None) => body,
+            };
+            let wrapped = wrap_text(&line_text, width);
+            if wrapped.is_empty() {
+                out.push(Line::raw(""));
+                continue;
+            }
+            // First wrapped sub-line: scan for executable tokens and
+            // shell separators. Subsequent sub-lines render plain so
+            // the highlight stays anchored to the real start of
+            // commands.
+            out.push(Line::from(bash_spans(&wrapped[0], exec_style, sep_style, normal)));
+            for cont in &wrapped[1..] {
+                out.push(Line::from(Span::styled(cont.clone(), normal)));
+            }
         }
     }
+}
+
+/// Split a one-line bash command into segments at top-level shell
+/// separators. Returns `(separator_before, body)` pairs; the first
+/// entry's separator is `None`. Best-effort and quote-unaware, matching
+/// the highlighter's existing fidelity.
+fn split_bash_by_separators(line: &str) -> Vec<(Option<&'static str>, String)> {
+    const SEPS: &[&str] = &["&&", "||", "|", ";"];
+    let mut segments: Vec<(Option<&'static str>, String)> = Vec::new();
+    let mut current_sep: Option<&'static str> = None;
+    let mut buf = String::new();
+    let mut i = 0;
+    while i < line.len() {
+        let rest = &line[i..];
+        let matched = SEPS.iter().find(|s| rest.starts_with(**s)).copied();
+        if let Some(s) = matched {
+            segments.push((current_sep, buf.trim().to_string()));
+            current_sep = Some(s);
+            buf.clear();
+            i += s.len();
+            continue;
+        }
+        let ch = line[i..].chars().next().unwrap();
+        let ch_len = ch.len_utf8();
+        buf.push(ch);
+        i += ch_len;
+    }
+    segments.push((current_sep, buf.trim().to_string()));
+    segments
 }
 
 fn bash_spans(
@@ -1362,15 +1674,22 @@ fn truncate_chars(s: &str, max: usize) -> String {
 
 fn entry_to_lines(e: &ChatEntry, body_w: usize, _cwd: &Path) -> Vec<Line<'static>> {
     match &e.kind {
-        EntryKind::User => build_lines_md(
-            "you      ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            markdown::render(
-                &e.text,
-                body_w,
-                Style::default().fg(Color::White),
-            ),
-        ),
+        EntryKind::User => {
+            let bg = Color::Indexed(237);
+            let lines = build_lines_md(
+                "you      ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+                markdown::render(
+                    &e.text,
+                    body_w,
+                    Style::default().fg(Color::White).bg(bg),
+                ),
+            );
+            highlight_user_lines(lines, body_w + LABEL_W, bg)
+        }
         EntryKind::Assistant => build_lines_md(
             "claude   ",
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
@@ -1425,6 +1744,43 @@ fn entry_to_lines(e: &ChatEntry, body_w: usize, _cwd: &Path) -> Vec<Line<'static
 /// Like `build_lines`, but the body is a pre-rendered markdown block
 /// (vec of styled lines). The first line gets the label prefix; the
 /// rest are left-padded by `LABEL_W` spaces to align with it.
+/// Wrap user-message lines in a light background highlight, padding
+/// each line out to `row_w` so the bg color fills the full chat row,
+/// and bookending the block with blank highlighted spacer lines.
+fn highlight_user_lines(
+    lines: Vec<Line<'static>>,
+    row_w: usize,
+    bg: Color,
+) -> Vec<Line<'static>> {
+    let pad_style = Style::default().bg(bg);
+    let blank = || Line::from(Span::styled(" ".repeat(row_w), pad_style));
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len() + 2);
+    out.push(blank());
+    for line in lines {
+        let used: usize = line
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        let mut spans: Vec<Span<'static>> = line
+            .spans
+            .into_iter()
+            .map(|mut s| {
+                if s.style.bg.is_none() {
+                    s.style = s.style.bg(bg);
+                }
+                s
+            })
+            .collect();
+        if used < row_w {
+            spans.push(Span::styled(" ".repeat(row_w - used), pad_style));
+        }
+        out.push(Line::from(spans));
+    }
+    out.push(blank());
+    out
+}
+
 fn build_lines_md(
     label: &str,
     label_style: Style,

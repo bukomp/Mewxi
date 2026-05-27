@@ -8,15 +8,15 @@
 //! (rather than wrapped) so they stay readable.
 //!
 //! This is intentionally a narrow renderer: just what assistant turns
-//! actually use in practice. Tables and footnotes pass through as best
-//! we can but are not styled specially.
+//! actually use in practice. GFM tables are rendered as box-drawn
+//! grids; footnotes pass through as best we can.
 //!
 //! ASCII glyphs are avoided for prefix decoration — we use box-drawing
 //! characters (▏ for blockquote gutter, ┃ for code-block gutter, • for
 //! bullets) because they read as quiet structural marks instead of
 //! syntax.
 
-use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -28,7 +28,11 @@ pub fn render(text: &str, width: usize, base_style: Style) -> Vec<Line<'static>>
         return vec![Line::from(Span::styled(text.to_string(), base_style))];
     }
     let mut r = Renderer::new(width, base_style);
-    for ev in Parser::new(text) {
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TASKLISTS);
+    for ev in Parser::new_ext(text, opts) {
         r.event(ev);
     }
     r.finish()
@@ -63,6 +67,18 @@ struct Renderer {
     code_buf: String,
 
     body_started: bool,
+
+    // Table state: while inside a table we capture cell text into
+    // `table_cell_buf`, then push completed rows. On End(Table) we
+    // render the whole grid in one shot.
+    in_table: bool,
+    in_table_cell: bool,
+    table_in_head: bool,
+    table_alignments: Vec<Alignment>,
+    table_head: Vec<String>,
+    table_rows: Vec<Vec<String>>,
+    table_current_row: Vec<String>,
+    table_cell_buf: String,
 }
 
 impl Renderer {
@@ -83,6 +99,14 @@ impl Renderer {
             code_block: None,
             code_buf: String::new(),
             body_started: false,
+            in_table: false,
+            in_table_cell: false,
+            table_in_head: false,
+            table_alignments: Vec::new(),
+            table_head: Vec::new(),
+            table_rows: Vec::new(),
+            table_current_row: Vec::new(),
+            table_cell_buf: String::new(),
         }
     }
 
@@ -220,6 +244,57 @@ impl Renderer {
     }
 
     fn event(&mut self, ev: Event) {
+        // Table body: capture cell contents, render the grid on End(Table).
+        if self.in_table {
+            match ev {
+                Event::Start(Tag::TableHead) => {
+                    self.table_in_head = true;
+                    self.table_current_row.clear();
+                }
+                Event::End(TagEnd::TableHead) => {
+                    self.table_head =
+                        std::mem::take(&mut self.table_current_row);
+                    self.table_in_head = false;
+                }
+                Event::Start(Tag::TableRow) => {
+                    self.table_current_row.clear();
+                }
+                Event::End(TagEnd::TableRow) => {
+                    self.table_rows
+                        .push(std::mem::take(&mut self.table_current_row));
+                }
+                Event::Start(Tag::TableCell) => {
+                    self.in_table_cell = true;
+                    self.table_cell_buf.clear();
+                }
+                Event::End(TagEnd::TableCell) => {
+                    self.in_table_cell = false;
+                    self.table_current_row
+                        .push(std::mem::take(&mut self.table_cell_buf));
+                }
+                Event::End(TagEnd::Table) => {
+                    self.in_table = false;
+                    let aligns = std::mem::take(&mut self.table_alignments);
+                    let head = std::mem::take(&mut self.table_head);
+                    let rows = std::mem::take(&mut self.table_rows);
+                    self.emit_table(&aligns, &head, &rows);
+                }
+                Event::Text(s) if self.in_table_cell => {
+                    self.table_cell_buf.push_str(&s);
+                }
+                Event::Code(s) if self.in_table_cell => {
+                    self.table_cell_buf.push_str(&s);
+                }
+                Event::SoftBreak | Event::HardBreak
+                    if self.in_table_cell =>
+                {
+                    self.table_cell_buf.push(' ');
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Code-block body: capture verbatim, emit on End.
         if self.code_block.is_some() {
             match ev {
@@ -336,6 +411,19 @@ impl Renderer {
                 self.prefix_stack.pop();
             }
 
+            Event::Start(Tag::Table(aligns)) => {
+                if self.body_started {
+                    self.flush_line();
+                }
+                self.blank_line();
+                self.in_table = true;
+                self.table_alignments = aligns;
+                self.table_head.clear();
+                self.table_rows.clear();
+                self.table_current_row.clear();
+                self.table_cell_buf.clear();
+            }
+
             Event::Start(Tag::CodeBlock(kind)) => {
                 if self.body_started {
                     self.flush_line();
@@ -421,6 +509,154 @@ impl Renderer {
             "─".repeat(self.width.max(1)),
             rule_style,
         )));
+        self.blank_line();
+    }
+
+    fn emit_table(
+        &mut self,
+        aligns: &[Alignment],
+        head: &[String],
+        rows: &[Vec<String>],
+    ) {
+        let rule_style = Style::default().fg(Color::DarkGray);
+        let head_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let cell_style = self.base;
+
+        let ncols = head
+            .len()
+            .max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
+        if ncols == 0 {
+            return;
+        }
+
+        // Normalize all rows to ncols and trim/collapse whitespace per cell.
+        let norm = |s: &str| -> String {
+            s.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let head_n: Vec<String> = (0..ncols)
+            .map(|i| head.get(i).map(|s| norm(s)).unwrap_or_default())
+            .collect();
+        let rows_n: Vec<Vec<String>> = rows
+            .iter()
+            .map(|r| {
+                (0..ncols)
+                    .map(|i| r.get(i).map(|s| norm(s)).unwrap_or_default())
+                    .collect()
+            })
+            .collect();
+
+        // Natural width per column = max content width.
+        let mut col_w: Vec<usize> = (0..ncols)
+            .map(|i| {
+                let h = head_n[i].chars().count();
+                rows_n
+                    .iter()
+                    .map(|r| r[i].chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .max(h)
+                    .max(1)
+            })
+            .collect();
+
+        // Each cell renders as " {content} ", separated by '│'.
+        // Total width: sum(col_w + 2) + (ncols + 1) for borders.
+        let border_overhead = ncols + 1; // outer + separators
+        let padding = ncols * 2; // one space on each side
+        let target = self.width.max(border_overhead + padding + ncols);
+        let mut total = col_w.iter().sum::<usize>() + border_overhead + padding;
+        // Shrink widest column until it fits.
+        while total > target {
+            let (i, _) = col_w
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, w)| **w)
+                .unwrap();
+            if col_w[i] <= 1 {
+                break;
+            }
+            col_w[i] -= 1;
+            total -= 1;
+        }
+
+        let pad_cell = |s: &str, w: usize, align: Alignment| -> String {
+            let chars: Vec<char> = s.chars().collect();
+            let truncated: String = if chars.len() > w {
+                if w <= 1 {
+                    chars.into_iter().take(w).collect()
+                } else {
+                    let mut t: String =
+                        chars.into_iter().take(w - 1).collect();
+                    t.push('…');
+                    t
+                }
+            } else {
+                s.to_string()
+            };
+            let len = truncated.chars().count();
+            let pad = w.saturating_sub(len);
+            match align {
+                Alignment::Right => {
+                    format!("{}{}", " ".repeat(pad), truncated)
+                }
+                Alignment::Center => {
+                    let l = pad / 2;
+                    let r = pad - l;
+                    format!("{}{}{}", " ".repeat(l), truncated, " ".repeat(r))
+                }
+                _ => format!("{}{}", truncated, " ".repeat(pad)),
+            }
+        };
+
+        let make_rule = |left: &str, mid: &str, right: &str| -> String {
+            let mut s = String::from(left);
+            for (i, w) in col_w.iter().enumerate() {
+                s.push_str(&"─".repeat(w + 2));
+                if i + 1 < col_w.len() {
+                    s.push_str(mid);
+                }
+            }
+            s.push_str(right);
+            s
+        };
+
+        // Top rule.
+        self.out
+            .push(Line::from(Span::styled(make_rule("┌", "┬", "┐"), rule_style)));
+
+        // Header row.
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::styled("│".to_string(), rule_style));
+        for (i, cell) in head_n.iter().enumerate() {
+            let align = aligns.get(i).copied().unwrap_or(Alignment::None);
+            let text = format!(" {} ", pad_cell(cell, col_w[i], align));
+            spans.push(Span::styled(text, head_style));
+            spans.push(Span::styled("│".to_string(), rule_style));
+        }
+        self.out.push(Line::from(spans));
+
+        // Header/body separator.
+        self.out
+            .push(Line::from(Span::styled(make_rule("├", "┼", "┤"), rule_style)));
+
+        // Body rows.
+        for row in &rows_n {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            spans.push(Span::styled("│".to_string(), rule_style));
+            for (i, cell) in row.iter().enumerate() {
+                let align = aligns.get(i).copied().unwrap_or(Alignment::None);
+                let text = format!(" {} ", pad_cell(cell, col_w[i], align));
+                spans.push(Span::styled(text, cell_style));
+                spans.push(Span::styled("│".to_string(), rule_style));
+            }
+            self.out.push(Line::from(spans));
+        }
+
+        // Bottom rule.
+        self.out
+            .push(Line::from(Span::styled(make_rule("└", "┴", "┘"), rule_style)));
         self.blank_line();
     }
 
@@ -533,6 +769,29 @@ mod tests {
             })
             .count();
         assert!(count >= 1);
+    }
+
+    #[test]
+    fn gfm_table_renders_grid() {
+        let src = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
+        let lines = render(src, 80, Style::default());
+        let texts: Vec<String> = lines.iter().map(joined).collect();
+        assert!(
+            texts.iter().any(|t| t.starts_with("┌") && t.contains("┬")),
+            "expected top rule with junctions, got: {texts:#?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("│") && t.contains("A")),
+            "expected header row with A, got: {texts:#?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("│") && t.contains("1") && t.contains("2")),
+            "expected body row with 1 and 2"
+        );
+        assert!(
+            texts.iter().any(|t| t.starts_with("└") && t.contains("┴")),
+            "expected bottom rule"
+        );
     }
 
     #[test]

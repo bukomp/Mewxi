@@ -43,7 +43,7 @@ use crate::stats::{self, Aggregate, UsageTotals};
 use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
@@ -393,6 +393,111 @@ pub fn run(no_live: bool) -> Result<()> {
     result
 }
 
+/// Tear down the alt-screen / raw-mode / mouse-capture stack so an
+/// external interactive program (vim, nano, ...) can take over the
+/// controlling terminal. Pair with [`resume_terminal`] after the child
+/// exits — always call resume, even on error, or the shell is left
+/// wedged in raw mode.
+fn suspend_terminal<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+) -> io::Result<()> {
+    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+/// Re-arm the same crossterm flags `run()` set up on startup. Mirrors
+/// the prologue at the top of [`run`]; keep the two in sync.
+fn resume_terminal<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+) -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    let _ = execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        )
+    );
+    terminal.clear()?;
+    Ok(())
+}
+
+/// Open the user's preferred editor on a tempfile seeded with
+/// `initial`, then return the saved content. `Ok(None)` means the user
+/// quit without changes (or the file is empty and was unchanged) — the
+/// caller should leave the existing composer buffer alone.
+///
+/// Always restores the terminal before returning, even when the editor
+/// fails to spawn or exits non-zero, so a misbehaving editor can't
+/// strand the TUI.
+fn open_editor_for_input<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    account: &Account,
+    initial: &str,
+) -> Result<Option<String>> {
+    use std::io::Write;
+
+    let cmd = account.editor_command();
+    let mut parts = cmd.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("editor command is empty"))?
+        .to_string();
+    let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "mewxi-compose-{}-{}.md",
+        std::process::id(),
+        ts
+    ));
+    {
+        let mut f = std::fs::File::create(&path)?;
+        f.write_all(initial.as_bytes())?;
+    }
+
+    suspend_terminal(terminal)?;
+    let status_res = std::process::Command::new(&program)
+        .args(&args)
+        .arg(&path)
+        .status();
+    // Always resume — even if the editor failed to spawn, the terminal
+    // state may have been touched.
+    let resume_res = resume_terminal(terminal);
+
+    let status = status_res?;
+    resume_res?;
+
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "{} exited with status {}",
+            program,
+            status
+        ));
+    }
+
+    // Editors typically append a trailing newline on save; strip one to
+    // avoid sending a blank "Enter" at the tail. Preserve interior
+    // newlines (multi-line prompts).
+    let trimmed = content.strip_suffix('\n').unwrap_or(&content);
+    let trimmed = trimmed.strip_suffix('\r').unwrap_or(trimmed);
+
+    if trimmed == initial {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
 fn show_splash<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     duration: Duration,
@@ -698,7 +803,21 @@ fn run_loop<B: ratatui::backend::Backend>(
     // last_activity, so a raw index would silently jump to a different
     // session whenever another session's activity moves it ahead.
     let mut pinned_session: Option<(String, String)> = None;
+    // Last frame's `pinned_session`. Used to detect view-change so we can
+    // drop a stale Ctrl-] cooldown (see `overlay_manual_close_until`) when
+    // the user navigates back to a session whose modal they dismissed —
+    // the "don't re-pop" intent only applies while the user is still
+    // viewing that session.
+    let mut last_pinned_session: Option<(String, String)> = None;
     let mut chat_scroll: usize = 0;
+    // Active mouse-drag text selection over the chat log. Coordinates
+    // are in terminal cells; cleared whenever the chat content shifts
+    // (scroll, view-change) so the highlight never points at a row
+    // that's already moved off-screen. `dragging` distinguishes a
+    // still-in-progress drag from a finished one that's been copied
+    // and is being held visible until the user clicks again.
+    let mut chat_selection: Option<view_session::ChatSelection> = None;
+    let mut chat_selection_dragging: bool = false;
     // `None` means follow tail (selection tracks the latest change row);
     // `Some(i)` pins to a concrete index. j/k transitions out of follow
     // mode; G / End re-enters it. The render function writes the row
@@ -736,6 +855,13 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
     let mut driver_input = text_input::TextInput::new();
     let mut driver_input_focused: bool = false;
+    // Persistent horizontal scroll offset (in chars) for the driver
+    // input row. The render function nudges it just enough to keep the
+    // cursor inside the visible window — it does NOT snap back to 0
+    // when the cursor moves left, so the caret can roam freely until it
+    // hits an edge.
+    let mut driver_input_scroll: usize = 0;
+    let mut defocus_input_after_send: bool = view.defocus_input_after_send;
     let mut driver_status: Option<(String, Instant)> = None;
     let mut driver_optimistic: HashMap<(String, String), DriverOptimistic> = HashMap::new();
     // Self-learning Shift-Tab cycle. Seeded empty; the reconcile pass
@@ -842,6 +968,22 @@ fn run_loop<B: ratatui::backend::Backend>(
                     .position(|s| s.account_name == *acct && s.session_id == *sid)
                 {
                     selected_session = idx;
+                } else if !sid.starts_with(PLACEHOLDER_PREFIX) {
+                    // Pinned session is gone (e.g. just killed). Re-pin
+                    // to whatever selected_session was clamped to so the
+                    // driver_pane lookup below sees the same key the
+                    // chat log is rendering — otherwise the input row
+                    // disappears until the user round-trips through
+                    // view 1.
+                    //
+                    // Skip for `__pending:` placeholders — they're not
+                    // in visible_sessions by design (no JSONL marker
+                    // yet), and stomping the pin here cancels the
+                    // loading pane before promotion can swap it for
+                    // the real session_id.
+                    pinned_session = visible_sessions
+                        .get(selected_session)
+                        .map(|s| (s.account_name.clone(), s.session_id.clone()));
                 }
             }
         }
@@ -891,6 +1033,12 @@ fn run_loop<B: ratatui::backend::Backend>(
         let mut detail_rect: Option<Rect> = None;
         let mut sessions_rect: Option<Rect> = None;
         let mut setup_rect: Option<Rect> = None;
+        // Inner rect (border-stripped) of the chat-log pane and the
+        // plaintext of each visible row, both written by the renderer
+        // so the mouse-drag selection handler can map screen cells to
+        // text without re-loading the transcript.
+        let mut chat_inner: Option<Rect> = None;
+        let mut chat_visible: Vec<String> = Vec::new();
 
         // Promote any pending spawn whose session marker has appeared
         // since the last frame. Identify the new session by diffing the
@@ -1070,6 +1218,26 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
         }
 
+        // View-change reset: when the user navigates away from a session
+        // (pinned_session changes), drop any Ctrl-] cooldowns. The
+        // "don't immediately re-pop" intent only holds while the user is
+        // still looking at the same view — once they leave and come
+        // back, a still-up prompt should re-surface its modal.
+        if pinned_session != last_pinned_session {
+            overlay_manual_close_until.clear();
+            // Different session in the chat pane → previous selection
+            // points at unrelated text. Drop it.
+            chat_selection = None;
+            chat_selection_dragging = false;
+            last_pinned_session = pinned_session.clone();
+        }
+        // Selection only exists in view 2; if the user navigated away,
+        // discard it so coming back doesn't restore a stale highlight.
+        if mode != ViewMode::SessionDetail && chat_selection.is_some() {
+            chat_selection = None;
+            chat_selection_dragging = false;
+        }
+
         // Terminal-overlay detection. Sweep every driven session's vt100
         // screen looking for prompt markers; auto-open the overlay when
         // claude is asking for input, auto-close when the prompt clears.
@@ -1147,12 +1315,13 @@ fn run_loop<B: ratatui::backend::Backend>(
         let overlay_active_here = pinned_session
             .as_ref()
             .is_some_and(|k| overlay_open.contains(k));
-        let driver_pane = if is_driven && !overlay_active_here {
+        let mut driver_pane = if is_driven && !overlay_active_here {
             Some(view_session::DriverPane {
                 input: driver_input.as_str(),
                 cursor: driver_input.cursor_byte(),
                 focused: driver_input_focused,
                 overlay_active: false,
+                scroll: &mut driver_input_scroll,
             })
         } else {
             // Either not driven, or the overlay is up and stealing
@@ -1216,13 +1385,17 @@ fn run_loop<B: ratatui::backend::Backend>(
                 &mut detail_rect,
                 &mut sessions_rect,
                 &mut setup_rect,
+                chat_selection,
+                &mut chat_inner,
+                &mut chat_visible,
                 visible_selection,
                 selected_account,
                 selected_setup,
                 setup_snapshot.as_ref(),
                 combined_message.as_deref(),
+                defocus_input_after_send,
                 live_error,
-                driver_pane.as_ref(),
+                driver_pane.as_mut(),
                 pending_pane.as_ref(),
             );
             // Terminal overlay (claude's PTY screen) renders before the
@@ -1370,6 +1543,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                     _ => 0,
                 };
                 if dir != 0 {
+                    // Any scroll invalidates the highlight — its
+                    // anchor is a screen cell, and the row underneath
+                    // is about to change.
+                    chat_selection = None;
+                    chat_selection_dragging = false;
                     handle_scroll(
                         dir,
                         m.column,
@@ -1392,6 +1570,82 @@ fn run_loop<B: ratatui::backend::Backend>(
                         setup_snapshot.as_ref().map(|s| s.accounts.len()).unwrap_or(0),
                         &mut pinned_session,
                     );
+                }
+                // Drag-select inside the chat-log pane. Only fires in
+                // view 2; clamped to the inner (border-stripped) rect
+                // so the selection never bleeds onto adjacent panes.
+                if mode == ViewMode::SessionDetail {
+                    if let Some(inner) = chat_inner {
+                        let in_chat = m.column >= inner.x
+                            && m.column < inner.x + inner.width
+                            && m.row >= inner.y
+                            && m.row < inner.y + inner.height;
+                        let clamp = |col: u16, row: u16| -> (u16, u16) {
+                            let c = col
+                                .clamp(inner.x, inner.x + inner.width.saturating_sub(1));
+                            let r = row
+                                .clamp(inner.y, inner.y + inner.height.saturating_sub(1));
+                            (c, r)
+                        };
+                        match m.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if in_chat {
+                                    let p = clamp(m.column, m.row);
+                                    chat_selection = Some(
+                                        view_session::ChatSelection {
+                                            anchor: p,
+                                            cursor: p,
+                                        },
+                                    );
+                                    chat_selection_dragging = true;
+                                } else {
+                                    chat_selection = None;
+                                    chat_selection_dragging = false;
+                                }
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                if chat_selection_dragging {
+                                    if let Some(sel) = chat_selection.as_mut() {
+                                        sel.cursor = clamp(m.column, m.row);
+                                    }
+                                }
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                if chat_selection_dragging {
+                                    chat_selection_dragging = false;
+                                    if let Some(sel) = chat_selection {
+                                        let text = extract_chat_selection_text(
+                                            &chat_visible,
+                                            inner,
+                                            sel,
+                                        );
+                                        if !text.is_empty() {
+                                            match arboard::Clipboard::new()
+                                                .and_then(|mut c| c.set_text(text.clone()))
+                                            {
+                                                Ok(()) => {
+                                                    driver_status = Some((
+                                                        format!(
+                                                            "copied {} chars",
+                                                            text.chars().count()
+                                                        ),
+                                                        Instant::now(),
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    driver_status = Some((
+                                                        format!("clipboard error: {e}"),
+                                                        Instant::now(),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             if let Event::Key(k) = evt {
@@ -1645,7 +1899,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             ModalOutcome::Cancel => {
                                 new_session_modal = None;
                             }
-                            ModalOutcome::Confirm { account, cwd } => {
+                            ModalOutcome::Confirm { account, cwd, resume_session_id } => {
                                 new_session_modal = None;
                                 let snapshot: HashSet<String> = per_account
                                     .iter()
@@ -1658,7 +1912,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     })
                                     .unwrap_or_default();
                                 let bin = agent_control::resolve_claude_bin(&account);
-                                match PtySession::spawn(&account, cwd.clone(), bin) {
+                                let resume_for_status = resume_session_id.clone();
+                                match PtySession::spawn(&account, cwd.clone(), bin, resume_session_id) {
                                     Ok(pty) => {
                                         let spawn_id = next_spawn_id;
                                         next_spawn_id += 1;
@@ -1680,9 +1935,14 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         // marker file appears.
                                         mode = ViewMode::SessionDetail;
                                         pinned_session = Some(placeholder_key.clone());
+                                        let verb = if resume_for_status.is_some() {
+                                            "resuming"
+                                        } else {
+                                            "spawning"
+                                        };
                                         driver_status = Some((
                                             format!(
-                                                "spawning claude under {} in {}",
+                                                "{verb} claude under {} in {}",
                                                 account.name,
                                                 cwd.display()
                                             ),
@@ -1851,6 +2111,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                         "driver_input.send-ok key={key:?} slash={was_slash_cmd}"
                                                     ));
                                                     driver_input.clear();
+                                                    if defocus_input_after_send {
+                                                        driver_input_focused = false;
+                                                    }
                                                     // Arm a grace window
                                                     // after a slash command
                                                     // so the NEXT send
@@ -1881,6 +2144,56 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                         Instant::now(),
                                                     ));
                                                 }
+                                            }
+                                        }
+                                    }
+                                    // Ctrl-E — pop into the user's
+                                    // external editor (config `editor`
+                                    // field, then $VISUAL/$EDITOR/vim)
+                                    // pre-seeded with the current
+                                    // composer text. On save the
+                                    // content (incl. newlines) lands
+                                    // back in the buffer; the user
+                                    // hits Enter to send. This takes
+                                    // priority over text_input's
+                                    // Ctrl-E=move-to-end binding (use
+                                    // End key for that in the driver
+                                    // composer).
+                                    (KeyCode::Char('e'), m) if m.contains(KeyModifiers::CONTROL) => {
+                                        let initial = driver_input.as_str().to_owned();
+                                        let account_opt = per_account
+                                            .iter()
+                                            .find(|p| p.account.name == key.0)
+                                            .map(|p| p.account.clone());
+                                        let Some(account) = account_opt else {
+                                            driver_status = Some((
+                                                "editor: account not found".into(),
+                                                Instant::now(),
+                                            ));
+                                            continue;
+                                        };
+                                        match open_editor_for_input(
+                                            terminal,
+                                            &account,
+                                            &initial,
+                                        ) {
+                                            Ok(Some(new)) => {
+                                                driver_input.set(new);
+                                                driver_status = Some((
+                                                    "loaded from editor — Enter to send"
+                                                        .into(),
+                                                    Instant::now(),
+                                                ));
+                                            }
+                                            Ok(None) => {}
+                                            Err(e) => {
+                                                crate::debug_log::log(&format!(
+                                                    "driver_input.editor-err key={key:?} err={e}"
+                                                ));
+                                                driver_status = Some((
+                                                    format!("editor failed: {e}"),
+                                                    Instant::now(),
+                                                ));
                                             }
                                         }
                                     }
@@ -2148,6 +2461,22 @@ fn run_loop<B: ratatui::backend::Backend>(
                             setup_message = Some(apply_all_action(no_live));
                             setup_snapshot = setup::inspect(no_live).ok();
                         }
+                        KeyCode::Char('t') if mode == ViewMode::Setup => {
+                            let next = !defocus_input_after_send;
+                            match accounts::set_defocus_input_after_send(next) {
+                                Ok(()) => {
+                                    defocus_input_after_send = next;
+                                    setup_message = Some(format!(
+                                        "defocus input after send: {}",
+                                        if next { "on" } else { "off" }
+                                    ));
+                                }
+                                Err(e) => {
+                                    setup_message =
+                                        Some(format!("failed to save preference: {e}"));
+                                }
+                            }
+                        }
                         KeyCode::Tab => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
                                 if !sessions.is_empty() {
@@ -2265,19 +2594,27 @@ fn run_loop<B: ratatui::backend::Backend>(
                         }
                         KeyCode::PageUp if mode == ViewMode::SessionDetail => {
                             chat_scroll = chat_scroll.saturating_add(10);
+                            chat_selection = None;
+                            chat_selection_dragging = false;
                         }
                         KeyCode::PageDown if mode == ViewMode::SessionDetail => {
                             chat_scroll = chat_scroll.saturating_sub(10);
+                            chat_selection = None;
+                            chat_selection_dragging = false;
                         }
                         KeyCode::Home if mode == ViewMode::SessionDetail => {
                             // Jump to oldest — cap value gets clamped in view.
                             chat_scroll = usize::MAX / 2;
+                            chat_selection = None;
+                            chat_selection_dragging = false;
                         }
                         KeyCode::End if mode == ViewMode::SessionDetail => {
                             chat_scroll = 0;
                             // Resume tailing the latest change row too.
                             changes_selection = None;
                             detail_scroll = 0;
+                            chat_selection = None;
+                            chat_selection_dragging = false;
                         }
                         KeyCode::Char('k') if mode == ViewMode::SessionDetail => {
                             let tail = last_change_count.saturating_sub(1);
@@ -2442,6 +2779,42 @@ fn run_loop<B: ratatui::backend::Backend>(
 }
 
 /// Short, table-friendly form of a session-id UUID (first 8 chars).
+/// Extract plain text inside the chat-log selection rectangle.
+/// `visible` holds the chat's currently-rendered rows (one per inner
+/// screen row); `inner` is that pane's rect. Rows outside the
+/// rendered range are skipped silently — the renderer clamps the
+/// selection to `inner` before storing it, so out-of-range only
+/// happens if the chat shrank between render and copy.
+fn extract_chat_selection_text(
+    visible: &[String],
+    inner: Rect,
+    sel: view_session::ChatSelection,
+) -> String {
+    let (col_start, row_start, col_end, row_end) = sel.rect();
+    if col_end <= col_start {
+        return String::new();
+    }
+    let i_start = row_start.saturating_sub(inner.y) as usize;
+    let i_end = row_end.saturating_sub(inner.y) as usize;
+    let col_lo = col_start.saturating_sub(inner.x) as usize;
+    let col_hi = col_end.saturating_sub(inner.x) as usize;
+    let mut out = String::new();
+    for i in i_start..=i_end {
+        let Some(row) = visible.get(i) else { break };
+        let chars: Vec<char> = row.chars().collect();
+        let lo = col_lo.min(chars.len());
+        let hi = col_hi.min(chars.len());
+        if i > i_start {
+            out.push('\n');
+        }
+        // Trim trailing spaces so single-line selections don't drag
+        // padding from the right edge of the pane into the clipboard.
+        let slice: String = chars[lo..hi].iter().collect();
+        out.push_str(slice.trim_end());
+    }
+    out
+}
+
 fn short_sid(sid: &str) -> String {
     sid.chars().take(8).collect()
 }
@@ -2598,13 +2971,17 @@ fn render(
     detail_rect: &mut Option<Rect>,
     sessions_rect: &mut Option<Rect>,
     setup_rect: &mut Option<Rect>,
+    chat_selection: Option<view_session::ChatSelection>,
+    chat_inner: &mut Option<Rect>,
+    chat_visible: &mut Vec<String>,
     visible_session_selection: Option<usize>,
     selected_account: usize,
     selected_setup: usize,
     setup: Option<&SetupSnapshot>,
     setup_message: Option<&str>,
+    defocus_input_after_send: bool,
     live_error: Option<&str>,
-    driver: Option<&view_session::DriverPane<'_>>,
+    driver: Option<&mut view_session::DriverPane<'_>>,
     pending: Option<&view_session::PendingPane>,
 ) {
     let area = f.area();
@@ -2664,6 +3041,9 @@ fn render(
             chat_rect,
             actions_rect,
             detail_rect,
+            chat_selection,
+            chat_inner,
+            chat_visible,
             driver,
             pending,
         ),
@@ -2678,6 +3058,7 @@ fn render(
             setup,
             selected_setup,
             setup_message,
+            defocus_input_after_send,
             setup_rect,
         ),
         ViewMode::Mewxi => view_mewxi::render(f, view_area, accounts, sessions),
@@ -2923,20 +3304,19 @@ fn flatten_sessions(
         })
         .collect();
     // Group by project (alphabetical, case-insensitive); within each
-    // project, active sessions first (newest first) then idle (newest
-    // first). View 1 renders project headers above each group, and j/k
-    // navigation walks this same order so the selection cursor tracks
-    // the visible row order rather than jumping around.
+    // project, order by pid ascending — stable for the lifetime of a
+    // session, so rows don't shuffle when a session's state flips or
+    // its last_activity updates. session_id is a tiebreak for the
+    // unlikely pid collision (wraparound on long-running boxes). View
+    // 1 renders project headers above each group, and j/k navigation
+    // walks this same order so the selection cursor tracks the
+    // visible row order rather than jumping around.
     out.sort_by(|a, b| {
-        let rank = |s: SessionState| match s {
-            SessionState::Active => 0,
-            SessionState::Idle => 1,
-        };
         a.project
             .to_ascii_lowercase()
             .cmp(&b.project.to_ascii_lowercase())
-            .then_with(|| rank(a.state).cmp(&rank(b.state)))
-            .then_with(|| b.last_activity.cmp(&a.last_activity))
+            .then_with(|| a.pid.cmp(&b.pid))
+            .then_with(|| a.session_id.cmp(&b.session_id))
     });
     out
 }

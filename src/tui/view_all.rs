@@ -3,7 +3,9 @@
 //! Top: one block per account with a header line (name · live count ·
 //! cost) and three aligned gauges (5h / weekly / extra) showing
 //! `[bar] pct  meta`. Bottom: one flat table of every live session
-//! across every account, sorted by most-recent activity.
+//! across every account, grouped by project (alphabetical) with
+//! sessions ordered by pid within each group so rows stay put as
+//! sessions toggle active/idle.
 
 use super::widgets::{fmt_tokens_compact, gauge_color, render_footer};
 use super::{PerAccount, SessionRef};
@@ -336,9 +338,9 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
     let show_io = w >= 94;
     let show_cache = w >= 103;
 
-    // `sessions` is already grouped by project (alphabetical) with
-    // active-then-idle ordering within each group — sort lives in
-    // flatten_sessions so selection indexes match visible row order.
+    // `sessions` is already grouped by project (alphabetical), with
+    // pid ascending within each group — sort lives in flatten_sessions
+    // so selection indexes match visible row order.
     let ordered: &[&SessionRef] = sessions;
 
     let now = Utc::now();

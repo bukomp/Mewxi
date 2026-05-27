@@ -51,7 +51,12 @@ impl PtySession {
     /// Spawn `claude` under a fresh PTY for the given account, with
     /// `cwd` as the child's working directory. The child renders its
     /// TUI to the PTY but mewxi never displays those bytes.
-    pub fn spawn(account: &Account, cwd: PathBuf, claude_bin: PathBuf) -> Result<Self> {
+    pub fn spawn(
+        account: &Account,
+        cwd: PathBuf,
+        claude_bin: PathBuf,
+        resume_session_id: Option<String>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -76,6 +81,15 @@ impl PtySession {
         if account.default_permission_mode() == "auto" {
             cmd.arg("--permission-mode");
             cmd.arg("auto");
+        }
+        // Resuming an existing session: claude expects `--resume <id>`
+        // where <id> is the JSONL file stem from
+        // `<config_dir>/projects/<encoded>/<id>.jsonl`. The child reads
+        // the transcript and continues; the in-process session id may
+        // rotate but the mewxi driver follows it via the marker file.
+        if let Some(id) = resume_session_id.as_deref() {
+            cmd.arg("--resume");
+            cmd.arg(id);
         }
         // Only override CLAUDE_CONFIG_DIR for non-default accounts. For
         // the default `~/.claude`, claude already discovers its own

@@ -233,7 +233,7 @@ fn run_drive(
         account.name,
         cwd.display()
     );
-    let mut session = agent_control::PtySession::spawn(account, cwd.clone(), claude_bin)?;
+    let mut session = agent_control::PtySession::spawn(account, cwd.clone(), claude_bin, None)?;
 
     // Give the TUI time to render its welcome screen and arm the
     // input box. 1.5s is enough on this machine; if the child exits

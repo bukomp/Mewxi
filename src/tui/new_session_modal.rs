@@ -24,7 +24,7 @@
 //! from any focus confirms and spawns under the currently-resolved
 //! directory.
 
-use crate::accounts::{self, Account};
+use crate::accounts::{self, Account, RecentSession};
 use crate::tui::text_input::{EditOutcome, TextInput};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -40,12 +40,13 @@ enum ModalFocus {
     Recent,
     PathBar,
     EntryList,
+    Sessions,
 }
 
 /// How many "previously used" directories to surface per account.
-/// Big enough to cover real workflow breadth, small enough that the
-/// pane stays scannable without scrolling on a min-height modal.
 const RECENT_LIMIT: usize = 20;
+/// Per-folder session cap for the Sessions pane.
+const SESSIONS_LIMIT: usize = 50;
 
 pub struct NewSessionModal {
     accounts: Vec<Account>,
@@ -73,6 +74,10 @@ pub struct NewSessionModal {
     /// in before, newest first. Refreshed whenever `account_idx` moves.
     recent: Vec<PathBuf>,
     recent_idx: usize,
+    /// Resumable sessions whose recorded cwd matches `browse_cwd`.
+    /// Refreshed whenever `account_idx` or `browse_cwd` changes.
+    sessions: Vec<RecentSession>,
+    sessions_idx: usize,
     focus: ModalFocus,
 }
 
@@ -82,8 +87,14 @@ pub enum ModalOutcome {
     Stay,
     /// User pressed Esc — close without spawning.
     Cancel,
-    /// User confirmed — spawn under `account` in `cwd`.
-    Confirm { account: Account, cwd: PathBuf },
+    /// User confirmed — spawn under `account` in `cwd`. When
+    /// `resume_session_id` is `Some`, claude is launched with
+    /// `--resume <id>` so the existing JSONL transcript is continued.
+    Confirm {
+        account: Account,
+        cwd: PathBuf,
+        resume_session_id: Option<String>,
+    },
 }
 
 impl NewSessionModal {
@@ -109,6 +120,10 @@ impl NewSessionModal {
             .get(account_idx)
             .map(|a| accounts::recent_project_dirs(a, RECENT_LIMIT))
             .unwrap_or_default();
+        let sessions = accounts
+            .get(account_idx)
+            .map(|a| accounts::sessions_in_dir(a, &browse_cwd, SESSIONS_LIMIT))
+            .unwrap_or_default();
         // When the account has history, land on Recent so the most
         // common action ("re-enter a project I just used") is a single
         // Enter away. With no history, fall through to the path bar
@@ -128,12 +143,15 @@ impl NewSessionModal {
             entry_idx: 0,
             recent,
             recent_idx: 0,
+            sessions,
+            sessions_idx: 0,
             focus,
         }
     }
 
     /// Repopulate the recent-projects list after the selected account
-    /// changes. Resets the highlight to the top of the new list.
+    /// changes. Resets the highlight to the top of the new list. Also
+    /// refreshes sessions, since they're scoped per-account.
     fn refresh_recent(&mut self) {
         self.recent = self
             .accounts
@@ -141,6 +159,18 @@ impl NewSessionModal {
             .map(|a| accounts::recent_project_dirs(a, RECENT_LIMIT))
             .unwrap_or_default();
         self.recent_idx = 0;
+        self.refresh_sessions();
+    }
+
+    /// Repopulate the sessions list for the current `browse_cwd`. Reset
+    /// the highlight to the top.
+    fn refresh_sessions(&mut self) {
+        self.sessions = self
+            .accounts
+            .get(self.account_idx)
+            .map(|a| accounts::sessions_in_dir(a, &self.browse_cwd, SESSIONS_LIMIT))
+            .unwrap_or_default();
+        self.sessions_idx = 0;
     }
 
     /// Directory portion of `path_input` — everything up to and
@@ -201,6 +231,7 @@ impl NewSessionModal {
                 self.browse_cwd = new_dir;
                 self.entries = es;
                 self.error = None;
+                self.refresh_sessions();
             }
             Err(e) => {
                 // Keep the old browse_cwd/entries around so the list
@@ -241,22 +272,19 @@ impl NewSessionModal {
     }
 
     fn cycle_focus(&mut self, forward: bool) {
-        // Recent is skipped on accounts with no history — landing on
-        // an empty pane is a dead-end the user can't act on.
-        let order: &[ModalFocus] = if self.recent.is_empty() {
-            &[
-                ModalFocus::Accounts,
-                ModalFocus::PathBar,
-                ModalFocus::EntryList,
-            ]
-        } else {
-            &[
-                ModalFocus::Accounts,
-                ModalFocus::Recent,
-                ModalFocus::PathBar,
-                ModalFocus::EntryList,
-            ]
-        };
+        // Skip empty panes — landing on one is a dead-end the user
+        // can't act on. Order: Accounts → Recent → PathBar → EntryList
+        // → Sessions.
+        let mut order: Vec<ModalFocus> = Vec::with_capacity(5);
+        order.push(ModalFocus::Accounts);
+        if !self.recent.is_empty() {
+            order.push(ModalFocus::Recent);
+        }
+        order.push(ModalFocus::PathBar);
+        order.push(ModalFocus::EntryList);
+        if !self.sessions.is_empty() {
+            order.push(ModalFocus::Sessions);
+        }
         let cur = order.iter().position(|f| *f == self.focus).unwrap_or(0);
         let next = if forward {
             (cur + 1) % order.len()
@@ -267,10 +295,15 @@ impl NewSessionModal {
     }
 
     fn confirm_spawn(&self) -> ModalOutcome {
+        self.confirm_spawn_with(None)
+    }
+
+    fn confirm_spawn_with(&self, resume_session_id: Option<String>) -> ModalOutcome {
         if let Some(account) = self.accounts.get(self.account_idx).cloned() {
             return ModalOutcome::Confirm {
                 account,
                 cwd: self.browse_cwd.clone(),
+                resume_session_id,
             };
         }
         ModalOutcome::Stay
@@ -330,16 +363,17 @@ impl NewSessionModal {
                     }
                 }
                 KeyCode::Enter => {
-                    // Two-step pattern (load into path bar, don't
-                    // auto-spawn) keeps the user one keystroke from
-                    // either: confirming with `.`, narrowing into a
-                    // subdir, or aborting. Spawning immediately on
-                    // Enter would be surprising in a list that scrolls
-                    // and could trigger the wrong session on a mis-key.
+                    // Two-step pattern: load the dir into the path bar
+                    // (so the Sessions pane refreshes for that dir), let
+                    // the user choose to resume a session or spawn fresh.
                     if let Some(dir) = self.recent.get(self.recent_idx).cloned() {
                         if dir.is_dir() {
                             self.navigate_to(dir);
-                            self.focus = ModalFocus::PathBar;
+                            self.focus = if self.sessions.is_empty() {
+                                ModalFocus::PathBar
+                            } else {
+                                ModalFocus::Sessions
+                            };
                         } else {
                             self.error = Some(format!(
                                 "not a directory (moved/deleted?): {}",
@@ -349,7 +383,7 @@ impl NewSessionModal {
                     }
                 }
                 KeyCode::Char('.') => {
-                    // `.` shortcut: pick + spawn in one go.
+                    // `.` shortcut: pick + spawn fresh in one go.
                     if let Some(dir) = self.recent.get(self.recent_idx).cloned() {
                         if dir.is_dir() {
                             self.navigate_to(dir);
@@ -437,6 +471,24 @@ impl NewSessionModal {
                     _ => {}
                 }
             }
+            ModalFocus::Sessions => match k.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.sessions_idx > 0 {
+                        self.sessions_idx -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.sessions_idx + 1 < self.sessions.len() {
+                        self.sessions_idx += 1;
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char('.') => {
+                    if let Some(s) = self.sessions.get(self.sessions_idx).cloned() {
+                        return self.confirm_spawn_with(Some(s.session_id));
+                    }
+                }
+                _ => {}
+            },
         }
         ModalOutcome::Stay
     }
@@ -447,7 +499,7 @@ impl NewSessionModal {
 
         let outer = Block::default()
             .borders(Borders::ALL)
-            .title(" New session — Tab cycles focus · Esc cancel · . spawn ")
+            .title(" New session — Tab cycles · . spawn fresh · Enter on Sessions = resume · Esc cancel ")
             .border_style(Style::default().fg(Color::Magenta));
         let inner = outer.inner(modal_area);
         f.render_widget(outer, modal_area);
@@ -470,7 +522,15 @@ impl NewSessionModal {
             .constraints([Constraint::Length(recent_h), Constraint::Min(6)])
             .split(cols[1]);
         self.render_recent_pane(f, right_split[0]);
-        self.render_folder_pane(f, right_split[1]);
+        // Bottom area: folder picker | sessions list. The Sessions pane
+        // is the same width as the folder browser so both can be
+        // skimmed in one glance.
+        let bottom_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(right_split[1]);
+        self.render_folder_pane(f, bottom_cols[0]);
+        self.render_sessions_pane(f, bottom_cols[1]);
     }
 
     fn render_recent_pane(&self, f: &mut Frame, area: Rect) {
@@ -528,6 +588,69 @@ impl NewSessionModal {
                     Span::styled(arrow, style),
                     Span::styled(label, style),
                 ]))
+            })
+            .collect();
+        f.render_widget(List::new(items), inner);
+    }
+
+    fn render_sessions_pane(&self, f: &mut Frame, area: Rect) {
+        let title = format!(
+            " Sessions — {} resumable ",
+            self.sessions.len()
+        );
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(focus_border(self.focus == ModalFocus::Sessions));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        if self.sessions.is_empty() {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "(no resumable sessions in this folder)",
+                    Style::default().fg(Color::DarkGray),
+                ))),
+                inner,
+            );
+            return;
+        }
+
+        let visible_rows = inner.height as usize;
+        let focused = self.focus == ModalFocus::Sessions;
+        let offset = if focused {
+            self.sessions_idx.saturating_sub(visible_rows.saturating_sub(1))
+        } else {
+            0
+        };
+        let now = std::time::SystemTime::now();
+        let items: Vec<ListItem> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(visible_rows.max(1))
+            .map(|(i, s)| {
+                let selected = focused && i == self.sessions_idx;
+                let age = format_age(now, s.mtime);
+                let mut head_style = Style::default().fg(Color::White);
+                let meta_style = Style::default().fg(Color::DarkGray);
+                let preview_style = Style::default().fg(Color::Gray);
+                if selected {
+                    head_style = head_style.add_modifier(Modifier::BOLD).bg(Color::DarkGray);
+                }
+                let arrow = if selected { "▶ " } else { "  " };
+                let mut spans = vec![
+                    Span::styled(arrow, head_style),
+                    Span::styled(age, head_style),
+                ];
+                if let Some(p) = s.preview.as_deref() {
+                    spans.push(Span::styled(format!("  {p}"), preview_style));
+                } else {
+                    let short_id: String = s.session_id.chars().take(8).collect();
+                    spans.push(Span::styled(format!("  {short_id}"), meta_style));
+                }
+                ListItem::new(Line::from(spans))
             })
             .collect();
         f.render_widget(List::new(items), inner);
@@ -799,6 +922,29 @@ fn display_recent(p: &Path, home: Option<&Path>) -> String {
         }
     }
     p.display().to_string()
+}
+
+/// Human-readable "N{s,m,h,d} ago" string. Clamps to "just now" when
+/// `then` is in the future (clock skew, transcript written by a host
+/// with a slightly fast clock).
+fn format_age(now: std::time::SystemTime, then: std::time::SystemTime) -> String {
+    let secs = now.duration_since(then).map(|d| d.as_secs()).unwrap_or(0);
+    if secs < 5 {
+        return "just now".to_string();
+    }
+    if secs < 60 {
+        return format!("{secs}s ago");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    format!("{days}d ago")
 }
 
 fn entry_label(p: &Path) -> String {

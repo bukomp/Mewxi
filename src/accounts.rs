@@ -192,6 +192,30 @@ impl Account {
         }
         out
     }
+
+    /// External editor command used by the "open in editor" composer
+    /// shortcut. Resolution order: `"editor"` field in
+    /// `<dir>/settings.json` (or `settings.local.json` when it
+    /// overrides) → `$VISUAL` → `$EDITOR` → `vim`. Returns a shell-style
+    /// command line that may include args, e.g. `"code --wait"`; callers
+    /// split on whitespace before spawning.
+    pub fn editor_command(&self) -> String {
+        let mut configured: Option<String> = None;
+        for path in self.settings_paths() {
+            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+            let Ok(v): serde_json::Result<serde_json::Value> =
+                serde_json::from_str(&raw) else { continue };
+            if let Some(e) = v.get("editor").and_then(|x| x.as_str()) {
+                if !e.trim().is_empty() {
+                    configured = Some(e.to_string());
+                }
+            }
+        }
+        configured
+            .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.trim().is_empty()))
+            .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| "vim".to_string())
+    }
 }
 
 /// Persist `level` as the `effortLevel` field of this account's
@@ -262,6 +286,11 @@ struct AccountsConfig {
     /// `$HOME` when neither is set.
     #[serde(default)]
     default_new_session_dir: Option<String>,
+    /// When true, the driver input row loses focus after a prompt is
+    /// sent — keys then route to view navigation instead of typing into
+    /// the next prompt. Default: true.
+    #[serde(default)]
+    defocus_input_after_send: Option<bool>,
     #[serde(default)]
     accounts: Vec<AccountEntry>,
 }
@@ -288,6 +317,9 @@ pub struct AccountsView {
     /// Starting folder for the new-session modal (config-supplied,
     /// pre-tilde-expansion not applied — see [`default_new_session_dir`]).
     pub default_new_session_dir: Option<PathBuf>,
+    /// When true, the driver input row auto-unfocuses after a prompt is
+    /// sent. Toggleable from the Setup view. Defaults to true.
+    pub defocus_input_after_send: bool,
 }
 
 impl AccountsView {
@@ -339,6 +371,7 @@ pub fn load_accounts() -> Result<AccountsView> {
     let mut default_account: Option<String> = None;
     let mut ignored_names: Vec<String> = Vec::new();
     let mut default_new_session_dir: Option<PathBuf> = None;
+    let mut defocus_input_after_send: bool = true;
 
     if let Some(cfg_path) = config_path() {
         if cfg_path.exists() {
@@ -349,6 +382,9 @@ pub fn load_accounts() -> Result<AccountsView> {
             default_account = cfg.default_account;
             ignored_names = cfg.ignored;
             default_new_session_dir = cfg.default_new_session_dir.map(|s| expand_tilde(&s));
+            if let Some(v) = cfg.defocus_input_after_send {
+                defocus_input_after_send = v;
+            }
             for entry in cfg.accounts {
                 accounts.push(Account {
                     name: entry.name,
@@ -402,6 +438,7 @@ pub fn load_accounts() -> Result<AccountsView> {
         ignored: ignored_vec,
         default_account,
         default_new_session_dir,
+        defocus_input_after_send,
     })
 }
 
@@ -413,14 +450,12 @@ pub fn load_accounts() -> Result<AccountsView> {
 /// cwd by parsing one record out of each project's transcripts —
 /// every record carries the unescaped `cwd` field. Sorted by the
 /// newest JSONL mtime per project, dedup'd by canonical path, capped
-/// at `limit`. Cheap enough for interactive use: one stat per JSONL
-/// + one short read per project.
+/// at `limit`.
 pub fn recent_project_dirs(account: &Account, limit: usize) -> Vec<PathBuf> {
     let projects = account.projects_dir();
     let Ok(entries) = std::fs::read_dir(&projects) else {
         return Vec::new();
     };
-    // (cwd, newest_jsonl_mtime)
     let mut found: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
     for entry in entries.flatten() {
         let dir = entry.path();
@@ -441,7 +476,7 @@ pub fn recent_project_dirs(account: &Account, limit: usize) -> Vec<PathBuf> {
             }
         }
         let Some((jsonl, mtime)) = newest else { continue };
-        let Some(cwd) = read_cwd_from_jsonl(&jsonl) else { continue };
+        let Some((cwd, _)) = read_cwd_and_preview(&jsonl) else { continue };
         found.push((cwd, mtime));
     }
     found.sort_by(|a, b| b.1.cmp(&a.1));
@@ -461,26 +496,147 @@ pub fn recent_project_dirs(account: &Account, limit: usize) -> Vec<PathBuf> {
     out
 }
 
-/// Read up to ~64 lines of `jsonl` to find a record with a `cwd`
-/// field. We don't trust the first line — early frames are sometimes
-/// envelope-only (e.g. `{"type":"permission-mode",...}`).
-fn read_cwd_from_jsonl(path: &Path) -> Option<PathBuf> {
+/// Resumable sessions whose recorded `cwd` matches `dir` (canonical
+/// equality), newest first. Used by the new-session modal's Sessions
+/// pane to show what's resumable under the currently-browsed folder.
+pub fn sessions_in_dir(account: &Account, dir: &Path, limit: usize) -> Vec<RecentSession> {
+    let canon_target = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut out: Vec<RecentSession> = recent_project_sessions(account, limit * 4)
+        .into_iter()
+        .filter(|s| {
+            let c = std::fs::canonicalize(&s.cwd).unwrap_or_else(|_| s.cwd.clone());
+            c == canon_target
+        })
+        .collect();
+    out.truncate(limit);
+    out
+}
+
+/// One resumable session discovered by [`recent_project_sessions`].
+#[derive(Clone, Debug)]
+pub struct RecentSession {
+    /// File-stem of the JSONL — what claude expects after `--resume`.
+    pub session_id: String,
+    /// Working directory recorded in the transcript.
+    pub cwd: PathBuf,
+    /// Last modification time of the JSONL.
+    pub mtime: std::time::SystemTime,
+    /// First user message (truncated). None when the transcript has
+    /// only system/envelope frames.
+    pub preview: Option<String>,
+}
+
+/// Resumable sessions for this account, newest first.
+///
+/// Each `<account.dir>/projects/<encoded>/<session_id>.jsonl` is one
+/// session whose ID is the file stem. Returns up to `limit` entries,
+/// sorted by mtime descending. Reads each JSONL's first ~128 lines to
+/// extract `cwd` and the earliest user-message text for preview.
+pub fn recent_project_sessions(account: &Account, limit: usize) -> Vec<RecentSession> {
+    let projects = account.projects_dir();
+    let Ok(entries) = std::fs::read_dir(&projects) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&dir) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(meta) = f.metadata() else { continue };
+            let Ok(mt) = meta.modified() else { continue };
+            found.push((p, mt));
+        }
+    }
+    found.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out: Vec<RecentSession> = Vec::with_capacity(found.len().min(limit));
+    for (jsonl, mtime) in found.into_iter().take(limit * 2) {
+        let Some(session_id) = jsonl.file_stem().and_then(|s| s.to_str()).map(String::from)
+        else {
+            continue;
+        };
+        let Some((cwd, preview)) = read_cwd_and_preview(&jsonl) else { continue };
+        out.push(RecentSession { session_id, cwd, mtime, preview });
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
+/// Scan up to ~128 lines of `jsonl`, extracting `cwd` and the first
+/// user-message text. Returns `None` when no `cwd` is found.
+fn read_cwd_and_preview(path: &Path) -> Option<(PathBuf, Option<String>)> {
     use std::io::{BufRead, BufReader};
     let f = std::fs::File::open(path).ok()?;
     let reader = BufReader::new(f);
-    for line in reader.lines().take(64).flatten() {
-        if !line.contains("\"cwd\"") {
-            continue;
-        }
+    let mut cwd: Option<PathBuf> = None;
+    let mut preview: Option<String> = None;
+    for line in reader.lines().take(128).flatten() {
         let Ok(v): serde_json::Result<serde_json::Value> =
             serde_json::from_str(&line) else { continue };
-        if let Some(cwd) = v.get("cwd").and_then(|s| s.as_str()) {
-            if !cwd.is_empty() {
-                return Some(PathBuf::from(cwd));
+        if cwd.is_none() {
+            if let Some(c) = v.get("cwd").and_then(|s| s.as_str()) {
+                if !c.is_empty() {
+                    cwd = Some(PathBuf::from(c));
+                }
+            }
+        }
+        if preview.is_none() && v.get("type").and_then(|t| t.as_str()) == Some("user") {
+            if let Some(text) = extract_user_text(&v) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('<') {
+                    preview = Some(truncate_chars(trimmed, 80));
+                }
+            }
+        }
+        if cwd.is_some() && preview.is_some() {
+            break;
+        }
+    }
+    cwd.map(|c| (c, preview))
+}
+
+/// Pull the first text block out of a `type=user` transcript record.
+/// Tolerates both stringly-typed `content` and the array-of-blocks form.
+fn extract_user_text(v: &serde_json::Value) -> Option<String> {
+    let msg = v.get("message")?;
+    let content = msg.get("content")?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(arr) = content.as_array() {
+        for block in arr {
+            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(t) = block.get("text").and_then(|s| s.as_str()) {
+                    return Some(t.to_string());
+                }
             }
         }
     }
     None
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut out = String::with_capacity(s.len().min(max * 4));
+    for (i, ch) in s.chars().enumerate() {
+        if i >= max {
+            out.push('…');
+            return out;
+        }
+        if ch == '\n' || ch == '\r' || ch == '\t' {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Resolve the directory the new-session modal should open in.
@@ -530,6 +686,43 @@ pub fn set_ignored(names: &[String]) -> Result<()> {
             let arr: Vec<toml::Value> = names.iter().map(|s| toml::Value::String(s.clone())).collect();
             t.insert("ignored".to_string(), toml::Value::Array(arr));
         }
+    } else {
+        return Err(anyhow!("{} is not a TOML table", path.display()));
+    }
+    let out = toml::to_string_pretty(&root)
+        .with_context(|| format!("serialize {}", path.display()))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, out)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename into {}", path.display()))?;
+    Ok(())
+}
+
+/// Write the `defocus_input_after_send` field to `accounts.toml`,
+/// preserving any other content. Creates the file if it doesn't exist.
+pub fn set_defocus_input_after_send(enabled: bool) -> Result<()> {
+    let path = config_path().ok_or_else(|| anyhow!("no XDG config dir"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut root: toml::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("read {}", path.display()))?;
+        if raw.trim().is_empty() {
+            toml::Value::Table(toml::value::Table::new())
+        } else {
+            toml::from_str(&raw)
+                .with_context(|| format!("parse {}", path.display()))?
+        }
+    } else {
+        toml::Value::Table(toml::value::Table::new())
+    };
+    if let toml::Value::Table(t) = &mut root {
+        t.insert(
+            "defocus_input_after_send".to_string(),
+            toml::Value::Boolean(enabled),
+        );
     } else {
         return Err(anyhow!("{} is not a TOML table", path.display()));
     }
