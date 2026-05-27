@@ -42,6 +42,16 @@ const PROMPT_MARKERS_SPECIFIC: &[&str] = &[
     "(Y/n)",
     "Esc to cancel",   // picker hint footer
     "Enter to select", // picker hint footer
+    // `/model` and `/effort` mid-conversation cache-invalidation
+    // confirmation dialogs. Claude renders them inside a horizontal
+    // separator (`──────`) rather than a box border, and the picker
+    // hint footer ("Esc to cancel · Enter to select") is omitted, so
+    // neither the y/N markers nor the picker-footer markers above
+    // catch them. The header phrasing is specific enough to never
+    // appear in chat scrollback.
+    "Switch model?",
+    "Switch effort?",
+    "Change effort?",
 ];
 
 /// Common-English markers that DO appear in claude's chat prose
@@ -1203,6 +1213,32 @@ mod tests {
         // claude renders below every picker.
         let p = parse("\x1b[2JSwitch model?\r\n\r\n❯ 1. Yes, switch\r\n  2. No, go back\r\n\r\n↑/↓ navigate · Esc to cancel · Enter to select".as_bytes());
         assert!(prompt_visible(p.screen(), false));
+    }
+
+    #[test]
+    fn detects_model_switch_cache_warning_without_footer() {
+        // Claude Code 2.1.150+ renders the /model mid-conversation
+        // confirmation inside a horizontal separator and omits the
+        // picker-hint footer entirely. Detection has to fire off the
+        // header phrase alone.
+        let mut bytes = String::new();
+        bytes.push_str("\x1b[2J──────────────────────────────────────────────\r\n");
+        bytes.push_str("  Switch model?\r\n");
+        bytes.push_str("  Your next response will be slower and use more tokens\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("  This conversation is cached for the current model. Switching to Haiku 4.5 means the full history gets\r\n");
+        bytes.push_str("  re-read on your next message.\r\n");
+        bytes.push_str("\r\n");
+        bytes.push_str("  ❯ 1. Yes, switch to Haiku 4.5\r\n");
+        bytes.push_str("    2. No, go back\r\n");
+        let p = parse(bytes.as_bytes());
+        assert!(prompt_visible(p.screen(), false));
+        let picker = parse_picker(p.screen()).expect("picker parsed");
+        assert_eq!(picker.title.as_deref(), Some("Switch model?"));
+        assert_eq!(picker.options.len(), 2);
+        assert_eq!(picker.options[0], "Yes, switch to Haiku 4.5");
+        assert_eq!(picker.options[1], "No, go back");
+        assert_eq!(picker.selected, 0);
     }
 
     #[test]
