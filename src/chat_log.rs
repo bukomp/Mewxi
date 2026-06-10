@@ -7,9 +7,12 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 #[derive(Clone, Debug)]
 pub enum EntryKind {
@@ -31,7 +34,36 @@ pub struct ChatEntry {
     pub text: String,
 }
 
+/// One transcript's parsed entries plus the file fingerprint they were
+/// parsed from. A matching (mtime, len) lets [`read`] hand back a clone
+/// without re-parsing — the chat view redraws many times per second
+/// (live ticks, scroll, mouse hover) but the transcript only changes
+/// when claude appends to it.
+struct CacheEntry {
+    mtime: Option<SystemTime>,
+    len: u64,
+    entries: Vec<ChatEntry>,
+}
+
+static READ_CACHE: Mutex<Option<HashMap<PathBuf, CacheEntry>>> = Mutex::new(None);
+
 pub fn read(path: &Path) -> Vec<ChatEntry> {
+    // Fingerprint the file cheaply (one stat) and reuse the parse if it
+    // hasn't changed since last read. Falls through to a full parse on
+    // any I/O hiccup or cache miss.
+    let fingerprint = std::fs::metadata(path).ok().map(|m| {
+        (m.modified().ok(), m.len())
+    });
+    if let Some((mtime, len)) = fingerprint {
+        if let Ok(guard) = READ_CACHE.lock() {
+            if let Some(hit) = guard.as_ref().and_then(|m| m.get(path)) {
+                if hit.mtime == mtime && hit.len == len {
+                    return hit.entries.clone();
+                }
+            }
+        }
+    }
+
     let Ok(f) = File::open(path) else {
         return Vec::new();
     };
@@ -45,6 +77,19 @@ pub fn read(path: &Path) -> Vec<ChatEntry> {
             continue;
         };
         parse_record(&v, &mut out);
+    }
+
+    if let Some((mtime, len)) = fingerprint {
+        if let Ok(mut guard) = READ_CACHE.lock() {
+            guard.get_or_insert_with(HashMap::new).insert(
+                path.to_path_buf(),
+                CacheEntry {
+                    mtime,
+                    len,
+                    entries: out.clone(),
+                },
+            );
+        }
     }
     out
 }

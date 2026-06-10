@@ -379,11 +379,13 @@ pub fn run(no_live: bool) -> Result<()> {
     );
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    enable_hover_tracking();
 
     let _ = show_splash(&mut terminal, SPLASH_DURATION);
     let result = run_loop(&mut terminal, no_live);
 
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    disable_hover_tracking();
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -404,6 +406,7 @@ fn suspend_terminal<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
 ) -> io::Result<()> {
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    disable_hover_tracking();
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
@@ -424,7 +427,31 @@ fn resume_terminal<B: ratatui::backend::Backend>(
         )
     );
     terminal.clear()?;
+    enable_hover_tracking();
     Ok(())
+}
+
+/// Enable xterm "any-event" mouse tracking (mode 1003) on top of
+/// crossterm's button-only capture, so the chat view receives
+/// `MouseEventKind::Moved` events with no button held — needed to
+/// highlight the code block under the cursor on hover. crossterm has no
+/// dedicated command for this private mode, so we write the escape
+/// directly. Best-effort: terminals lacking it ignore the sequence.
+fn enable_hover_tracking() {
+    use std::io::Write;
+    let mut out = io::stdout();
+    let _ = out.write_all(b"\x1b[?1003h");
+    let _ = out.flush();
+}
+
+/// Undo [`enable_hover_tracking`]. Paired with every place that drops
+/// mouse capture so an external program (or the restored shell) isn't
+/// left emitting motion reports.
+fn disable_hover_tracking() {
+    use std::io::Write;
+    let mut out = io::stdout();
+    let _ = out.write_all(b"\x1b[?1003l");
+    let _ = out.flush();
 }
 
 /// Open the user's preferred editor on a tempfile seeded with
@@ -820,6 +847,13 @@ fn run_loop<B: ratatui::backend::Backend>(
     // and is being held visible until the user clicks again.
     let mut chat_selection: Option<view_session::ChatSelection> = None;
     let mut chat_selection_dragging: bool = false;
+    // Last known mouse position (terminal cells), updated on any mouse
+    // event including hover (motion with no button). The chat view uses
+    // it to highlight the code block under the cursor.
+    let mut mouse_pos: Option<(u16, u16)> = None;
+    // Short-lived "copied!" toast, shown as a small floating box after a
+    // code block or text selection lands on the clipboard.
+    let mut copy_toast: Option<(String, Instant)> = None;
     // `None` means follow tail (selection tracks the latest change row);
     // `Some(i)` pins to a concrete index. j/k transitions out of follow
     // mode; G / End re-enters it. The render function writes the row
@@ -1051,6 +1085,14 @@ fn run_loop<B: ratatui::backend::Backend>(
         // text without re-loading the transcript.
         let mut chat_inner: Option<Rect> = None;
         let mut chat_visible: Vec<String> = Vec::new();
+        // Code blocks visible in the chat-log this frame, in screen-row
+        // coordinates, so a click can map to the block under it and copy
+        // its untruncated source. Repopulated every frame by the renderer.
+        let mut chat_code_blocks: Vec<view_session::CodeBlockRegion> = Vec::new();
+        // Click-to-copy command parts visible in the Detail pane this
+        // frame, in screen-row coordinates, so a click can map to the
+        // part under it and copy that segment. Repopulated every frame.
+        let mut detail_copy_blocks: Vec<view_session::DetailCopyRegion> = Vec::new();
 
         // Promote any pending spawn whose session marker has appeared
         // since the last frame. Identify the new session by diffing the
@@ -1411,6 +1453,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                 chat_selection,
                 &mut chat_inner,
                 &mut chat_visible,
+                &mut chat_code_blocks,
+                &mut detail_copy_blocks,
+                mouse_pos,
                 visible_selection,
                 selected_account,
                 selected_setup,
@@ -1421,6 +1466,14 @@ fn run_loop<B: ratatui::backend::Backend>(
                 driver_pane.as_mut(),
                 pending_pane.as_ref(),
             );
+            // Copy confirmation toast: a small floating box in the chat
+            // pane's top-right, shown briefly after a clipboard write.
+            // Drawn over the base view but under modals/overlays.
+            if let (Some((msg, t)), Some(anchor)) = (&copy_toast, chat_inner) {
+                if t.elapsed() < COPY_TOAST_TTL {
+                    render_copy_toast(f, anchor, msg);
+                }
+            }
             // Terminal overlay (claude's PTY screen) renders before the
             // mewxi modals so an open modal still wins, but after the
             // base view so it visibly sits on top of the chat-log. The
@@ -1563,6 +1616,13 @@ fn run_loop<B: ratatui::backend::Backend>(
         if event::poll(poll_timeout)? {
             let evt = event::read()?;
             if let Event::Mouse(m) = &evt {
+                // Track the cursor for hover highlighting. Scroll events
+                // shift the rows under the cursor, so drop the remembered
+                // position then (the highlight recomputes next hover).
+                mouse_pos = match m.kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => None,
+                    _ => Some((m.column, m.row)),
+                };
                 let dir: i32 = match m.kind {
                     MouseEventKind::ScrollUp => -1,
                     MouseEventKind::ScrollDown => 1,
@@ -1615,7 +1675,42 @@ fn run_loop<B: ratatui::backend::Backend>(
                         };
                         match m.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if in_chat {
+                                // A click landing on a code block copies
+                                // the whole block's untruncated source as
+                                // one chunk (ready to paste into a shell)
+                                // instead of starting a text drag.
+                                let hit = if in_chat {
+                                    chat_code_blocks
+                                        .iter()
+                                        .find(|b| m.row >= b.top && m.row <= b.bottom)
+                                } else {
+                                    None
+                                };
+                                if let Some(block) = hit {
+                                    chat_selection = None;
+                                    chat_selection_dragging = false;
+                                    let src = block.source.clone();
+                                    let lines = src.lines().count().max(1);
+                                    match arboard::Clipboard::new()
+                                        .and_then(|mut c| c.set_text(src))
+                                    {
+                                        Ok(()) => {
+                                            let msg = format!(
+                                                "copied code block ({lines} line{})",
+                                                if lines == 1 { "" } else { "s" }
+                                            );
+                                            copy_toast =
+                                                Some((msg.clone(), Instant::now()));
+                                            driver_status = Some((msg, Instant::now()));
+                                        }
+                                        Err(e) => {
+                                            driver_status = Some((
+                                                format!("clipboard error: {e}"),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                    }
+                                } else if in_chat {
                                     let p = clamp(m.column, m.row);
                                     chat_selection = Some(
                                         view_session::ChatSelection {
@@ -1650,13 +1745,16 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 .and_then(|mut c| c.set_text(text.clone()))
                                             {
                                                 Ok(()) => {
-                                                    driver_status = Some((
-                                                        format!(
-                                                            "copied {} chars",
-                                                            text.chars().count()
-                                                        ),
+                                                    let msg = format!(
+                                                        "copied {} chars",
+                                                        text.chars().count()
+                                                    );
+                                                    copy_toast = Some((
+                                                        msg.clone(),
                                                         Instant::now(),
                                                     ));
+                                                    driver_status =
+                                                        Some((msg, Instant::now()));
                                                 }
                                                 Err(e) => {
                                                     driver_status = Some((
@@ -1670,6 +1768,40 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 }
                             }
                             _ => {}
+                        }
+                    }
+
+                    // Click-to-copy a single Bash command part in the
+                    // Detail pane. Each rendered segment is a clickable
+                    // region (projected to screen rows by the renderer);
+                    // clicking one drops just that part's runnable text on
+                    // the clipboard. Gated on `detail_rect` so a same-row
+                    // click in the chat pane to the left can't match it.
+                    if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                        if hit(detail_rect, m.column, m.row) {
+                            if let Some(region) = detail_copy_blocks
+                                .iter()
+                                .find(|b| m.row >= b.top && m.row <= b.bottom)
+                            {
+                                let src = region.source.clone();
+                                let chars = src.chars().count();
+                                match arboard::Clipboard::new()
+                                    .and_then(|mut c| c.set_text(src))
+                                {
+                                    Ok(()) => {
+                                        let msg =
+                                            format!("copied command part ({chars} chars)");
+                                        copy_toast = Some((msg.clone(), Instant::now()));
+                                        driver_status = Some((msg, Instant::now()));
+                                    }
+                                    Err(e) => {
+                                        driver_status = Some((
+                                            format!("clipboard error: {e}"),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1849,7 +1981,6 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             // `persist_default`) is
                                             // what makes it stick.
                                             let mut status_msg = format!("model → {slug}");
-                                            let mut effort_sent = false;
                                             if let Some(eff) = effort.as_deref() {
                                                 let mut eb =
                                                     format!("/effort {eff}").into_bytes();
@@ -1857,7 +1988,6 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 match pty.send_keys(&eb) {
                                                     Ok(_) => {
                                                         opt.effort = Some(eff.to_string());
-                                                        effort_sent = true;
                                                         status_msg = format!(
                                                             "model → {slug}  ·  effort → {eff}"
                                                         );
@@ -1869,34 +1999,55 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                     }
                                                 }
                                             }
-                                            // Persist the effort as
-                                            // the account's startup
-                                            // default. Only run when
-                                            // the in-session send
-                                            // worked — otherwise we'd
-                                            // pin a value the user
-                                            // never actually saw take
-                                            // effect.
-                                            if persist_default && effort_sent {
-                                                if let Some(eff) = effort.as_deref() {
-                                                    if let Some(pa) = per_account
-                                                        .iter()
-                                                        .find(|p| p.account.name == key.0)
-                                                    {
-                                                        match crate::accounts::set_default_effort(
+                                            // Persist BOTH the model
+                                            // and effort as the
+                                            // account's startup
+                                            // defaults. This is the
+                                            // whole point of `d`: a
+                                            // brand-new session reads
+                                            // `model` + `effortLevel`
+                                            // from settings.json, so
+                                            // saving only one half left
+                                            // new sessions on the stale
+                                            // other half (e.g. the
+                                            // account stuck at
+                                            // `opus:low`). We persist
+                                            // regardless of whether the
+                                            // live `/effort` send
+                                            // landed — the on-disk
+                                            // default is independent of
+                                            // this session's state.
+                                            if persist_default {
+                                                if let Some(pa) = per_account
+                                                    .iter()
+                                                    .find(|p| p.account.name == key.0)
+                                                {
+                                                    let model_res =
+                                                        crate::accounts::set_default_model(
                                                             &pa.account,
-                                                            eff,
-                                                        ) {
-                                                            Ok(()) => {
-                                                                status_msg = format!(
-                                                                    "model → {slug}  ·  effort → {eff} (saved as default)"
-                                                                );
-                                                            }
-                                                            Err(e) => {
-                                                                status_msg = format!(
-                                                                    "model → {slug}  ·  effort → {eff}  ·  default save failed: {e}"
-                                                                );
-                                                            }
+                                                            &slug,
+                                                        );
+                                                    let effort_res = effort
+                                                        .as_deref()
+                                                        .map(|eff| {
+                                                            crate::accounts::set_default_effort(
+                                                                &pa.account,
+                                                                eff,
+                                                            )
+                                                        });
+                                                    let eff_label = effort
+                                                        .as_deref()
+                                                        .unwrap_or("default");
+                                                    match (model_res, effort_res) {
+                                                        (Ok(()), None | Some(Ok(()))) => {
+                                                            status_msg = format!(
+                                                                "model → {slug}  ·  effort → {eff_label} (saved as default)"
+                                                            );
+                                                        }
+                                                        (Err(e), _) | (_, Some(Err(e))) => {
+                                                            status_msg = format!(
+                                                                "model → {slug}  ·  effort → {eff_label}  ·  default save failed: {e}"
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -3093,6 +3244,9 @@ fn render(
     chat_selection: Option<view_session::ChatSelection>,
     chat_inner: &mut Option<Rect>,
     chat_visible: &mut Vec<String>,
+    chat_code_blocks: &mut Vec<view_session::CodeBlockRegion>,
+    detail_copy_blocks: &mut Vec<view_session::DetailCopyRegion>,
+    mouse_pos: Option<(u16, u16)>,
     visible_session_selection: Option<usize>,
     selected_account: usize,
     selected_setup: usize,
@@ -3163,6 +3317,9 @@ fn render(
             chat_selection,
             chat_inner,
             chat_visible,
+            chat_code_blocks,
+            detail_copy_blocks,
+            mouse_pos,
             driver,
             pending,
         ),
@@ -3194,6 +3351,48 @@ fn render_top_header(f: &mut Frame, area: ratatui::layout::Rect) {
         Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
     )]);
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+}
+
+/// How long the copy-confirmation toast stays on screen after a
+/// clipboard write before fading out.
+const COPY_TOAST_TTL: Duration = Duration::from_millis(1800);
+
+/// Draw a small "✓ <msg>" toast in the top-right corner of `area`
+/// (typically the chat pane's inner rect). Sized to the message, capped
+/// to the area width, with a green border so a successful copy reads at
+/// a glance. Clears its own cells first so it sits cleanly over chat.
+fn render_copy_toast(f: &mut Frame, area: ratatui::layout::Rect, msg: &str) {
+    use ratatui::layout::Rect;
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+    let label = format!("✓ {msg}");
+    let label_w = label.chars().count() as u16;
+    // Box width: content + 2 border cols + 2 inner padding, clamped to
+    // the available width.
+    let box_w = (label_w + 4).min(area.width.max(1));
+    let box_h: u16 = 3;
+    if area.height < box_h || area.width < 6 {
+        return;
+    }
+    // Top-right, one cell in from the right edge so it doesn't kiss the
+    // chat border.
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(box_w).saturating_sub(1));
+    let y = area.y;
+    let rect = Rect { x, y, width: box_w, height: box_h };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    let para = Paragraph::new(Line::from(Span::styled(
+        format!(" {label} "),
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+    )))
+    .block(block);
+    f.render_widget(Clear, rect);
+    f.render_widget(para, rect);
 }
 
 fn render_error_footer(f: &mut Frame, area: ratatui::layout::Rect, msg: &str) {

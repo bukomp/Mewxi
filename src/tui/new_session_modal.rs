@@ -16,15 +16,24 @@
 //!    entries. Pressing Enter on the path bar drills into the
 //!    highlighted entry (or spawns when there is no tail to complete).
 //!
-//! Focus rotates Accounts → Recent → PathBar → EntryList (Tab forward,
-//! Shift-Tab backward). The Recent pane lists directories the selected
-//! account has been used in before — pulled from its `projects/`
-//! subtree — so the common case ("spawn another session in a project
-//! I've already worked on") doesn't require typing or browsing. `.`
-//! from any focus confirms and spawns under the currently-resolved
-//! directory.
+//! Focus rotates Accounts → Recent → PathBar → EntryList → Sessions
+//! (Tab forward, Shift-Tab backward; empty panes are skipped). The
+//! Recent pane lists directories the selected account has been used in
+//! before — pulled from its `projects/` subtree — each annotated with
+//! how many sessions are resumable there and how long ago the newest
+//! one ran, so the common case ("re-enter a project I just worked in")
+//! needs no typing or browsing and the user can see at a glance whether
+//! there's anything worth resuming.
+//!
+//! The resume-or-start-fresh decision lives in one place: the Sessions
+//! pane. Its first row is a "+ Start a fresh session" action and the
+//! rows beneath it are the resumable transcripts for the chosen folder,
+//! so the whole choice is a single arrow-and-Enter over one list rather
+//! than two panes with conflicting Enter meanings. `.` from any focus
+//! is the unconditional accelerator: confirm + spawn fresh under the
+//! currently-resolved directory.
 
-use crate::accounts::{self, Account, RecentSession};
+use crate::accounts::{self, Account, RecentProject, RecentSession};
 use crate::tui::text_input::{EditOutcome, TextInput};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -71,8 +80,10 @@ pub struct NewSessionModal {
     /// `entries`).
     entry_idx: usize,
     /// Directories the currently-selected account has spawned sessions
-    /// in before, newest first. Refreshed whenever `account_idx` moves.
-    recent: Vec<PathBuf>,
+    /// in before, newest first, each annotated with its resumable-session
+    /// count and last-activity time. Refreshed whenever `account_idx`
+    /// moves.
+    recent: Vec<RecentProject>,
     recent_idx: usize,
     /// Resumable sessions whose recorded cwd matches `browse_cwd`.
     /// Refreshed whenever `account_idx` or `browse_cwd` changes.
@@ -118,7 +129,7 @@ impl NewSessionModal {
         let path_input = TextInput::from_str(&path_str);
         let recent = accounts
             .get(account_idx)
-            .map(|a| accounts::recent_project_dirs(a, RECENT_LIMIT))
+            .map(|a| accounts::recent_projects(a, RECENT_LIMIT))
             .unwrap_or_default();
         let sessions = accounts
             .get(account_idx)
@@ -156,7 +167,7 @@ impl NewSessionModal {
         self.recent = self
             .accounts
             .get(self.account_idx)
-            .map(|a| accounts::recent_project_dirs(a, RECENT_LIMIT))
+            .map(|a| accounts::recent_projects(a, RECENT_LIMIT))
             .unwrap_or_default();
         self.recent_idx = 0;
         self.refresh_sessions();
@@ -364,9 +375,10 @@ impl NewSessionModal {
                 }
                 KeyCode::Enter => {
                     // Two-step pattern: load the dir into the path bar
-                    // (so the Sessions pane refreshes for that dir), let
-                    // the user choose to resume a session or spawn fresh.
-                    if let Some(dir) = self.recent.get(self.recent_idx).cloned() {
+                    // (so the Sessions pane refreshes for that dir), then
+                    // hand off to the Sessions pane where the user makes
+                    // the resume-or-start-fresh choice from one list.
+                    if let Some(dir) = self.recent.get(self.recent_idx).map(|p| p.dir.clone()) {
                         if dir.is_dir() {
                             self.navigate_to(dir);
                             self.focus = if self.sessions.is_empty() {
@@ -384,7 +396,7 @@ impl NewSessionModal {
                 }
                 KeyCode::Char('.') => {
                     // `.` shortcut: pick + spawn fresh in one go.
-                    if let Some(dir) = self.recent.get(self.recent_idx).cloned() {
+                    if let Some(dir) = self.recent.get(self.recent_idx).map(|p| p.dir.clone()) {
                         if dir.is_dir() {
                             self.navigate_to(dir);
                             return self.confirm_spawn();
@@ -471,6 +483,12 @@ impl NewSessionModal {
                     _ => {}
                 }
             }
+            // The Sessions pane is one list whose first row is a
+            // synthetic "start fresh" action and whose remaining rows are
+            // the resumable transcripts. Index 0 = fresh; index `i` (≥1)
+            // resumes `sessions[i - 1]`. This makes the resume-or-fresh
+            // decision a single arrow-and-Enter choice rather than two
+            // panes with different Enter meanings.
             ModalFocus::Sessions => match k.code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     if self.sessions_idx > 0 {
@@ -478,15 +496,23 @@ impl NewSessionModal {
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if self.sessions_idx + 1 < self.sessions.len() {
+                    // Max index is `sessions.len()` (the fresh row adds one
+                    // slot at the front, so the last session sits there).
+                    if self.sessions_idx < self.sessions.len() {
                         self.sessions_idx += 1;
                     }
                 }
-                KeyCode::Enter | KeyCode::Char('.') => {
-                    if let Some(s) = self.sessions.get(self.sessions_idx).cloned() {
+                KeyCode::Enter => {
+                    if self.sessions_idx == 0 {
+                        return self.confirm_spawn();
+                    }
+                    if let Some(s) = self.sessions.get(self.sessions_idx - 1).cloned() {
                         return self.confirm_spawn_with(Some(s.session_id));
                     }
                 }
+                // `.` keeps its global meaning everywhere: spawn fresh in
+                // the resolved dir, regardless of which row is highlighted.
+                KeyCode::Char('.') => return self.confirm_spawn(),
                 _ => {}
             },
         }
@@ -499,7 +525,7 @@ impl NewSessionModal {
 
         let outer = Block::default()
             .borders(Borders::ALL)
-            .title(" New session — Tab cycles · . spawn fresh · Enter on Sessions = resume · Esc cancel ")
+            .title(" New session — Tab cycles panes · Enter selects · . spawn fresh now · Esc cancel ")
             .border_style(Style::default().fg(Color::Magenta));
         let inner = outer.inner(modal_area);
         f.render_widget(outer, modal_area);
@@ -569,7 +595,9 @@ impl NewSessionModal {
         } else {
             0
         };
+        let now = std::time::SystemTime::now();
         let home = dirs::home_dir();
+        let inner_w = inner.width as usize;
         let items: Vec<ListItem> = self
             .recent
             .iter()
@@ -578,15 +606,39 @@ impl NewSessionModal {
             .take(visible_rows.max(1))
             .map(|(i, p)| {
                 let selected = focused && i == self.recent_idx;
-                let label = display_recent(p, home.as_deref());
                 let mut style = Style::default().fg(Color::White);
+                let mut meta_style = Style::default().fg(Color::Gray);
                 if selected {
                     style = style.add_modifier(Modifier::BOLD).bg(Color::DarkGray);
+                    meta_style = meta_style.bg(Color::DarkGray);
                 }
                 let arrow = if selected { "▶ " } else { "  " };
+                let label = display_recent(&p.dir, home.as_deref());
+                // Per-folder resume hint: how many sessions are waiting
+                // here and how fresh the newest one is — so the user can
+                // judge "is there something to resume?" without entering.
+                let meta = format!(
+                    "{} session{} · {}",
+                    p.session_count,
+                    if p.session_count == 1 { "" } else { "s" },
+                    format_age(now, p.latest_mtime),
+                );
+                // Lay the row out as `[arrow][path] … [meta]` with the
+                // meta hugging the right edge. The path is head-ellipsized
+                // (its leaf dir is the most identifying part) when the row
+                // is too narrow to hold both.
+                let avail = inner_w.saturating_sub(2); // minus the arrow
+                let meta_w = meta.chars().count();
+                let label_budget = avail.saturating_sub(meta_w + 2);
+                let label_disp = ellipsize_start(&label, label_budget);
+                let pad = avail
+                    .saturating_sub(label_disp.chars().count() + meta_w)
+                    .max(1);
                 ListItem::new(Line::from(vec![
                     Span::styled(arrow, style),
-                    Span::styled(label, style),
+                    Span::styled(label_disp, style),
+                    Span::styled(" ".repeat(pad), meta_style),
+                    Span::styled(meta, meta_style),
                 ]))
             })
             .collect();
@@ -595,8 +647,9 @@ impl NewSessionModal {
 
     fn render_sessions_pane(&self, f: &mut Frame, area: Rect) {
         let title = format!(
-            " Sessions — {} resumable ",
-            self.sessions.len()
+            " Resume — {} session{} ",
+            self.sessions.len(),
+            if self.sessions.len() == 1 { "" } else { "s" }
         );
         let block = Block::default()
             .borders(Borders::ALL)
@@ -605,10 +658,13 @@ impl NewSessionModal {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
+        // No history here: there's no resume-or-fresh choice to make, so
+        // this pane isn't even a focus stop (see `cycle_focus`). Confirming
+        // from the path bar just starts fresh — say so.
         if self.sessions.is_empty() {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "(no resumable sessions in this folder)",
+                    "(no sessions here — Enter starts fresh)",
                     Style::default().fg(Color::DarkGray),
                 ))),
                 inner,
@@ -616,22 +672,37 @@ impl NewSessionModal {
             return;
         }
 
-        let visible_rows = inner.height as usize;
         let focused = self.focus == ModalFocus::Sessions;
+        // Combined list: row 0 is the "start fresh" action; rows 1.. are
+        // the resumable transcripts (`sessions[idx - 1]`).
+        let total = self.sessions.len() + 1;
+        let visible_rows = inner.height as usize;
         let offset = if focused {
             self.sessions_idx.saturating_sub(visible_rows.saturating_sub(1))
         } else {
             0
         };
         let now = std::time::SystemTime::now();
-        let items: Vec<ListItem> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .skip(offset)
+        let items: Vec<ListItem> = (offset..total)
             .take(visible_rows.max(1))
-            .map(|(i, s)| {
-                let selected = focused && i == self.sessions_idx;
+            .map(|idx| {
+                let selected = focused && idx == self.sessions_idx;
+                let arrow = if selected { "▶ " } else { "  " };
+                if idx == 0 {
+                    // The fresh-start action, coloured green so it reads as
+                    // "new" and stands apart from the resume rows below.
+                    let mut style = Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD);
+                    if selected {
+                        style = style.bg(Color::DarkGray);
+                    }
+                    return ListItem::new(Line::from(vec![
+                        Span::styled(arrow, style),
+                        Span::styled("+ Start a fresh session", style),
+                    ]));
+                }
+                let s = &self.sessions[idx - 1];
                 let age = format_age(now, s.mtime);
                 let mut head_style = Style::default().fg(Color::White);
                 let meta_style = Style::default().fg(Color::DarkGray);
@@ -639,7 +710,6 @@ impl NewSessionModal {
                 if selected {
                     head_style = head_style.add_modifier(Modifier::BOLD).bg(Color::DarkGray);
                 }
-                let arrow = if selected { "▶ " } else { "  " };
                 let mut spans = vec![
                     Span::styled(arrow, head_style),
                     Span::styled(age, head_style),
@@ -922,6 +992,22 @@ fn display_recent(p: &Path, home: Option<&Path>) -> String {
         }
     }
     p.display().to_string()
+}
+
+/// Truncate `s` to at most `max` characters, keeping the *tail* and
+/// prefixing `…` when it doesn't fit. For a path the tail (its leaf
+/// directory) is the most identifying part, so we drop from the front
+/// rather than the end.
+fn ellipsize_start(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let tail: String = chars[chars.len() - (max - 1)..].iter().collect();
+    format!("…{tail}")
 }
 
 /// Human-readable "N{s,m,h,d} ago" string. Clamps to "just now" when

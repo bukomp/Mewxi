@@ -52,6 +52,34 @@ impl ChatSelection {
     }
 }
 
+/// A code block currently visible in the chat log, projected onto
+/// terminal-screen rows so the run loop can map a mouse click to it.
+/// `top`/`bottom` are inclusive screen rows (the same frame crossterm's
+/// mouse events use); `source` is the verbatim, untruncated code to drop
+/// on the clipboard as one chunk. Only blocks with at least one on-screen
+/// row are emitted.
+#[derive(Clone, Debug)]
+pub struct CodeBlockRegion {
+    pub top: u16,
+    pub bottom: u16,
+    pub source: String,
+}
+
+/// A click-to-copy span in the right-hand Detail pane, projected onto
+/// terminal-screen rows so the run loop can map a click to it. Today
+/// these are the individual parts of a Bash command (each pipeline /
+/// list segment split at `&&`, `||`, `|`, `;`): clicking one drops just
+/// that part's runnable text on the clipboard. `top`/`bottom` are
+/// inclusive screen rows (the same frame crossterm's mouse events use);
+/// `source` is the verbatim, unwrapped command part. Only parts with at
+/// least one on-screen row are emitted.
+#[derive(Clone, Debug)]
+pub struct DetailCopyRegion {
+    pub top: u16,
+    pub bottom: u16,
+    pub source: String,
+}
+
 /// Driver pane state passed in from [`super::run_loop`] when the
 /// currently-pinned session is one mewxi spawned and owns the PTY for.
 /// `None` means the session is just being observed; the input row is
@@ -88,6 +116,7 @@ pub struct PendingPane {
     pub last_output: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     area: Rect,
@@ -103,6 +132,9 @@ pub fn render(
     chat_selection: Option<ChatSelection>,
     chat_inner_out: &mut Option<Rect>,
     chat_visible_out: &mut Vec<String>,
+    chat_code_blocks_out: &mut Vec<CodeBlockRegion>,
+    detail_copy_out: &mut Vec<DetailCopyRegion>,
+    mouse_pos: Option<(u16, u16)>,
     driver: Option<&mut DriverPane<'_>>,
     pending: Option<&PendingPane>,
 ) {
@@ -132,6 +164,7 @@ pub fn render(
         // 3-row input pane: borders + one row of text.
         constraints.push(Constraint::Length(3));
     }
+    constraints.push(Constraint::Length(1)); // empty line above footer
     constraints.push(Constraint::Length(1)); // keybind footer
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -170,6 +203,9 @@ pub fn render(
         chat_selection,
         chat_inner_out,
         chat_visible_out,
+        chat_code_blocks_out,
+        detail_copy_out,
+        mouse_pos,
     );
     let default_hint =
         "↑/↓ Tab switch · PgUp/PgDn chat · j/k actions · J/K detail · Del kill · Esc back";
@@ -186,9 +222,9 @@ pub fn render(
     };
     if let Some(d) = driver {
         render_driver_input(f, rows[5], d);
-        widgets::render_footer(f, rows[6], "2", footer_hint);
+        widgets::render_footer(f, rows[7], "2", footer_hint);
     } else {
-        widgets::render_footer(f, rows[5], "2", footer_hint);
+        widgets::render_footer(f, rows[6], "2", footer_hint);
     }
 }
 
@@ -934,6 +970,39 @@ fn apply_selection_highlight(
     }
 }
 
+/// Paint a subtle background across visible rows `[lo, hi)` to mark the
+/// code block under the mouse as clickable. Fills spans that don't
+/// already carry a background (so the user-message tint and any other
+/// explicit bg win), then pads each row out to `row_w` so the highlight
+/// reads as a clean rectangular band rather than tracing the ragged
+/// right edge of the code.
+fn apply_code_hover(visible: &mut [Line<'static>], lo: usize, hi: usize, row_w: usize) {
+    // A touch lighter than the default terminal background — enough to
+    // read as "this block is live" without competing with the text.
+    const HOVER_BG: Color = Color::Indexed(236);
+    for line in visible.iter_mut().take(hi).skip(lo) {
+        let used: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        let mut spans: Vec<Span<'static>> = std::mem::take(&mut line.spans)
+            .into_iter()
+            .map(|mut s| {
+                if s.style.bg.is_none() {
+                    s.style = s.style.bg(HOVER_BG);
+                }
+                s
+            })
+            .collect();
+        if used < row_w {
+            spans.push(Span::styled(
+                " ".repeat(row_w - used),
+                Style::default().bg(HOVER_BG),
+            ));
+        }
+        let mut new_line = Line::from(spans);
+        new_line.alignment = line.alignment;
+        *line = new_line;
+    }
+}
+
 fn highlight_line(line: &Line<'static>, col_lo: usize, col_hi: usize) -> Line<'static> {
     let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
     let mut col = 0usize;
@@ -987,6 +1056,9 @@ fn render_chat_log(
     chat_selection: Option<ChatSelection>,
     chat_inner_out: &mut Option<Rect>,
     chat_visible_out: &mut Vec<String>,
+    chat_code_blocks_out: &mut Vec<CodeBlockRegion>,
+    detail_copy_out: &mut Vec<DetailCopyRegion>,
+    mouse_pos: Option<(u16, u16)>,
 ) {
     let entries = chat_log::read(&s.transcript_path);
 
@@ -1013,9 +1085,17 @@ fn render_chat_log(
     // action in the right pane can be visually echoed in the chat log.
     let mut all: Vec<Line<'static>> = Vec::with_capacity(entries.len() * 2);
     let mut action_line_ranges: Vec<(usize, usize)> = Vec::new();
+    // Code blocks across the whole buffer, as (start, end exclusive,
+    // source) in absolute `all` indices. Projected to screen rows once
+    // the visible window is known so a click can map to its source.
+    let mut code_blocks_abs: Vec<(usize, usize, String)> = Vec::new();
     for e in &entries {
         let start = all.len();
-        all.extend(entry_to_lines(e, body_w, &s.cwd));
+        let (lines, blocks) = entry_to_lines(e, body_w, &s.cwd);
+        all.extend(lines);
+        for b in blocks {
+            code_blocks_abs.push((start + b.start, start + b.end, b.source));
+        }
         if matches!(e.kind, EntryKind::ToolUse { .. }) {
             action_line_ranges.push((start, all.len()));
         }
@@ -1153,6 +1233,11 @@ fn render_chat_log(
 
     *chat_inner_out = Some(inner);
     chat_visible_out.clear();
+    chat_code_blocks_out.clear();
+    // Cleared here (not in render_changes_detail) so the narrow layout —
+    // which never renders the Detail pane — leaves no stale regions for
+    // the click handler to match against.
+    detail_copy_out.clear();
     if entries.is_empty() {
         let hint = Paragraph::new(Line::from(Span::styled(
             "no chat content yet — waiting for transcript",
@@ -1162,6 +1247,42 @@ fn render_chat_log(
     } else {
         let end = total.saturating_sub(clamped);
         let start = end.saturating_sub(target_h);
+        // Is the cursor hovering inside the chat pane's horizontal band?
+        // (Used to decide whether a code block should light up.)
+        let hover_in_band = mouse_pos.is_some_and(|(c, _)| {
+            c >= inner.x && c < inner.x.saturating_add(inner.width)
+        });
+        // Visible-row range (relative to `visible`, end exclusive) of the
+        // code block under the cursor, if any — gets a subtle highlight.
+        let mut hover_rows: Option<(usize, usize)> = None;
+        // Project each code block onto the visible window's screen rows.
+        // A block straddling the top/bottom edge is clipped to whatever
+        // rows are on screen — clicking any visible row still copies the
+        // whole (untruncated) source. Rows outside [start, end) are not
+        // clickable this frame.
+        for (bs, be, source) in &code_blocks_abs {
+            let vis_start = (*bs).max(start);
+            let vis_end = (*be).min(end);
+            if vis_end <= vis_start {
+                continue;
+            }
+            let top = inner.y.saturating_add((vis_start - start) as u16);
+            let bottom = inner
+                .y
+                .saturating_add((vis_end - start - 1) as u16);
+            if hover_in_band {
+                if let Some((_, r)) = mouse_pos {
+                    if r >= top && r <= bottom {
+                        hover_rows = Some((vis_start - start, vis_end - start));
+                    }
+                }
+            }
+            chat_code_blocks_out.push(CodeBlockRegion {
+                top,
+                bottom,
+                source: source.clone(),
+            });
+        }
         let mut visible: Vec<Line<'static>> = all[start..end].to_vec();
         // Stash plain text for each visible row (one entry per row)
         // so the parent can extract selected text without re-walking
@@ -1172,6 +1293,12 @@ fn render_chat_log(
                 s.push_str(&span.content);
             }
             chat_visible_out.push(s);
+        }
+        // Subtle hover fill on the code block under the cursor — a hint
+        // that it's clickable to copy. Applied before the selection
+        // highlight so an active drag-selection still reads on top.
+        if let Some((lo, hi)) = hover_rows {
+            apply_code_hover(&mut visible, lo, hi, inner.width as usize);
         }
         if let Some(sel) = chat_selection {
             apply_selection_highlight(&mut visible, inner, sel);
@@ -1217,7 +1344,16 @@ fn render_chat_log(
         *actions_rect = Some(panel_rows[0]);
         *detail_rect = Some(panel_rows[1]);
         render_changes_list(f, panel_rows[0], &rows, resolved, &s.cwd);
-        render_changes_detail(f, panel_rows[1], &rows, resolved, detail_scroll, &s.cwd);
+        render_changes_detail(
+            f,
+            panel_rows[1],
+            &rows,
+            resolved,
+            detail_scroll,
+            &s.cwd,
+            detail_copy_out,
+            mouse_pos,
+        );
         render_tasks_panel(f, outer_rows[1], &tasks);
     } else {
         *last_change_count = 0;
@@ -1411,6 +1547,7 @@ fn render_changes_list(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_changes_detail(
     f: &mut Frame,
     area: Rect,
@@ -1418,6 +1555,8 @@ fn render_changes_detail(
     selection: usize,
     detail_scroll: &mut usize,
     cwd: &Path,
+    detail_copy_out: &mut Vec<DetailCopyRegion>,
+    mouse_pos: Option<(u16, u16)>,
 ) {
     let Some(row) = rows.get(selection) else {
         let block = Block::default().borders(Borders::ALL).title("Detail");
@@ -1433,7 +1572,10 @@ fn render_changes_detail(
     let inner_w = area.width.saturating_sub(2) as usize;
     let inner_h = area.height.saturating_sub(2) as usize;
     let width = inner_w;
-    let mut lines = format_tool_detail(&row.name, &row.input, width, cwd);
+    // `parts` are click-to-copy command segments, in `lines` row indices
+    // (only the head of the buffer — the output appended below never
+    // contains parts).
+    let (mut lines, parts) = format_tool_detail(&row.name, &row.input, width, cwd);
 
     // Append the actual command/tool output below the input. For a
     // Bash row this is stdout/stderr; for Read it's the file content
@@ -1493,12 +1635,16 @@ fn render_changes_detail(
     } else {
         format!("Detail · {}{}", row.name, status)
     };
-    let hint = Line::from(vec![
-        Span::raw(" "),
-        Span::styled("J/K", Style::default().fg(Color::Yellow)),
-        Span::styled(" scroll ", Style::default().fg(Color::DarkGray)),
-    ])
-    .alignment(Alignment::Right);
+    // Advertise click-to-copy only when there are parts to copy (Bash
+    // rows); other tools just get the scroll hint.
+    let mut hint_spans = vec![Span::raw(" ")];
+    if !parts.is_empty() {
+        hint_spans.push(Span::styled("click", Style::default().fg(Color::Yellow)));
+        hint_spans.push(Span::styled(" copy · ", Style::default().fg(Color::DarkGray)));
+    }
+    hint_spans.push(Span::styled("J/K", Style::default().fg(Color::Yellow)));
+    hint_spans.push(Span::styled(" scroll ", Style::default().fg(Color::DarkGray)));
+    let hint = Line::from(hint_spans).alignment(Alignment::Right);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -1506,19 +1652,60 @@ fn render_changes_detail(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let visible: Vec<Line<'static>> = lines.drain(start..end).collect();
+    // Project each command part onto the visible window's screen rows so
+    // the run loop can map a click back to its source. A part straddling
+    // a scroll edge is clipped to whatever rows are on screen — clicking
+    // any visible row still copies the whole (unwrapped) part. Parts that
+    // scrolled fully out of view (e.g. into the output section) emit no
+    // region this frame.
+    let hover_in_band = mouse_pos
+        .is_some_and(|(c, _)| c >= inner.x && c < inner.x.saturating_add(inner.width));
+    let mut hover_rows: Option<(usize, usize)> = None;
+    for (ps, pe, source) in &parts {
+        let vis_start = (*ps).max(start);
+        let vis_end = (*pe).min(end);
+        if vis_end <= vis_start {
+            continue;
+        }
+        let top = inner.y.saturating_add((vis_start - start) as u16);
+        let bottom = inner.y.saturating_add((vis_end - start - 1) as u16);
+        if hover_in_band {
+            if let Some((_, r)) = mouse_pos {
+                if r >= top && r <= bottom {
+                    hover_rows = Some((vis_start - start, vis_end - start));
+                }
+            }
+        }
+        detail_copy_out.push(DetailCopyRegion {
+            top,
+            bottom,
+            source: source.clone(),
+        });
+    }
+
+    let mut visible: Vec<Line<'static>> = lines.drain(start..end).collect();
+    // Subtle hover fill on the command part under the cursor — a hint
+    // that it's clickable to copy, mirroring the chat-log code blocks.
+    if let Some((lo, hi)) = hover_rows {
+        apply_code_hover(&mut visible, lo, hi, inner.width as usize);
+    }
     f.render_widget(Paragraph::new(visible), inner);
 }
 
+/// Render a tool's `input` to styled detail lines. Also returns the
+/// click-to-copy parts the lines contain (in `out`'s row indices) —
+/// currently the segments of a Bash `command`; empty for every other
+/// tool.
 fn format_tool_detail(
     name: &str,
     input: &Value,
     width: usize,
     cwd: &Path,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<(usize, usize, String)>) {
     let lower = name.to_ascii_lowercase();
     let body_w = width.max(10);
     let mut out: Vec<Line<'static>> = Vec::new();
+    let mut parts: Vec<(usize, usize, String)> = Vec::new();
     let str_field = |v: &Value, key: &str| -> Option<String> {
         v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
     };
@@ -1538,7 +1725,7 @@ fn format_tool_detail(
                 out.push(Line::raw(""));
             }
             if let Some(cmd) = str_field(input, "command") {
-                push_bash_command(&mut out, &cmd, body_w);
+                parts = push_bash_command(&mut out, &cmd, body_w);
             } else {
                 push_pretty_json(&mut out, input, body_w);
             }
@@ -1603,7 +1790,7 @@ fn format_tool_detail(
             push_pretty_json(&mut out, input, body_w);
         }
     }
-    out
+    (out, parts)
 }
 
 /// If `p` is an absolute path inside `cwd`, return the path relative
@@ -1665,11 +1852,22 @@ fn push_plain(out: &mut Vec<Line<'static>>, text: &str, width: usize, style: Sty
 /// rendered in magenta. Wrapping is honored on the first wrapped
 /// sub-line only — continuation lines stay plain so the highlight
 /// always reflects the actual start of a command.
-fn push_bash_command(out: &mut Vec<Line<'static>>, cmd: &str, width: usize) {
+///
+/// Returns one `(start, end_exclusive, source)` per command part, with
+/// the row range (in `out`'s indices, spanning every wrapped sub-line
+/// of the part) and the verbatim *unwrapped* part text (no leading
+/// separator), so the caller can make each part individually
+/// click-to-copy.
+fn push_bash_command(
+    out: &mut Vec<Line<'static>>,
+    cmd: &str,
+    width: usize,
+) -> Vec<(usize, usize, String)> {
     let exec_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let sep_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
     let normal = Style::default().fg(Color::White);
 
+    let mut parts: Vec<(usize, usize, String)> = Vec::new();
     for raw in cmd.split('\n') {
         if raw.is_empty() {
             out.push(Line::raw(""));
@@ -1679,11 +1877,16 @@ fn push_bash_command(out: &mut Vec<Line<'static>>, cmd: &str, width: usize) {
         // separators (`&&`, `||`, `|`, `;`) so each action sits on
         // its own line with the separator leading the next line.
         for (idx, (sep, body)) in split_bash_by_separators(raw).into_iter().enumerate() {
+            // The copyable source is the bare part body (already
+            // trimmed by the splitter), without the leading separator —
+            // so pasting it yields a runnable command on its own.
+            let source = body.clone();
             let line_text = match (idx, sep) {
                 (0, _) => body,
                 (_, Some(s)) => format!(" {s} {body}"),
                 (_, None) => body,
             };
+            let part_start = out.len();
             let wrapped = wrap_text(&line_text, width);
             if wrapped.is_empty() {
                 out.push(Line::raw(""));
@@ -1697,8 +1900,12 @@ fn push_bash_command(out: &mut Vec<Line<'static>>, cmd: &str, width: usize) {
             for cont in &wrapped[1..] {
                 out.push(Line::from(Span::styled(cont.clone(), normal)));
             }
+            if !source.is_empty() {
+                parts.push((part_start, out.len(), source));
+            }
         }
     }
+    parts
 }
 
 /// Split a one-line bash command into segments at top-level shell
@@ -1855,52 +2062,79 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-fn entry_to_lines(e: &ChatEntry, body_w: usize, _cwd: &Path) -> Vec<Line<'static>> {
+/// Render one chat entry to styled lines, plus any code blocks it
+/// contains with their ranges *relative to the returned `Vec<Line>`*
+/// (end exclusive). The caller offsets these by the entry's start in
+/// the full buffer. Only User/Assistant/Thinking bodies pass through
+/// the markdown renderer, so only those can carry code blocks.
+fn entry_to_lines(
+    e: &ChatEntry,
+    body_w: usize,
+    _cwd: &Path,
+) -> (Vec<Line<'static>>, Vec<markdown::CodeSpan>) {
     match &e.kind {
         EntryKind::User => {
             let bg = Color::Indexed(237);
+            let (md, blocks) = markdown::render_with_blocks(
+                &e.text,
+                body_w,
+                Style::default().fg(Color::White).bg(bg),
+            );
             let lines = build_lines_md(
                 "you      ",
                 Style::default()
                     .fg(Color::Cyan)
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
-                markdown::render(
-                    &e.text,
-                    body_w,
-                    Style::default().fg(Color::White).bg(bg),
-                ),
+                md,
             );
-            highlight_user_lines(lines, body_w + LABEL_W, bg)
+            // `highlight_user_lines` bookends the block with one blank
+            // spacer row at the top, shifting every code-block index by
+            // one. `build_lines_md` is 1:1 (only mutates spans), so no
+            // shift before that.
+            let lines = highlight_user_lines(lines, body_w + LABEL_W, bg);
+            let blocks = shift_blocks(blocks, 1);
+            (lines, blocks)
         }
-        EntryKind::Assistant => build_lines_md(
-            "claude   ",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            markdown::render(
+        EntryKind::Assistant => {
+            let (md, blocks) = markdown::render_with_blocks(
                 &e.text,
                 body_w,
                 Style::default().fg(Color::White),
-            ),
-        ),
-        EntryKind::Thinking => build_lines_md(
-            "thinking ",
-            Style::default().fg(Color::Magenta),
-            markdown::render(
+            );
+            let lines = build_lines_md(
+                "claude   ",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                md,
+            );
+            (lines, blocks)
+        }
+        EntryKind::Thinking => {
+            let (md, blocks) = markdown::render_with_blocks(
                 &e.text,
                 body_w,
                 Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
-            ),
-        ),
+            );
+            let lines = build_lines_md(
+                "thinking ",
+                Style::default().fg(Color::Magenta),
+                md,
+            );
+            (lines, blocks)
+        }
         EntryKind::ToolUse { name, .. } => {
             // Heavy dim — readable marginalia next to user/assistant
             // turns. Full input/diff/output lives in the Actions pane.
             let style = Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM);
-            vec![Line::from(vec![
-                Span::styled("· ".to_string(), style),
-                Span::styled(name.clone(), style),
-            ])]
+            (
+                vec![Line::from(vec![
+                    Span::styled("· ".to_string(), style),
+                    Span::styled(name.clone(), style),
+                ])],
+                Vec::new(),
+            )
         }
         EntryKind::ToolResult { ok } => {
             let (text, color) = if *ok {
@@ -1909,19 +2143,39 @@ fn entry_to_lines(e: &ChatEntry, body_w: usize, _cwd: &Path) -> Vec<Line<'static
                 ("↳ error", Color::Red)
             };
             let style = Style::default().fg(color).add_modifier(Modifier::DIM);
-            vec![Line::from(vec![
-                Span::raw("  "),
-                Span::styled(text.to_string(), style),
-            ])]
+            (
+                vec![Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(text.to_string(), style),
+                ])],
+                Vec::new(),
+            )
         }
-        EntryKind::System => build_lines(
-            "system   ",
-            Style::default().fg(Color::DarkGray),
-            Style::default().fg(Color::DarkGray),
-            &e.text,
-            body_w,
+        EntryKind::System => (
+            build_lines(
+                "system   ",
+                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::DarkGray),
+                &e.text,
+                body_w,
+            ),
+            Vec::new(),
         ),
     }
+}
+
+/// Offset every code-block span by `by` rows. Used when a line-buffer
+/// transform (e.g. the user-message highlight's leading spacer) inserts
+/// rows ahead of the markdown body.
+fn shift_blocks(blocks: Vec<markdown::CodeSpan>, by: usize) -> Vec<markdown::CodeSpan> {
+    blocks
+        .into_iter()
+        .map(|mut b| {
+            b.start += by;
+            b.end += by;
+            b
+        })
+        .collect()
 }
 
 /// Like `build_lines`, but the body is a pre-rendered markdown block
@@ -2160,5 +2414,52 @@ mod tests {
     fn case_insensitive() {
         assert!(models_match("Haiku", "claude-haiku-4-5"));
         assert!(models_match("haiku", "CLAUDE-HAIKU-4-5"));
+    }
+
+    // --- Detail-pane click-to-copy command parts ---
+    //
+    // The Detail pane makes each Bash command segment individually
+    // copyable; these lock the `(start, end, source)` ranges the click
+    // handler maps a click to. `source` must be the bare, runnable part
+    // (no leading separator); the range must cover every rendered line
+    // of the part (including wrapped continuations) and stay in bounds.
+
+    #[test]
+    fn bash_parts_split_at_separators() {
+        let mut out = Vec::new();
+        // Wide width → no wrapping, so one line per segment.
+        let parts = super::push_bash_command(&mut out, "cd /foo && npm test | tee log", 200);
+        let sources: Vec<&str> = parts.iter().map(|(_, _, s)| s.as_str()).collect();
+        assert_eq!(sources, vec!["cd /foo", "npm test", "tee log"]);
+        // Ranges are contiguous, non-empty, and within the rendered buffer.
+        assert_eq!(parts.first().map(|p| p.0), Some(0));
+        for (start, end, _) in &parts {
+            assert!(end > start, "part range must be non-empty");
+            assert!(*end <= out.len(), "part range must stay in bounds");
+        }
+    }
+
+    #[test]
+    fn bash_single_command_is_one_part() {
+        let mut out = Vec::new();
+        let parts = super::push_bash_command(&mut out, "git status", 200);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].2, "git status");
+        assert_eq!(parts[0].0, 0);
+        assert_eq!(parts[0].1, out.len());
+    }
+
+    #[test]
+    fn bash_part_range_spans_wrapped_lines() {
+        let mut out = Vec::new();
+        // Narrow width forces this single (separator-free) command to
+        // wrap across several lines; the part must span all of them and
+        // still copy the full unwrapped text.
+        let cmd = "echo aaaa bbbb cccc dddd";
+        let parts = super::push_bash_command(&mut out, cmd, 10);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].2, cmd);
+        assert!(parts[0].1 - parts[0].0 > 1, "wrapped part should span >1 line");
+        assert_eq!(parts[0].1, out.len());
     }
 }

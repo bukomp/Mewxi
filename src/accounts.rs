@@ -262,6 +262,53 @@ pub fn set_default_effort(account: &Account, level: &str) -> Result<()> {
     Ok(())
 }
 
+/// Persist `slug` as the `model` field of this account's
+/// `<dir>/settings.json` (claude's standard startup override). The
+/// special slug `default` instead *removes* the field, restoring
+/// claude's built-in default — mirroring the picker's "Default
+/// (recommended)" row. Creates the file (and `<dir>`) if missing,
+/// preserves any other keys, and writes atomically via tempfile +
+/// rename. Always targets `settings.json`, never `settings.local.json`
+/// (per-machine-only), for the same reason as [`set_default_effort`].
+pub fn set_default_model(account: &Account, slug: &str) -> Result<()> {
+    let path = account.dir.join("settings.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut root: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("read {}", path.display()))?;
+        if raw.trim().is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str(&raw)
+                .with_context(|| format!("parse {}", path.display()))?
+        }
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("{} is not a JSON object", path.display()))?;
+    if slug == "default" {
+        obj.remove("model");
+    } else {
+        obj.insert(
+            "model".to_string(),
+            serde_json::Value::String(slug.to_string()),
+        );
+    }
+    let out = serde_json::to_string_pretty(&root)
+        .with_context(|| format!("serialize {}", path.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, out)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename into {}", path.display()))?;
+    Ok(())
+}
+
 /// On-disk shape of `~/.config/mewxi/accounts.toml`.
 #[derive(Debug, Deserialize, Default)]
 #[allow(dead_code)]
@@ -442,21 +489,40 @@ pub fn load_accounts() -> Result<AccountsView> {
     })
 }
 
-/// Directories this account has been used in before, newest first.
+/// A directory the account has worked in before, annotated with how
+/// many resumable transcripts live under it and when the newest was
+/// last touched. Powers the new-session modal's Recent pane so the
+/// "do I want to resume something here?" question can be answered at a
+/// glance, before drilling into the folder.
+#[derive(Clone, Debug)]
+pub struct RecentProject {
+    /// The working directory (recovered from the transcript's `cwd`).
+    pub dir: PathBuf,
+    /// Number of `.jsonl` transcripts under this project dir — i.e. how
+    /// many sessions are resumable here.
+    pub session_count: usize,
+    /// Modification time of the newest transcript in the folder.
+    pub latest_mtime: std::time::SystemTime,
+}
+
+/// Directories this account has been used in before, newest first,
+/// each annotated with its resumable-session count and latest activity.
 ///
 /// Discovers history by scanning `<account.dir>/projects/<encoded>/*.jsonl`.
 /// Claude Code's `projects/<encoded>` dir-name encoding is lossy
 /// (it flattens `/`, `_`, and `.` all to `-`), so we recover the real
 /// cwd by parsing one record out of each project's transcripts —
-/// every record carries the unescaped `cwd` field. Sorted by the
-/// newest JSONL mtime per project, dedup'd by canonical path, capped
-/// at `limit`.
-pub fn recent_project_dirs(account: &Account, limit: usize) -> Vec<PathBuf> {
+/// every record carries the unescaped `cwd` field. The session count
+/// is the cheap `.jsonl` file tally we already walk, so this is no more
+/// expensive than reading the dirs alone. Sorted by the newest JSONL
+/// mtime per project, dedup'd by canonical path, capped at `limit`.
+pub fn recent_projects(account: &Account, limit: usize) -> Vec<RecentProject> {
     let projects = account.projects_dir();
     let Ok(entries) = std::fs::read_dir(&projects) else {
         return Vec::new();
     };
-    let mut found: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    // (cwd, newest mtime, transcript count) per encoded project dir.
+    let mut found: Vec<(PathBuf, std::time::SystemTime, usize)> = Vec::new();
     for entry in entries.flatten() {
         let dir = entry.path();
         if !dir.is_dir() {
@@ -464,11 +530,13 @@ pub fn recent_project_dirs(account: &Account, limit: usize) -> Vec<PathBuf> {
         }
         let Ok(files) = std::fs::read_dir(&dir) else { continue };
         let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
+        let mut count = 0usize;
         for f in files.flatten() {
             let p = f.path();
             if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
+            count += 1;
             let Ok(meta) = f.metadata() else { continue };
             let Ok(mt) = meta.modified() else { continue };
             if newest.as_ref().is_none_or(|(_, t)| mt > *t) {
@@ -477,18 +545,22 @@ pub fn recent_project_dirs(account: &Account, limit: usize) -> Vec<PathBuf> {
         }
         let Some((jsonl, mtime)) = newest else { continue };
         let Some((cwd, _)) = read_cwd_and_preview(&jsonl) else { continue };
-        found.push((cwd, mtime));
+        found.push((cwd, mtime, count));
     }
     found.sort_by(|a, b| b.1.cmp(&a.1));
-    let mut out: Vec<PathBuf> = Vec::with_capacity(found.len().min(limit));
+    let mut out: Vec<RecentProject> = Vec::with_capacity(found.len().min(limit));
     let mut seen: Vec<PathBuf> = Vec::new();
-    for (cwd, _) in found {
+    for (cwd, mtime, count) in found {
         let key = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
         if seen.iter().any(|p| p == &key) {
             continue;
         }
         seen.push(key);
-        out.push(cwd);
+        out.push(RecentProject {
+            dir: cwd,
+            session_count: count,
+            latest_mtime: mtime,
+        });
         if out.len() >= limit {
             break;
         }

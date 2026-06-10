@@ -20,12 +20,43 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+/// A fenced/indented code block located within the rendered line
+/// buffer. `start`/`end` index the returned `Vec<Line>` (end exclusive)
+/// and cover the whole visual block — the `─ lang ─` header rule, every
+/// gutter (`┃ `) body row, and the closing rule. `source` is the
+/// verbatim, *untruncated* code so click-to-copy hands the user exactly
+/// what they could paste into a terminal, not the width-clipped render.
+#[derive(Clone, Debug)]
+pub struct CodeSpan {
+    pub start: usize,
+    pub end: usize,
+    pub source: String,
+}
+
 /// Render `text` (markdown source) to ratatui lines, wrapping inline
 /// content to `width` columns. `base_style` applies to plain prose;
-/// inline emphasis and block constructs layer on top of it.
+/// inline emphasis and block constructs layer on top of it. Thin
+/// blocks-discarding wrapper over [`render_with_blocks`]; retained as
+/// the simple entry point (used by tests and any caller that doesn't
+/// need code-block spans).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render(text: &str, width: usize, base_style: Style) -> Vec<Line<'static>> {
+    render_with_blocks(text, width, base_style).0
+}
+
+/// Like [`render`], but also returns the [`CodeSpan`]s for every code
+/// block, so callers can map a click to the block under it and copy its
+/// untruncated source.
+pub fn render_with_blocks(
+    text: &str,
+    width: usize,
+    base_style: Style,
+) -> (Vec<Line<'static>>, Vec<CodeSpan>) {
     if width == 0 || text.trim().is_empty() {
-        return vec![Line::from(Span::styled(text.to_string(), base_style))];
+        return (
+            vec![Line::from(Span::styled(text.to_string(), base_style))],
+            Vec::new(),
+        );
     }
     let mut r = Renderer::new(width, base_style);
     let mut opts = Options::empty();
@@ -35,7 +66,7 @@ pub fn render(text: &str, width: usize, base_style: Style) -> Vec<Line<'static>>
     for ev in Parser::new_ext(text, opts) {
         r.event(ev);
     }
-    r.finish()
+    r.finish_with_blocks()
 }
 
 struct PrefixFrame {
@@ -65,6 +96,7 @@ struct Renderer {
     list_stack: Vec<Option<u64>>, // None = bullet, Some(n) = next ordered counter
     code_block: Option<String>,
     code_buf: String,
+    code_blocks: Vec<CodeSpan>,
 
     body_started: bool,
 
@@ -98,6 +130,7 @@ impl Renderer {
             list_stack: Vec::new(),
             code_block: None,
             code_buf: String::new(),
+            code_blocks: Vec::new(),
             body_started: false,
             in_table: false,
             in_table_cell: false,
@@ -483,6 +516,7 @@ impl Renderer {
     }
 
     fn emit_code_block(&mut self, lang: &str, body: &str) {
+        let block_start = self.out.len();
         let rule_style = Style::default().fg(Color::DarkGray);
         let gutter_text = "┃ ";
         let gutter_w = 2;
@@ -509,6 +543,17 @@ impl Renderer {
             "─".repeat(self.width.max(1)),
             rule_style,
         )));
+        // Record the span (header rule .. closing rule, inclusive) and
+        // the verbatim source before the trailing blank so a click
+        // anywhere on the block copies the untruncated code. Strip the
+        // single trailing newline pulldown appends to the fence body.
+        let block_end = self.out.len();
+        let source = body.strip_suffix('\n').unwrap_or(body).to_string();
+        self.code_blocks.push(CodeSpan {
+            start: block_start,
+            end: block_end,
+            source,
+        });
         self.blank_line();
     }
 
@@ -660,7 +705,7 @@ impl Renderer {
         self.blank_line();
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish_with_blocks(mut self) -> (Vec<Line<'static>>, Vec<CodeSpan>) {
         if self.body_started || !self.current.is_empty() {
             self.flush_line();
         }
@@ -672,6 +717,10 @@ impl Renderer {
         {
             self.out.pop();
         }
+        // Leading blanks are removed from the front, which shifts every
+        // recorded code-block index down by the count removed; track it
+        // so the spans keep pointing at the right rows.
+        let mut removed_lead = 0usize;
         while self
             .out
             .first()
@@ -679,11 +728,19 @@ impl Renderer {
             .unwrap_or(false)
         {
             self.out.remove(0);
+            removed_lead += 1;
         }
         if self.out.is_empty() {
             self.out.push(Line::default());
         }
-        self.out
+        let len = self.out.len();
+        let mut blocks = std::mem::take(&mut self.code_blocks);
+        for b in &mut blocks {
+            b.start = b.start.saturating_sub(removed_lead).min(len);
+            b.end = b.end.saturating_sub(removed_lead).min(len);
+        }
+        blocks.retain(|b| b.end > b.start);
+        (self.out, blocks)
     }
 }
 
@@ -734,6 +791,40 @@ mod tests {
                 .unwrap_or(false)
         }));
         assert!(lines.iter().any(|l| joined(l).contains("fn main() {}")));
+    }
+
+    #[test]
+    fn code_block_span_maps_rows_and_keeps_full_source() {
+        // A code line longer than the render width is truncated in the
+        // visible rows but must round-trip verbatim through the span.
+        let long = "echo ".to_string() + &"x".repeat(200);
+        let src = format!("intro\n\n```sh\n{long}\n```\n\nafter");
+        let (lines, blocks) = render_with_blocks(&src, 40, Style::default());
+        assert_eq!(blocks.len(), 1, "expected exactly one code block");
+        let b = &blocks[0];
+        // Source is the untruncated body, no trailing newline.
+        assert_eq!(b.source, long);
+        // Every span row sits within the buffer and covers the gutter
+        // rows; the header rule names the language.
+        assert!(b.end <= lines.len() && b.start < b.end);
+        assert!(joined(&lines[b.start]).contains("sh"));
+        let gutter_rows = (b.start..b.end)
+            .filter(|&i| {
+                lines[i]
+                    .spans
+                    .first()
+                    .map(|s| s.content.as_ref() == "┃ ")
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(gutter_rows, 1, "exactly one code body row");
+        // The visible body row IS truncated (sanity-check the gap the
+        // span closes).
+        let body = (b.start..b.end)
+            .map(|i| joined(&lines[i]))
+            .find(|t| t.starts_with("┃ "))
+            .unwrap();
+        assert!(body.chars().count() < long.chars().count());
     }
 
     #[test]
