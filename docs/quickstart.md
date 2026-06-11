@@ -8,7 +8,10 @@ Five minutes from clone to a live status line.
 cargo install --path .
 ```
 
-See [installation.md](installation.md) for prerequisites.
+Or grab a prebuilt binary from
+[Releases](https://github.com/bukomp/Mewxi/releases). See
+[installation.md](installation.md) for prerequisites, prebuilt-binary
+notes, and how self-update works.
 
 ## 2. Wire it in
 

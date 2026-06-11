@@ -16,7 +16,7 @@ One binary. Every account. No telemetry going anywhere but your terminal.
 
 ## Docs
 
-- [Installation](docs/installation.md) — build from source, get the binary on your PATH.
+- [Installation](docs/installation.md) — prebuilt release binaries or build from source, plus self-update.
 - [Quick start](docs/quickstart.md) — five minutes from zero to a live status line.
 - [TUI guide](docs/tui.md) — the four views, keybinds, what each pane means.
 - [Agent sessions](docs/sessions.md) — create and drive Claude Code sessions from the TUI (beta).
@@ -48,7 +48,7 @@ back to baked-in rates when offline.
 ## Quick start
 
 ```bash
-# 1. Build
+# 1. Install — grab a prebuilt binary from Releases, or build from source:
 cargo install --path .
 
 # 2. Wire the statusLine + (optionally) install the watcher service
@@ -57,6 +57,11 @@ mewxi setup --service
 # 3. Open the dashboard
 mewxi tui
 ```
+
+Mewxi keeps itself current after that: `mewxi update` (or the TUI's
+startup prompt) follows release tags — or the main branch, if you flip
+the channel in the Config view. See
+[Installation](docs/installation.md) for details.
 
 That's it — open Claude Code in another terminal and your status line will
 show the current 5-hour window, your weekly budget, and the active
@@ -74,6 +79,7 @@ For MCP, see [docs/mcp.md](docs/mcp.md).
 | `mewxi mcp`    | JSON-RPC MCP server over stdio.                                |
 | `mewxi dump`   | Aggregate + live snapshot as JSON. Handy for scripts.          |
 | `mewxi setup`  | Wire statusLine into every discovered account, install service.|
+| `mewxi update` | Self-update from the source checkout (`--check` to only report).|
 | `mewxi stop`   | Stop (and optionally disable) the watcher service.             |
 
 ---
