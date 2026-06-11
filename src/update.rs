@@ -10,7 +10,10 @@
 //!   the highest tag on origin is newer than the running
 //!   `CARGO_PKG_VERSION`.
 //! - `dev` — follow origin's default branch (main). An update exists
-//!   when that branch has commits the local checkout doesn't.
+//!   when that branch has commits the *running binary* wasn't built
+//!   from (the build commit is embedded by `build.rs`; comparing the
+//!   checkout's HEAD instead would miss updates whenever you develop
+//!   in the same checkout the binary was installed from).
 //!
 //! The source checkout is located via the compile-time
 //! `CARGO_MANIFEST_DIR` (exactly right for `cargo install --path .`),
@@ -193,6 +196,27 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// The commit this binary was built from, embedded by `build.rs`.
+/// Empty when the build had no git context (e.g. a source tarball).
+const BUILD_COMMIT: &str = env!("MEWXI_BUILD_COMMIT");
+
+/// Baseline for the dev-channel comparison: the commit the running
+/// binary was built from, when it's known and still exists in `repo`;
+/// otherwise the checkout's HEAD. The build commit is what makes the
+/// notice fire after committing+pushing from the same checkout the
+/// binary was installed from — HEAD is already in sync with origin at
+/// that point, but the binary isn't. The HEAD fallback covers builds
+/// without git context and repos whose history was rewritten since.
+fn dev_baseline(repo: &Path, build_commit: &str) -> Result<String> {
+    if !build_commit.is_empty() {
+        let verify = format!("{build_commit}^{{commit}}");
+        if git(repo, &["rev-parse", "--verify", "--quiet", &verify]).is_ok() {
+            return Ok(build_commit.to_string());
+        }
+    }
+    git(repo, &["rev-parse", "--short", "HEAD"])
+}
+
 /// Origin's default branch: `origin/HEAD` when the clone recorded it,
 /// otherwise the first of main/master that exists remotely.
 fn remote_default_branch(repo: &Path) -> String {
@@ -280,10 +304,10 @@ pub fn check_now() -> Result<UpdateStatus> {
         }
         UpdateChannel::Dev => {
             let branch = remote_default_branch(&repo);
-            let behind: u64 = git(&repo, &["rev-list", "--count", &format!("HEAD..origin/{branch}")])?
+            let current = dev_baseline(&repo, BUILD_COMMIT)?;
+            let behind: u64 = git(&repo, &["rev-list", "--count", &format!("{current}..origin/{branch}")])?
                 .parse()
                 .unwrap_or(0);
-            let current = git(&repo, &["rev-parse", "--short", "HEAD"])?;
             let latest = git(&repo, &["rev-parse", "--short", &format!("origin/{branch}")])?;
             UpdateStatus {
                 channel,
@@ -511,6 +535,48 @@ mod tests {
     fn channel_toggles_between_the_two() {
         assert_eq!(UpdateChannel::Release.toggled(), UpdateChannel::Dev);
         assert_eq!(UpdateChannel::Dev.toggled(), UpdateChannel::Release);
+    }
+
+    /// Scratch repo with two commits; returns (dir, older short hash).
+    fn scratch_repo() -> (tempfile::TempDir, String) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(tmp.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        run(&["init", "--quiet"]);
+        run(&["commit", "--quiet", "--allow-empty", "-m", "one"]);
+        let older = run(&["rev-parse", "--short", "HEAD"]);
+        run(&["commit", "--quiet", "--allow-empty", "-m", "two"]);
+        (tmp, older)
+    }
+
+    #[test]
+    fn dev_baseline_prefers_build_commit_when_in_repo() {
+        let (repo, older) = scratch_repo();
+        // Build commit is an older commit still present in the repo —
+        // it wins over HEAD, so being "behind" stays detectable.
+        assert_eq!(dev_baseline(repo.path(), &older).unwrap(), older);
+    }
+
+    #[test]
+    fn dev_baseline_falls_back_to_head_when_unknown() {
+        let (repo, _) = scratch_repo();
+        let head = git(repo.path(), &["rev-parse", "--short", "HEAD"]).unwrap();
+        // No embedded commit (tarball build) → HEAD.
+        assert_eq!(dev_baseline(repo.path(), "").unwrap(), head);
+        // Embedded commit no longer exists (history rewritten) → HEAD.
+        assert_eq!(dev_baseline(repo.path(), "1111111").unwrap(), head);
     }
 
     #[test]
