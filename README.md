@@ -93,4 +93,6 @@ For MCP, see [docs/mcp.md](docs/mcp.md).
 
 [mewxi.mp3](https://github.com/user-attachments/files/28849642/mewxi.mp3)
 
+https://github.com/user-attachments/assets/c3dcbf96-4bcd-47fc-918f-4e0986a9ab9e
+
 </div>
