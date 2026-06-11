@@ -291,13 +291,29 @@ fn existing_points_at_us(sl: &serde_json::Value, binary: &Path, no_live: bool) -
     cmd == a || cmd == b
 }
 
+/// True when `cmd` is one of our hook invocations — `<binary> hook
+/// awaiting-set --dir <dir>` / `<binary> hook awaiting-clear --dir
+/// <dir>` — no matter where the binary lived when it was wired. Keys
+/// on the `hook awaiting-*` subcommand signature, which is unique to
+/// mewxi, so third-party hooks can never match. This is what lets a
+/// re-run of setup clean up hooks left by an installation at a
+/// different path (e.g. after moving the binary into ~/.cargo/bin).
+fn is_mewxi_hook_command(cmd: &str) -> bool {
+    ["hook awaiting-set", "hook awaiting-clear"].iter().any(|sub| {
+        cmd.split_once(sub)
+            .is_some_and(|(pre, post)| {
+                pre.ends_with(' ') && (post.is_empty() || post.starts_with(' '))
+            })
+    })
+}
+
 /// Install (or refresh) the awaiting-permission hooks in
 /// `<settings_path>`. Returns Ok(true) if anything changed. Preserves
 /// any pre-existing hook entries for the same events — we add our
 /// `command` to the existing array rather than replacing it. Hooks
-/// from a previous install (pointing at this same binary) get
-/// overwritten in place so a binary-path change doesn't leave stale
-/// entries behind.
+/// from a previous install (any binary path, detected by the
+/// mewxi-specific subcommand signature) get overwritten in place so a
+/// binary-path change doesn't leave stale entries behind.
 pub fn wire_awaiting_hooks(settings_path: &Path, binary: &Path, account_dir: &Path) -> Result<bool> {
     let mut root: serde_json::Value = if settings_path.exists() {
         let s = fs::read_to_string(settings_path)
@@ -322,15 +338,14 @@ pub fn wire_awaiting_hooks(settings_path: &Path, binary: &Path, account_dir: &Pa
 
     let set_cmd = hook_command_set(binary, account_dir);
     let clear_cmd = hook_command_clear(binary, account_dir);
-    let binary_prefix = format!("{} hook ", shell_quote(binary));
 
     let mut changed = false;
-    changed |= upsert_hook(hooks, HOOK_SET_EVENT, None, &set_cmd, &binary_prefix);
+    changed |= upsert_hook(hooks, HOOK_SET_EVENT, None, &set_cmd);
     for ev in HOOK_CLEAR_EVENTS {
         // Tools-matchers like "*" only apply to events that key by tool
         // (PostToolUse, PostToolUseFailure). `Stop` has no matcher.
         let matcher = if *ev == "Stop" { None } else { Some("*") };
-        changed |= upsert_hook(hooks, ev, matcher, &clear_cmd, &binary_prefix);
+        changed |= upsert_hook(hooks, ev, matcher, &clear_cmd);
     }
     if !changed {
         return Ok(false);
@@ -342,15 +357,15 @@ pub fn wire_awaiting_hooks(settings_path: &Path, binary: &Path, account_dir: &Pa
 
 /// Make sure `hooks[event]` contains a group with the given matcher
 /// whose inner `hooks` array carries `{type: command, command: cmd}`.
-/// Drops any older entry whose command starts with `binary_prefix` so
-/// re-installing with a different account_dir or binary path doesn't
-/// pile up duplicates. Returns true if the structure was mutated.
+/// Drops any older mewxi hook entry (recognized by subcommand, not
+/// binary path — see `is_mewxi_hook_command`) so re-installing with a
+/// different account_dir or binary path doesn't pile up duplicates.
+/// Returns true if the structure was mutated.
 fn upsert_hook(
     hooks: &mut serde_json::Map<String, serde_json::Value>,
     event: &str,
     matcher: Option<&str>,
     cmd: &str,
-    binary_prefix: &str,
 ) -> bool {
     let arr = hooks
         .entry(event.to_string())
@@ -360,8 +375,8 @@ fn upsert_hook(
 
     let want = serde_json::json!({"type": "command", "command": cmd});
 
-    // First pass: drop any stale entry that targets this binary (so we
-    // refresh in place rather than leak duplicates).
+    // First pass: drop any stale mewxi entry — from any past binary
+    // location — so we refresh in place rather than leak duplicates.
     let mut changed = false;
     for group in arr.iter_mut() {
         let Some(grp) = group.as_object_mut() else { continue };
@@ -369,11 +384,22 @@ fn upsert_hook(
         let before = inner.len();
         inner.retain(|h| {
             let c = h.get("command").and_then(|c| c.as_str()).unwrap_or("");
-            !(c.starts_with(binary_prefix) && c != cmd)
+            !(is_mewxi_hook_command(c) && c != cmd)
         });
         if inner.len() != before {
             changed = true;
         }
+    }
+    // Drop groups the stale pass emptied out, so they don't linger as
+    // dead weight in settings.json. Groups without an inner `hooks`
+    // array are left alone — they're not ours to judge.
+    if changed {
+        arr.retain(|g| {
+            g.get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(true)
+        });
     }
 
     // Already wired? Scan for an exact match with the right matcher.
@@ -420,10 +446,13 @@ fn upsert_hook(
     true
 }
 
-/// Remove our awaiting-permission hooks from `<settings_path>`. No-op
-/// if absent. Returns Ok(true) if a change was made.
+/// Remove our awaiting-permission hooks from `<settings_path>` —
+/// matched by the mewxi-specific subcommand signature, so hooks wired
+/// by an installation at any past binary path are removed too. Non-
+/// mewxi hooks are never touched. No-op if absent. Returns Ok(true)
+/// if a change was made.
 #[allow(dead_code)]
-pub fn unwire_awaiting_hooks(settings_path: &Path, binary: &Path) -> Result<bool> {
+pub fn unwire_awaiting_hooks(settings_path: &Path) -> Result<bool> {
     if !settings_path.exists() { return Ok(false); }
     let s = fs::read_to_string(settings_path)?;
     if s.trim().is_empty() { return Ok(false); }
@@ -433,7 +462,6 @@ pub fn unwire_awaiting_hooks(settings_path: &Path, binary: &Path) -> Result<bool
     let Some(hooks) = obj.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return Ok(false);
     };
-    let binary_prefix = format!("{} hook ", shell_quote(binary));
     let mut changed = false;
     for events in std::iter::once(HOOK_SET_EVENT).chain(HOOK_CLEAR_EVENTS.iter().copied()) {
         let Some(arr) = hooks.get_mut(events).and_then(|v| v.as_array_mut()) else { continue };
@@ -443,7 +471,7 @@ pub fn unwire_awaiting_hooks(settings_path: &Path, binary: &Path) -> Result<bool
             let before = inner.len();
             inner.retain(|h| {
                 let c = h.get("command").and_then(|c| c.as_str()).unwrap_or("");
-                !c.starts_with(&binary_prefix)
+                !is_mewxi_hook_command(c)
             });
             if inner.len() != before { changed = true; }
         }
@@ -983,5 +1011,133 @@ fn shell_quote(p: &Path) -> String {
         s.into_owned()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mewxi_hook_command_detection() {
+        // Any binary path counts, including quoted ones.
+        assert!(is_mewxi_hook_command(
+            "/old/place/mewxi hook awaiting-set --dir /home/u/.claude"
+        ));
+        assert!(is_mewxi_hook_command(
+            "'/path with spaces/mewxi' hook awaiting-clear --dir '/d ir'"
+        ));
+        assert!(is_mewxi_hook_command(
+            "/Users/u/.cargo/bin/mewxi hook awaiting-clear --dir /x"
+        ));
+        // Third-party hooks must never match.
+        assert!(!is_mewxi_hook_command("notify-send 'tool done'"));
+        assert!(!is_mewxi_hook_command("/usr/bin/other-tool hook something"));
+        assert!(!is_mewxi_hook_command("echo hook awaiting-setup")); // not our subcommand
+        assert!(!is_mewxi_hook_command("hook awaiting-set --dir /x")); // no binary part
+    }
+
+    fn settings_with(hooks: serde_json::Value) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = serde_json::json!({"hooks": hooks});
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn read_hooks(dir: &tempfile::TempDir) -> serde_json::Value {
+        let s = fs::read_to_string(dir.path().join("settings.json")).unwrap();
+        serde_json::from_str::<serde_json::Value>(&s).unwrap()["hooks"].clone()
+    }
+
+    #[test]
+    fn rewire_replaces_old_binary_path_hooks() {
+        let dir = settings_with(serde_json::json!({
+            "PermissionRequest": [
+                {"hooks": [{"type": "command", "command": "/old/mewxi hook awaiting-set --dir /acct"}]}
+            ],
+            "PostToolUse": [
+                {"matcher": "*", "hooks": [
+                    {"type": "command", "command": "/old/mewxi hook awaiting-clear --dir /acct"},
+                    {"type": "command", "command": "third-party-formatter"}
+                ]}
+            ]
+        }));
+        let settings = dir.path().join("settings.json");
+        let changed =
+            wire_awaiting_hooks(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap();
+        assert!(changed);
+        let hooks = read_hooks(&dir);
+        let as_cmds = |ev: &str| -> Vec<String> {
+            hooks[ev]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|g| g["hooks"].as_array().unwrap().iter())
+                .map(|h| h["command"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // Old-path mewxi hooks are gone, new ones present exactly once.
+        assert_eq!(as_cmds("PermissionRequest"), vec!["/new/mewxi hook awaiting-set --dir /acct"]);
+        // Non-mewxi entry untouched, old mewxi entry replaced.
+        let post = as_cmds("PostToolUse");
+        assert!(post.contains(&"third-party-formatter".to_string()));
+        assert!(post.contains(&"/new/mewxi hook awaiting-clear --dir /acct".to_string()));
+        assert!(!post.iter().any(|c| c.starts_with("/old/")));
+    }
+
+    #[test]
+    fn rewire_prunes_groups_emptied_by_stale_drop() {
+        // Old install used a different matcher, so the stale pass empties
+        // that group entirely — it should be removed, not left as `[]`.
+        let dir = settings_with(serde_json::json!({
+            "PostToolUse": [
+                {"matcher": "Bash", "hooks": [
+                    {"type": "command", "command": "/old/mewxi hook awaiting-clear --dir /acct"}
+                ]}
+            ]
+        }));
+        let settings = dir.path().join("settings.json");
+        wire_awaiting_hooks(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap();
+        let groups = read_hooks(&dir)["PostToolUse"].as_array().unwrap().clone();
+        assert!(groups.iter().all(|g| !g["hooks"].as_array().unwrap().is_empty()));
+        assert!(!groups
+            .iter()
+            .any(|g| g.get("matcher").and_then(|m| m.as_str()) == Some("Bash")));
+    }
+
+    #[test]
+    fn unwire_removes_any_path_keeps_foreign() {
+        let dir = settings_with(serde_json::json!({
+            "PermissionRequest": [
+                {"hooks": [{"type": "command", "command": "/somewhere/else/mewxi hook awaiting-set --dir /acct"}]}
+            ],
+            "Stop": [
+                {"hooks": [
+                    {"type": "command", "command": "/old/mewxi hook awaiting-clear --dir /acct"},
+                    {"type": "command", "command": "say done"}
+                ]}
+            ],
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "foreign-init"}]}
+            ]
+        }));
+        let settings = dir.path().join("settings.json");
+        assert!(unwire_awaiting_hooks(&settings).unwrap());
+        let hooks = read_hooks(&dir);
+        assert!(hooks.get("PermissionRequest").is_none());
+        let stop_cmds: Vec<&str> = hooks["Stop"].as_array().unwrap().iter()
+            .flat_map(|g| g["hooks"].as_array().unwrap().iter())
+            .map(|h| h["command"].as_str().unwrap())
+            .collect();
+        assert_eq!(stop_cmds, vec!["say done"]);
+        // Events we don't own are untouched.
+        assert_eq!(
+            hooks["SessionStart"][0]["hooks"][0]["command"],
+            "foreign-init"
+        );
     }
 }
