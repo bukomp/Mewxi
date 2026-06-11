@@ -378,6 +378,32 @@ pub fn apply_now() -> Result<String> {
         return Err(anyhow!("cargo install failed ({status})"));
     }
 
+    // `cargo install` always lands in cargo's bin dir — but the mewxi
+    // the user actually runs may live somewhere else entirely (a copy
+    // in ~/.local/bin that shadows ~/.cargo/bin on PATH, /usr/local/bin,
+    // …). If we stop here, the running binary never changes, the next
+    // check still sees the old version, and the update looks like it
+    // never happened. So: overwrite the running executable's real path
+    // with the freshly-installed binary too. Skipped for dev builds
+    // running out of the repo's target/ dir — those belong to cargo.
+    let mut synced_note = String::new();
+    let installed = cargo_bin_path();
+    if let Ok(running) = std::env::current_exe() {
+        let running = std::fs::canonicalize(&running).unwrap_or(running);
+        let installed_real = std::fs::canonicalize(&installed).unwrap_or_else(|_| installed.clone());
+        let is_dev_build = running.starts_with(repo.join("target"));
+        if running != installed_real && !is_dev_build && installed_real.is_file() {
+            replace_binary(&installed_real, &running).with_context(|| {
+                format!(
+                    "installing over the running binary at {}",
+                    running.display()
+                )
+            })?;
+            println!("  synced {} → {}", installed.display(), running.display());
+            synced_note = format!(" (installed to {})", running.display());
+        }
+    }
+
     // The freshly-built binary IS the latest now — flip the cache so
     // the statusLine notice clears immediately.
     write_cache(&UpdateStatus {
@@ -388,7 +414,36 @@ pub fn apply_now() -> Result<String> {
         detail: "just updated".to_string(),
     });
 
-    Ok(format!("mewxi updated to {target} — restart mewxi to load it"))
+    Ok(format!(
+        "mewxi updated to {target}{synced_note} — restart mewxi to load it"
+    ))
+}
+
+/// Where `cargo install` puts binaries: `$CARGO_INSTALL_ROOT`, then
+/// `$CARGO_HOME`, then `~/.cargo` — each with `/bin/mewxi` appended.
+fn cargo_bin_path() -> PathBuf {
+    let root = std::env::var_os("CARGO_INSTALL_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("CARGO_HOME").map(PathBuf::from))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cargo")))
+        .unwrap_or_default();
+    root.join("bin").join("mewxi")
+}
+
+/// Atomically replace `dst` with a copy of `src` (copy to a sibling
+/// tempfile, then rename). The running process keeps its old inode, so
+/// overwriting a live executable's path is safe on unix.
+fn replace_binary(src: &Path, dst: &Path) -> Result<()> {
+    let mut tmp = dst.as_os_str().to_owned();
+    tmp.push(".update-tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::copy(src, &tmp)
+        .with_context(|| format!("copying {} to {}", src.display(), tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, dst) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("renaming into {}", dst.display()));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -450,5 +505,24 @@ mod tests {
     fn channel_toggles_between_the_two() {
         assert_eq!(UpdateChannel::Release.toggled(), UpdateChannel::Dev);
         assert_eq!(UpdateChannel::Dev.toggled(), UpdateChannel::Release);
+    }
+
+    #[test]
+    fn replace_binary_overwrites_dst_and_keeps_exec_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("new-mewxi");
+        let dst = tmp.path().join("running-mewxi");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&dst, b"old").unwrap();
+
+        replace_binary(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new");
+        let mode = std::fs::metadata(&dst).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "exec bits lost: {mode:o}");
+        // No tempfile left behind.
+        assert!(!tmp.path().join("running-mewxi.update-tmp").exists());
     }
 }
