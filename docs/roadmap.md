@@ -38,13 +38,10 @@ new agent team," with cost accounting built in from day one.
 ## Agent control
 
 Extend the TUI / orchestrator beyond observation into active control of
-running agents:
+running agents. The first slice has shipped (in beta): the TUI can now
+spawn, drive, interrupt, and kill Claude Code sessions — see
+[Agent sessions](sessions.md). Still to come:
 
-- **Interrupting agents** — send a soft interrupt to a running agent
-  (equivalent of Esc in Claude Code) so the user can redirect it from
-  Mewxi without switching terminals.
-- **Killing agents** — hard-stop a stuck or runaway agent process and
-  clean up its session state.
 - **Sub-agents (grouping)** — represent parent/child agent
   relationships in the TUI: group sub-agents under the orchestrator
   that spawned them, roll their cost/usage up to the parent, and allow

@@ -16,8 +16,23 @@ Claude Code writes JSONL.
 
 - `↑ ↓` — move selection in tables.
 - `1` / `2` / `3` / `4` — switch view.
+- `n` — create a new agent session (see below).
 - `q` or `Esc` — quit.
 - Dismiss the red error footer with the key the footer prints.
+
+## Creating & driving sessions (beta)
+
+The TUI can also **start** Claude Code sessions and drive them — spawn
+`claude` in any project folder, type prompts, answer its permission
+pickers, switch model/effort, run skills, and kill runaway sessions.
+Press `n` anywhere to begin.
+
+> **Beta:** session creation is a new feature and might have bugs.
+> Everything it touches is a normal Claude Code process + transcript,
+> so nothing is lost if Mewxi gets confused — but expect rough edges.
+
+The full flow, keybinds, and caveats live in
+[Agent sessions](sessions.md).
 
 ## What the gauges mean
 
