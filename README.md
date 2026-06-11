@@ -91,8 +91,6 @@ For MCP, see [docs/mcp.md](docs/mcp.md).
 > Mewxi is a **digi-cat**. She has as many lives as you have agents open,
 > and unlike other cats, she lives them all at once.
 
-[mewxi.mp3](https://github.com/user-attachments/files/28849642/mewxi.mp3)
-
 https://github.com/user-attachments/assets/c3dcbf96-4bcd-47fc-918f-4e0986a9ab9e
 
 </div>
