@@ -153,45 +153,103 @@ pub fn render(
     };
     let parent = accounts.iter().find(|a| a.account.name == session.account_name);
 
-    let mut constraints = vec![
-        Constraint::Length(3), // header
-        Constraint::Length(4), // 3 gauges
-        Constraint::Length(3), // compact session totals
-        Constraint::Length(3), // meta
-        Constraint::Min(4),    // chat log (mode/activity now in its bottom border)
-    ];
+    // On short terminals the fixed panels above the chat (header 3 +
+    // gauges 4 + totals 3 + meta 3) would crush it. Drop panels in
+    // order of least loss — gauges (also visible in views 1/3), then
+    // totals, then meta, then the blank spacer — until the chat keeps
+    // a usable minimum height.
+    const CHAT_MIN: u16 = 10;
+    let driver_h: u16 = if driver.is_some() { 3 } else { 0 };
+    let mut show_gauges = true;
+    let mut show_totals = true;
+    let mut show_meta = true;
+    let mut show_blank = true;
+    {
+        let fixed = |g: bool, t: bool, m: bool, b: bool| -> u16 {
+            3 + if g { 4 } else { 0 }
+                + if t { 3 } else { 0 }
+                + if m { 3 } else { 0 }
+                + if b { 1 } else { 0 }
+                + driver_h
+                + 1 // footer
+        };
+        let fits = |g: bool, t: bool, m: bool, b: bool| {
+            fixed(g, t, m, b) + CHAT_MIN <= area.height
+        };
+        if !fits(show_gauges, show_totals, show_meta, show_blank) {
+            show_gauges = false;
+        }
+        if !fits(show_gauges, show_totals, show_meta, show_blank) {
+            show_totals = false;
+        }
+        if !fits(show_gauges, show_totals, show_meta, show_blank) {
+            show_meta = false;
+        }
+        if !fits(show_gauges, show_totals, show_meta, show_blank) {
+            show_blank = false;
+        }
+    }
+
+    let mut constraints = vec![Constraint::Length(3)]; // header
+    if show_gauges {
+        constraints.push(Constraint::Length(4)); // 3 gauges
+    }
+    if show_totals {
+        constraints.push(Constraint::Length(3)); // compact session totals
+    }
+    if show_meta {
+        constraints.push(Constraint::Length(3)); // meta
+    }
+    constraints.push(Constraint::Min(4)); // chat log (mode/activity now in its bottom border)
     if driver.is_some() {
         // 3-row input pane: borders + one row of text.
         constraints.push(Constraint::Length(3));
     }
-    constraints.push(Constraint::Length(1)); // empty line above footer
+    if show_blank {
+        constraints.push(Constraint::Length(1)); // empty line above footer
+    }
     constraints.push(Constraint::Length(1)); // keybind footer
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(area);
 
-    render_header(f, rows[0], session);
+    let mut next = 0usize;
+    let mut row = || {
+        let r = rows[next];
+        next += 1;
+        r
+    };
 
-    if let Some(pa) = parent {
-        let gauge_row = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-                Constraint::Percentage(33),
-            ])
-            .split(rows[1]);
-        widgets::render_5h_gauge(f, gauge_row[0], &pa.agg, pa.live.as_ref());
-        widgets::render_7d_gauge(f, gauge_row[1], pa.live.as_ref());
-        widgets::render_extra_gauge(f, gauge_row[2], pa.live.as_ref());
+    render_header(f, row(), session);
+
+    if show_gauges {
+        let gauge_area = row();
+        if let Some(pa) = parent {
+            let gauge_row = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(34),
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(33),
+                ])
+                .split(gauge_area);
+            widgets::render_5h_gauge(f, gauge_row[0], &pa.agg, pa.live.as_ref());
+            widgets::render_7d_gauge(f, gauge_row[1], pa.live.as_ref());
+            widgets::render_extra_gauge(f, gauge_row[2], pa.live.as_ref());
+        }
     }
 
-    render_session_table(f, rows[2], session);
-    render_meta_panel(f, rows[3], session);
+    if show_totals {
+        render_session_table(f, row(), session);
+    }
+    if show_meta {
+        render_meta_panel(f, row(), session);
+    }
+    let chat_area = row();
     render_chat_log(
         f,
-        rows[4],
+        chat_area,
         session,
         chat_scroll,
         changes_selection,
@@ -221,11 +279,12 @@ pub fn render(
         None => default_hint,
     };
     if let Some(d) = driver {
-        render_driver_input(f, rows[5], d);
-        widgets::render_footer(f, rows[7], "2", footer_hint);
-    } else {
-        widgets::render_footer(f, rows[6], "2", footer_hint);
+        render_driver_input(f, row(), d);
     }
+    if show_blank {
+        row(); // spacer above the footer
+    }
+    widgets::render_footer(f, row(), "2", footer_hint);
 }
 
 fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &PendingPane) {

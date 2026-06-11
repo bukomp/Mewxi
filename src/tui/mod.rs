@@ -873,6 +873,10 @@ fn run_loop<B: ratatui::backend::Backend>(
     // drives view 2's drill-down — only the row chrome (arrow / yellow
     // bold) is suppressed once stale.
     let mut last_session_select: Instant = Instant::now();
+    // Scroll state for view 1's sessions table — persists across frames
+    // so the table follows the selection instead of clipping it once the
+    // cursor moves past the visible window.
+    let mut all_table_state = ratatui::widgets::TableState::default();
     let mut last_reload: HashMap<String, Instant> = HashMap::new();
     let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut last_full_tick = Instant::now();
@@ -1449,6 +1453,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 &mut actions_rect,
                 &mut detail_rect,
                 &mut sessions_rect,
+                &mut all_table_state,
                 &mut setup_rect,
                 chat_selection,
                 &mut chat_inner,
@@ -3240,6 +3245,7 @@ fn render(
     actions_rect: &mut Option<Rect>,
     detail_rect: &mut Option<Rect>,
     sessions_rect: &mut Option<Rect>,
+    all_table_state: &mut ratatui::widgets::TableState,
     setup_rect: &mut Option<Rect>,
     chat_selection: Option<view_session::ChatSelection>,
     chat_inner: &mut Option<Rect>,
@@ -3301,6 +3307,7 @@ fn render(
             sessions,
             visible_session_selection,
             sessions_rect,
+            all_table_state,
         ),
         ViewMode::SessionDetail => view_session::render(
             f,

@@ -16,7 +16,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, TableState};
 
 /// Lines consumed by one account block: 1 header + 3 gauges + 1 spacer.
 const ROWS_PER_ACCOUNT: u16 = 5;
@@ -28,12 +28,22 @@ pub fn render(
     sessions: &[&SessionRef],
     selected: Option<usize>,
     sessions_rect: &mut Option<Rect>,
+    table_state: &mut TableState,
 ) {
     // Reserve enough rows for every account block, capped so the
-    // sessions table always gets at least 5 rows.
-    let want = (ROWS_PER_ACCOUNT * accounts.len() as u16) + 2; // +2 for borders
-    let max_for_accounts = area.height.saturating_sub(6);
-    let acct_height = want.min(max_for_accounts).max(5);
+    // sessions table always gets at least 5 rows. On short terminals
+    // the full 5-row gauge blocks don't fit — fall back to one compact
+    // line per account so every account stays visible and the sessions
+    // table keeps its space.
+    let full_want = (ROWS_PER_ACCOUNT * accounts.len() as u16) + 2; // +2 for borders
+    let max_for_accounts = area.height.saturating_sub(8);
+    let compact = full_want > max_for_accounts;
+    let want = if compact {
+        accounts.len() as u16 + 2
+    } else {
+        full_want
+    };
+    let acct_height = want.min(max_for_accounts).max(3);
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -44,9 +54,9 @@ pub fn render(
         ])
         .split(area);
 
-    render_account_stack(f, rows[0], accounts);
+    render_account_stack(f, rows[0], accounts, compact);
     *sessions_rect = Some(rows[1]);
-    render_sessions_table(f, rows[1], sessions, selected);
+    render_sessions_table(f, rows[1], sessions, selected, table_state);
     render_footer(
         f,
         rows[2],
@@ -55,7 +65,7 @@ pub fn render(
     );
 }
 
-fn render_account_stack(f: &mut Frame, area: Rect, accounts: &[&PerAccount]) {
+fn render_account_stack(f: &mut Frame, area: Rect, accounts: &[&PerAccount], compact: bool) {
     let title = format!(
         "Accounts ({} account{})",
         accounts.len(),
@@ -75,9 +85,10 @@ fn render_account_stack(f: &mut Frame, area: Rect, accounts: &[&PerAccount]) {
     }
 
     // Vertically split the inner area into one slice per account.
+    let rows_per = if compact { 1 } else { ROWS_PER_ACCOUNT };
     let constraints: Vec<Constraint> = accounts
         .iter()
-        .map(|_| Constraint::Length(ROWS_PER_ACCOUNT))
+        .map(|_| Constraint::Length(rows_per))
         .collect();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -85,11 +96,78 @@ fn render_account_stack(f: &mut Frame, area: Rect, accounts: &[&PerAccount]) {
         .split(inner);
 
     for (i, pa) in accounts.iter().enumerate() {
-        if i >= chunks.len() {
+        if i >= chunks.len() || chunks[i].height == 0 {
             break;
         }
-        render_one_account(f, chunks[i], pa);
+        if compact {
+            render_one_account_compact(f, chunks[i], pa);
+        } else {
+            render_one_account(f, chunks[i], pa);
+        }
     }
+}
+
+/// Single-line account summary used when the terminal is too short for
+/// the full gauge block: name · live · age · $ followed by the three
+/// utilizations inline, colored like the gauges they replace.
+fn render_one_account_compact(f: &mut Frame, area: Rect, pa: &PerAccount) {
+    let active_count = pa
+        .live_sessions
+        .iter()
+        .filter(|s| s.state == SessionState::Active)
+        .count();
+    let live_color = if active_count == 0 {
+        Color::DarkGray
+    } else {
+        Color::Green
+    };
+    let live = pa.live.as_ref();
+    let pct_span = |label: &'static str, pct: Option<f64>| -> Vec<Span<'static>> {
+        let mut v = vec![Span::styled(
+            format!("  {label} "),
+            Style::default().fg(Color::Cyan),
+        )];
+        match pct {
+            Some(p) => v.push(Span::styled(
+                format!("{p:>5.1}%"),
+                Style::default().fg(gauge_color(p)).add_modifier(Modifier::BOLD),
+            )),
+            None => v.push(Span::styled("  n/a ", Style::default().fg(Color::DarkGray))),
+        }
+        v
+    };
+    let mut spans = vec![
+        Span::styled(
+            format!("{:8}", format!("[{}]", pa.account.name)),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:>3} live", active_count),
+            Style::default().fg(live_color),
+        ),
+        Span::raw(" · "),
+        cache_age_span(live),
+        Span::raw("  "),
+        Span::styled(
+            format!("${:>9.2}", pa.agg.all.cost_usd),
+            Style::default().fg(Color::Green),
+        ),
+    ];
+    spans.extend(pct_span(
+        "5h",
+        live.and_then(|l| l.five_hour.as_ref()).map(|w| w.utilization),
+    ));
+    spans.extend(pct_span(
+        "wk",
+        live.and_then(|l| l.seven_day.as_ref()).map(|w| w.utilization),
+    ));
+    spans.extend(pct_span(
+        "ex",
+        live.and_then(|l| l.extra_usage.as_ref())
+            .filter(|e| e.is_enabled)
+            .and_then(|e| e.utilization),
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_one_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
@@ -304,7 +382,13 @@ fn currency_symbol(code: Option<&str>) -> &'static str {
     }
 }
 
-fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], selected: Option<usize>) {
+fn render_sessions_table(
+    f: &mut Frame,
+    area: Rect,
+    sessions: &[&SessionRef],
+    selected: Option<usize>,
+    table_state: &mut TableState,
+) {
     let active_count = sessions
         .iter()
         .filter(|s| s.state == SessionState::Active)
@@ -318,6 +402,7 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
     let block = Block::default().borders(Borders::ALL).title(title);
 
     if sessions.is_empty() {
+        *table_state = TableState::default();
         let inner = block.inner(area);
         f.render_widget(block, area);
         let p = Paragraph::new(Line::from(Span::styled(
@@ -362,6 +447,12 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         .unwrap_or(0);
 
     let mut rows: Vec<Row> = Vec::with_capacity(ordered.len() + 8);
+    // Visual row index of the selected session, plus the row scrolling
+    // up should stop at — the group's blank+header rows when the cursor
+    // sits on the first session of a group, so the "▾ project" line
+    // scrolls into view together with the selection.
+    let mut selected_row: Option<usize> = None;
+    let mut selected_anchor: Option<usize> = None;
     let mut group_start = 0usize;
     while group_start < ordered.len() {
         let project = &ordered[group_start].project;
@@ -402,6 +493,14 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         for (offset, s) in group.iter().enumerate() {
             let age_secs = (now - s.state_since).num_seconds().max(0);
             let is_selected = selected == Some(group_start + offset);
+            if is_selected {
+                selected_row = Some(rows.len());
+                selected_anchor = Some(if offset == 0 {
+                    rows.len().saturating_sub(2)
+                } else {
+                    rows.len()
+                });
+            }
             let arrow = if is_selected { "▶ " } else { "  " };
             let state_label = match s.state {
                 SessionState::Active => "active",
@@ -485,6 +584,7 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
     header_labels.push("state");
     constraints.push(Constraint::Length(7));
 
+    let row_count = rows.len();
     let table = Table::new(rows, constraints)
         .header(
             Row::new(header_labels)
@@ -496,7 +596,23 @@ fn render_sessions_table(f: &mut Frame, area: Rect, sessions: &[&SessionRef], se
         // flex restores the "fill remaining space" behavior.
         .flex(Flex::Legacy)
         .block(block);
-    f.render_widget(table, area);
+
+    // Stateful render so a selection past the visible window scrolls the
+    // table. The offset persists across frames (owned by the run loop);
+    // ratatui only ever scrolls the minimum needed to keep the selected
+    // row visible, so the list stays put while the cursor moves within
+    // the window and follows it once it hits an edge. The anchor pulls
+    // the offset back up to the group header when scrolling upward.
+    table_state.select(selected_row);
+    if let Some(anchor) = selected_anchor {
+        if table_state.offset() > anchor {
+            *table_state.offset_mut() = anchor;
+        }
+    }
+    if table_state.offset() >= row_count {
+        *table_state.offset_mut() = row_count.saturating_sub(1);
+    }
+    f.render_stateful_widget(table, area, table_state);
 }
 
 fn activity_display(a: &Activity) -> (String, Color) {

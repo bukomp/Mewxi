@@ -513,9 +513,13 @@ mod tests {
     use std::io::Write;
 
     fn write_jsonl(lines: &[&str]) -> std::path::PathBuf {
+        // Counter (not just a timestamp) — parallel tests can land on
+        // the same nanosecond and clobber each other's file.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "mewxi-chat-log-test-{}-{}.jsonl",
+            "mewxi-chat-log-test-{}-{}-{}.jsonl",
             std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
