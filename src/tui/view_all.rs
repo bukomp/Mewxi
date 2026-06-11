@@ -399,7 +399,7 @@ fn render_sessions_table(
     } else {
         format!("Sessions — {active_count} active · {idle_count} idle")
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let mut block = Block::default().borders(Borders::ALL).title(title);
 
     if sessions.is_empty() {
         *table_state = TableState::default();
@@ -453,6 +453,9 @@ fn render_sessions_table(
     // scrolls into view together with the selection.
     let mut selected_row: Option<usize> = None;
     let mut selected_anchor: Option<usize> = None;
+    // Visual row index of every session row (blank/header rows excluded)
+    // so the off-screen counter counts agents, not table rows.
+    let mut session_rows: Vec<usize> = Vec::with_capacity(ordered.len());
     let mut group_start = 0usize;
     while group_start < ordered.len() {
         let project = &ordered[group_start].project;
@@ -542,6 +545,7 @@ fn render_sessions_table(
             cells.push(Cell::from(format!("${:.2}", s.cost_usd)));
             cells.push(Cell::from(short_model(&s.model)));
             cells.push(Cell::from(Span::styled(state_label, Style::default().fg(state_color))));
+            session_rows.push(rows.len());
             rows.push(Row::new(cells).style(base_style));
         }
 
@@ -585,17 +589,6 @@ fn render_sessions_table(
     constraints.push(Constraint::Length(7));
 
     let row_count = rows.len();
-    let table = Table::new(rows, constraints)
-        .header(
-            Row::new(header_labels)
-                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
-        )
-        // ratatui 0.28 defaults Table to Flex::Start, so Constraint::Min
-        // no longer absorbs leftover width — the project column would sit
-        // at 14 chars and leave a gap after the rightmost column. Legacy
-        // flex restores the "fill remaining space" behavior.
-        .flex(Flex::Legacy)
-        .block(block);
 
     // Stateful render so a selection past the visible window scrolls the
     // table. The offset persists across frames (owned by the run loop);
@@ -612,6 +605,54 @@ fn render_sessions_table(
     if table_state.offset() >= row_count {
         *table_state.offset_mut() = row_count.saturating_sub(1);
     }
+
+    // Off-screen agent counter on the bottom border. ratatui adjusts the
+    // offset during render to keep the selection visible, but the border
+    // title must be baked in beforehand — so replicate that adjustment
+    // (all rows are height 1) to know which window will actually be drawn.
+    let viewport = area.height.saturating_sub(3) as usize; // 2 borders + header row
+    let mut final_offset = table_state.offset();
+    if let Some(sel) = selected_row {
+        if sel < final_offset {
+            final_offset = sel;
+        } else if viewport > 0 && sel >= final_offset + viewport {
+            final_offset = sel + 1 - viewport;
+        }
+    }
+    let above = session_rows.iter().filter(|&&r| r < final_offset).count();
+    let below = session_rows
+        .iter()
+        .filter(|&&r| r >= final_offset + viewport)
+        .count();
+    let mut parts: Vec<String> = Vec::new();
+    if above > 0 {
+        parts.push(format!("↑ {above}"));
+    }
+    if below > 0 {
+        parts.push(format!("↓ {below}"));
+    }
+    if !parts.is_empty() {
+        // Successive left-aligned titles render one space apart, so this
+        // lands right after "Sessions — N active · N idle" on the top
+        // border.
+        block = block.title(Line::from(Span::styled(
+            format!("· {} off-screen", parts.join(" · ")),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let table = Table::new(rows, constraints)
+        .header(
+            Row::new(header_labels)
+                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+        )
+        // ratatui 0.28 defaults Table to Flex::Start, so Constraint::Min
+        // no longer absorbs leftover width — the project column would sit
+        // at 14 chars and leave a gap after the rightmost column. Legacy
+        // flex restores the "fill remaining space" behavior.
+        .flex(Flex::Legacy)
+        .block(block);
+
     f.render_stateful_widget(table, area, table_state);
 }
 
