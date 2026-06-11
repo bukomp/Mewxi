@@ -29,6 +29,7 @@ mod setup;
 mod skills;
 mod stats;
 mod tui;
+mod update;
 mod watch;
 
 #[derive(Parser)]
@@ -64,6 +65,15 @@ enum Cmd {
         /// Overwrite an existing non-mewxi statusLine entry in each account's settings.json.
         #[arg(long)]
         force: bool,
+    },
+    /// Check for a newer mewxi and rebuild from the source checkout.
+    /// Channel comes from `update_channel` in accounts.toml (release
+    /// tags by default, `dev` to follow main) — also editable in the
+    /// TUI's Config view.
+    Update {
+        /// Only check and report; don't rebuild.
+        #[arg(long)]
+        check: bool,
     },
     /// Stop the watcher service (systemd user unit on Linux, launchd agent on macOS).
     Stop {
@@ -184,6 +194,25 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Watch => watch::run_forever(no_live),
+        Cmd::Update { check } => {
+            let status = update::check_now()?;
+            println!("mewxi update check");
+            println!("  channel: {}", status.channel.label());
+            println!("  current: {}", status.current);
+            println!("  latest:  {} ({})", status.latest, status.detail);
+            if !status.available {
+                println!("  already up to date");
+                return Ok(());
+            }
+            if check {
+                println!("  update available — run `mewxi update` to install");
+                return Ok(());
+            }
+            println!();
+            let msg = update::apply_now()?;
+            println!("{msg}");
+            Ok(())
+        }
         Cmd::Setup { service, force } => setup::run(service, force, no_live),
         Cmd::Stop { disable } => setup::stop(disable),
         Cmd::Mcp => {

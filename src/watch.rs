@@ -22,6 +22,7 @@
 use crate::accounts::{self, Account};
 use crate::live_usage;
 use crate::stats;
+use crate::update;
 use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -186,10 +187,14 @@ pub(crate) fn render_status_for_account(
         String::new()
     };
 
+    // Small "mewxi has an update" notice, fed from the cached update
+    // check — surfaces inside every Claude Code session's statusline.
+    let update_segment = crate::update::statusline_segment().unwrap_or_default();
+
     if billing_extra {
-        format!("{prefix}{extra_segment}{reset_segment}{ctx_segment}")
+        format!("{prefix}{extra_segment}{reset_segment}{ctx_segment}{update_segment}")
     } else {
-        format!("{prefix}{five_h_segment}{reset_segment}{ctx_segment}")
+        format!("{prefix}{five_h_segment}{reset_segment}{ctx_segment}{update_segment}")
     }
 }
 
@@ -334,6 +339,13 @@ pub fn run_forever(no_live: bool) -> Result<()> {
     let mut last_write_by_account: std::collections::HashMap<String, Instant> =
         std::collections::HashMap::new();
     let mut last_heartbeat = Instant::now();
+    // Keep the update-check cache warm so the statusLine notice stays
+    // honest even when the TUI is never opened. refresh_cache_async is
+    // a no-op while the cache is fresh; the Instant gate just stops us
+    // re-spawning a checker thread every 6h-heartbeat when the check
+    // itself keeps failing (offline, ssh agent absent in launchd, …).
+    update::refresh_cache_async();
+    let mut last_update_refresh = Instant::now();
 
     loop {
         match dirty_rx.recv_timeout(Duration::from_secs(1)) {
@@ -380,6 +392,12 @@ pub fn run_forever(no_live: bool) -> Result<()> {
             }
             last_heartbeat = Instant::now();
             wrote_any = true;
+        }
+
+        // Re-check for mewxi updates every 6h of daemon runtime.
+        if last_update_refresh.elapsed() > Duration::from_secs(6 * 3600) {
+            update::refresh_cache_async();
+            last_update_refresh = Instant::now();
         }
 
         // Restore caches that were manually deleted.

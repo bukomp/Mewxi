@@ -24,6 +24,7 @@ mod new_session_modal;
 mod skill_picker_modal;
 mod terminal_overlay;
 mod text_input;
+mod update_prompt_modal;
 mod view_account;
 mod view_all;
 mod view_mewxi;
@@ -35,6 +36,7 @@ use kill_confirm_modal::{KillConfirmModal, KillConfirmOutcome};
 use model_picker_modal::{ModelOutcome, ModelPickerModal};
 use new_session_modal::{ModalOutcome, NewSessionModal};
 use skill_picker_modal::{SkillOutcome, SkillPickerModal};
+use update_prompt_modal::{UpdatePromptModal, UpdatePromptOutcome};
 
 use crate::accounts::{self, Account, AccountsView};
 use crate::agent_control::{self, PtySession};
@@ -42,6 +44,7 @@ use crate::live_session::{self, LiveSession, SessionState};
 use crate::live_usage::{self, LiveUsage};
 use crate::setup::{self, SetupSnapshot};
 use crate::stats::{self, Aggregate, UsageTotals};
+use crate::update::{self, UpdateStatus};
 use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -429,6 +432,23 @@ fn resume_terminal<B: ratatui::backend::Backend>(
     terminal.clear()?;
     enable_hover_tracking();
     Ok(())
+}
+
+/// Suspend the TUI, run the self-update (git fast-forward + cargo
+/// rebuild, streaming output to the real terminal so the user sees
+/// progress), then resume. Returns a one-line outcome message for the
+/// status banner.
+fn run_update_apply<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> String {
+    if let Err(e) = suspend_terminal(terminal) {
+        return format!("update aborted — failed to suspend terminal: {e}");
+    }
+    let res = update::apply_now();
+    let resume = resume_terminal(terminal);
+    match (res, resume) {
+        (Ok(msg), Ok(())) => msg,
+        (Ok(msg), Err(e)) => format!("{msg} (terminal resume error: {e})"),
+        (Err(e), _) => format!("update FAILED: {e}"),
+    }
 }
 
 /// Enable xterm "any-event" mouse tracking (mode 1003) on top of
@@ -951,6 +971,21 @@ fn run_loop<B: ratatui::backend::Backend>(
 
     let mut kill_confirm_modal: Option<KillConfirmModal> = None;
 
+    // Self-update: kick a background check at startup (one git fetch
+    // against origin). The result lands on `update_rx`; when something
+    // newer exists AND the startup prompt is enabled, the modal asks
+    // the user once per run. The Config view reads the same state.
+    let (update_tx, update_rx) =
+        channel::<std::result::Result<UpdateStatus, String>>();
+    let mut update_channel = update::channel_from_view(&view);
+    let mut update_prompt_enabled = view.update_prompt;
+    let mut update_status: Option<UpdateStatus> = None;
+    let mut update_error: Option<String> = None;
+    let mut update_checking = true;
+    let mut update_prompt_modal: Option<UpdatePromptModal> = None;
+    let mut update_prompted = false;
+    update::spawn_check(update_tx.clone());
+
     // Refresh the launchd watcher if it's still running the previous
     // binary in memory — otherwise it will keep overwriting our cache
     // files with stale-account data. install_watcher does unload+load
@@ -975,6 +1010,10 @@ fn run_loop<B: ratatui::backend::Backend>(
         }
         if selected_account >= per_account.len() && !per_account.is_empty() {
             selected_account = per_account.len() - 1;
+        }
+        let setup_items_len = view_setup::items(setup_snapshot.as_ref()).len();
+        if selected_setup >= setup_items_len && setup_items_len > 0 {
+            selected_setup = setup_items_len - 1;
         }
 
         // Filter out accounts the user has marked ignored in the
@@ -1438,6 +1477,16 @@ fn run_loop<B: ratatui::backend::Backend>(
             _ => None,
         };
 
+        // Self-update state for the Config view, rebuilt each frame
+        // from the event-loop's owned fields.
+        let update_ui = view_setup::UpdateUi {
+            channel: update_channel,
+            prompt_enabled: update_prompt_enabled,
+            checking: update_checking,
+            status: update_status.as_ref(),
+            error: update_error.as_deref(),
+        };
+
         terminal.draw(|f| {
             render(
                 f,
@@ -1467,6 +1516,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 setup_snapshot.as_ref(),
                 combined_message.as_deref(),
                 defocus_input_after_send,
+                &update_ui,
                 live_error,
                 driver_pane.as_mut(),
                 pending_pane.as_ref(),
@@ -1501,6 +1551,9 @@ fn run_loop<B: ratatui::backend::Backend>(
             if let Some(modal) = kill_confirm_modal.as_ref() {
                 modal.render(f, f.area());
             }
+            if let Some(modal) = update_prompt_modal.as_ref() {
+                modal.render(f, f.area());
+            }
         })?;
 
         // Capture the spawn inputs we'd need on `n` into owned values
@@ -1529,6 +1582,26 @@ fn run_loop<B: ratatui::backend::Backend>(
         // Drain filesystem events.
         while let Ok(name) = dirty_rx.try_recv() {
             dirty.insert(name);
+        }
+
+        // Drain the self-update check result (at most one per spawn).
+        while let Ok(res) = update_rx.try_recv() {
+            update_checking = false;
+            match res {
+                Ok(s) => {
+                    update_error = None;
+                    if s.available
+                        && update_prompt_enabled
+                        && !update_prompted
+                        && update_prompt_modal.is_none()
+                    {
+                        update_prompt_modal = Some(UpdatePromptModal::new(s.clone()));
+                        update_prompted = true;
+                    }
+                    update_status = Some(s);
+                }
+                Err(e) => update_error = Some(e),
+            }
         }
 
         // Per-account debounced reload, plus a periodic safety-net refresh
@@ -1658,7 +1731,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                         &mut last_session_select,
                         &visible_sessions,
                         sessions.len(),
-                        setup_snapshot.as_ref().map(|s| s.accounts.len()).unwrap_or(0),
+                        view_setup::items(setup_snapshot.as_ref()).len(),
                         &mut pinned_session,
                     );
                 }
@@ -1858,6 +1931,43 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                             continue;
                         }
+                    }
+                    // Update prompt modal owns every keystroke while open.
+                    if let Some(modal) = update_prompt_modal.as_ref() {
+                        match modal.handle_key(k) {
+                            UpdatePromptOutcome::Stay => {}
+                            UpdatePromptOutcome::NotNow => {
+                                update_prompt_modal = None;
+                            }
+                            UpdatePromptOutcome::DisableStartupPrompt => {
+                                update_prompt_modal = None;
+                                match accounts::set_update_prompt(false) {
+                                    Ok(()) => {
+                                        update_prompt_enabled = false;
+                                        setup_message = Some(
+                                            "startup update prompt disabled — re-enable it in Config (4)"
+                                                .into(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        setup_message =
+                                            Some(format!("failed to save preference: {e}"));
+                                    }
+                                }
+                            }
+                            UpdatePromptOutcome::UpdateNow => {
+                                update_prompt_modal = None;
+                                let msg = run_update_apply(terminal);
+                                // The cache was rewritten by apply; drop
+                                // the stale in-memory status so the
+                                // Config view doesn't keep advertising
+                                // the update we just installed.
+                                update_status = None;
+                                update_error = None;
+                                setup_message = Some(msg);
+                            }
+                        }
+                        continue;
                     }
                     // Kill confirm modal owns every keystroke while open.
                     if let Some(modal) = kill_confirm_modal.as_ref() {
@@ -2543,10 +2653,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     }
                                 }
                                 ViewMode::Setup => {
-                                    let len = setup_snapshot
-                                        .as_ref()
-                                        .map(|s| s.accounts.len())
-                                        .unwrap_or(0);
+                                    let len = view_setup::items(setup_snapshot.as_ref()).len();
                                     if len > 0 {
                                         selected_setup = (selected_setup + len - 1) % len;
                                     }
@@ -2714,19 +2821,24 @@ fn run_loop<B: ratatui::backend::Backend>(
                             setup_message = Some("rescanned setup state".to_string());
                         }
                         KeyCode::Char('s') if mode == ViewMode::Setup => {
-                            setup_message = toggle_statusline_for_selected(
-                                &mut setup_snapshot,
-                                selected_setup,
-                                no_live,
-                            );
-                            setup_snapshot = setup::inspect(no_live).ok();
+                            if let Some(view_setup::ConfigItem::Account(i)) =
+                                view_setup::items(setup_snapshot.as_ref()).get(selected_setup)
+                            {
+                                setup_message = toggle_statusline_for_selected(
+                                    &mut setup_snapshot,
+                                    *i,
+                                    no_live,
+                                );
+                                setup_snapshot = setup::inspect(no_live).ok();
+                            }
                         }
                         KeyCode::Char('i') if mode == ViewMode::Setup => {
-                            setup_message = toggle_ignore_for_selected(
-                                &setup_snapshot,
-                                selected_setup,
-                            );
-                            setup_snapshot = setup::inspect(no_live).ok();
+                            if let Some(view_setup::ConfigItem::Account(i)) =
+                                view_setup::items(setup_snapshot.as_ref()).get(selected_setup)
+                            {
+                                setup_message = toggle_ignore_for_selected(&setup_snapshot, *i);
+                                setup_snapshot = setup::inspect(no_live).ok();
+                            }
                         }
                         KeyCode::Char('w') if mode == ViewMode::Setup => {
                             setup_message = toggle_watcher(&mut setup_snapshot, no_live);
@@ -2770,7 +2882,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 }
                             }
                             ViewMode::Setup => {
-                                let len = setup_snapshot.as_ref().map(|s| s.accounts.len()).unwrap_or(0);
+                                let len = view_setup::items(setup_snapshot.as_ref()).len();
                                 if len > 0 {
                                     selected_setup = (selected_setup + 1) % len;
                                 }
@@ -2802,7 +2914,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 }
                             }
                             ViewMode::Setup => {
-                                let len = setup_snapshot.as_ref().map(|s| s.accounts.len()).unwrap_or(0);
+                                let len = view_setup::items(setup_snapshot.as_ref()).len();
                                 if len > 0 {
                                     selected_setup = (selected_setup + len - 1) % len;
                                 }
@@ -2828,7 +2940,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 }
                             }
                             ViewMode::Setup => {
-                                let len = setup_snapshot.as_ref().map(|s| s.accounts.len()).unwrap_or(0);
+                                let len = view_setup::items(setup_snapshot.as_ref()).len();
                                 if len > 0 {
                                     selected_setup = (selected_setup + 1).min(len - 1);
                                 }
@@ -2865,6 +2977,112 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 pinned_session = visible_sessions
                                     .get(selected_session)
                                     .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                            } else if mode == ViewMode::Setup {
+                                // One contextual action per row — the
+                                // hint box above the footer spells out
+                                // what this does for the selected row.
+                                let item = view_setup::items(setup_snapshot.as_ref())
+                                    .get(selected_setup)
+                                    .cloned();
+                                match item {
+                                    Some(view_setup::ConfigItem::Account(i)) => {
+                                        let is_ignored = setup_snapshot
+                                            .as_ref()
+                                            .and_then(|s| s.accounts.get(i))
+                                            .is_some_and(|a| a.ignored);
+                                        setup_message = if is_ignored {
+                                            toggle_ignore_for_selected(&setup_snapshot, i)
+                                        } else {
+                                            toggle_statusline_for_selected(
+                                                &mut setup_snapshot,
+                                                i,
+                                                no_live,
+                                            )
+                                        };
+                                        setup_snapshot = setup::inspect(no_live).ok();
+                                    }
+                                    Some(view_setup::ConfigItem::Watcher) => {
+                                        setup_message =
+                                            toggle_watcher(&mut setup_snapshot, no_live);
+                                        setup_snapshot = setup::inspect(no_live).ok();
+                                    }
+                                    Some(view_setup::ConfigItem::UpdateChannel) => {
+                                        let next = update_channel.toggled();
+                                        match accounts::set_update_channel(next.as_str()) {
+                                            Ok(()) => {
+                                                update_channel = next;
+                                                setup_message = Some(format!(
+                                                    "update channel → {}",
+                                                    next.label()
+                                                ));
+                                                // Re-check against the new channel.
+                                                update_status = None;
+                                                update_error = None;
+                                                update_checking = true;
+                                                update::spawn_check(update_tx.clone());
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save channel: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Some(view_setup::ConfigItem::UpdatePrompt) => {
+                                        let next = !update_prompt_enabled;
+                                        match accounts::set_update_prompt(next) {
+                                            Ok(()) => {
+                                                update_prompt_enabled = next;
+                                                setup_message = Some(format!(
+                                                    "ask about updates on startup: {}",
+                                                    if next { "on" } else { "off" }
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Some(view_setup::ConfigItem::UpdateCheckNow) => {
+                                        if update_checking {
+                                            // A check is already in flight.
+                                        } else if update_status
+                                            .as_ref()
+                                            .is_some_and(|s| s.available)
+                                        {
+                                            let msg = run_update_apply(terminal);
+                                            update_status = None;
+                                            update_error = None;
+                                            setup_message = Some(msg);
+                                        } else {
+                                            update_error = None;
+                                            update_checking = true;
+                                            update::spawn_check(update_tx.clone());
+                                            setup_message =
+                                                Some("checking origin for updates…".into());
+                                        }
+                                    }
+                                    Some(view_setup::ConfigItem::DefocusToggle) => {
+                                        let next = !defocus_input_after_send;
+                                        match accounts::set_defocus_input_after_send(next) {
+                                            Ok(()) => {
+                                                defocus_input_after_send = next;
+                                                setup_message = Some(format!(
+                                                    "defocus input after send: {}",
+                                                    if next { "on" } else { "off" }
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    None => {}
+                                }
                             }
                         }
                         KeyCode::PageUp if mode == ViewMode::SessionDetail => {
@@ -3259,6 +3477,7 @@ fn render(
     setup: Option<&SetupSnapshot>,
     setup_message: Option<&str>,
     defocus_input_after_send: bool,
+    update_ui: &view_setup::UpdateUi,
     live_error: Option<&str>,
     driver: Option<&mut view_session::DriverPane<'_>>,
     pending: Option<&view_session::PendingPane>,
@@ -3342,6 +3561,7 @@ fn render(
             selected_setup,
             setup_message,
             defocus_input_after_send,
+            update_ui,
             setup_rect,
         ),
         ViewMode::Mewxi => view_mewxi::render(f, view_area, accounts, sessions),

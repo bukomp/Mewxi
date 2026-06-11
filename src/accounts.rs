@@ -338,6 +338,20 @@ struct AccountsConfig {
     /// the next prompt. Default: true.
     #[serde(default)]
     defocus_input_after_send: Option<bool>,
+    /// Self-update channel: `"release"` (tagged versions, the default)
+    /// or `"dev"` (follow origin's main branch). Interpreted by
+    /// [`crate::update::UpdateChannel::from_config`].
+    #[serde(default)]
+    update_channel: Option<String>,
+    /// When true (default), the TUI checks for updates on startup and
+    /// asks before installing one.
+    #[serde(default)]
+    update_prompt: Option<bool>,
+    /// Where the mewxi source checkout lives, for self-update. Only
+    /// needed when the checkout moved after the binary was built —
+    /// the compile-time manifest dir is used otherwise. `~` expands.
+    #[serde(default)]
+    update_repo_dir: Option<String>,
     #[serde(default)]
     accounts: Vec<AccountEntry>,
 }
@@ -365,8 +379,15 @@ pub struct AccountsView {
     /// pre-tilde-expansion not applied — see [`default_new_session_dir`]).
     pub default_new_session_dir: Option<PathBuf>,
     /// When true, the driver input row auto-unfocuses after a prompt is
-    /// sent. Toggleable from the Setup view. Defaults to true.
+    /// sent. Toggleable from the Config view. Defaults to true.
     pub defocus_input_after_send: bool,
+    /// Raw `update_channel` value from `accounts.toml`; parsed by
+    /// [`crate::update::UpdateChannel::from_config`]. `None` = release.
+    pub update_channel: Option<String>,
+    /// Ask about available updates on TUI startup. Defaults to true.
+    pub update_prompt: bool,
+    /// Optional override for the self-update source checkout location.
+    pub update_repo_dir: Option<PathBuf>,
 }
 
 impl AccountsView {
@@ -419,6 +440,9 @@ pub fn load_accounts() -> Result<AccountsView> {
     let mut ignored_names: Vec<String> = Vec::new();
     let mut default_new_session_dir: Option<PathBuf> = None;
     let mut defocus_input_after_send: bool = true;
+    let mut update_channel: Option<String> = None;
+    let mut update_prompt: bool = true;
+    let mut update_repo_dir: Option<PathBuf> = None;
 
     if let Some(cfg_path) = config_path() {
         if cfg_path.exists() {
@@ -432,6 +456,11 @@ pub fn load_accounts() -> Result<AccountsView> {
             if let Some(v) = cfg.defocus_input_after_send {
                 defocus_input_after_send = v;
             }
+            update_channel = cfg.update_channel;
+            if let Some(v) = cfg.update_prompt {
+                update_prompt = v;
+            }
+            update_repo_dir = cfg.update_repo_dir.map(|s| expand_tilde(&s));
             for entry in cfg.accounts {
                 accounts.push(Account {
                     name: entry.name,
@@ -486,6 +515,9 @@ pub fn load_accounts() -> Result<AccountsView> {
         default_account,
         default_new_session_dir,
         defocus_input_after_send,
+        update_channel,
+        update_prompt,
+        update_repo_dir,
     })
 }
 
@@ -731,10 +763,12 @@ pub fn resolve_default_new_session_dir(view: &AccountsView) -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// Write the `ignored = [...]` field to `accounts.toml`, preserving
-/// any other content. Creates the file if it doesn't exist. Pass an
-/// empty slice to clear the ignore list.
-pub fn set_ignored(names: &[String]) -> Result<()> {
+/// Load `accounts.toml` (or an empty table), let `mutate` edit the
+/// top-level table, and write the result back atomically (tempfile +
+/// rename). Creates the file and parent dirs if missing. Every
+/// single-field setter below funnels through here so they all preserve
+/// unrelated content the same way.
+fn edit_config_table(mutate: impl FnOnce(&mut toml::value::Table)) -> Result<()> {
     let path = config_path().ok_or_else(|| anyhow!("no XDG config dir"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -751,16 +785,10 @@ pub fn set_ignored(names: &[String]) -> Result<()> {
     } else {
         toml::Value::Table(toml::value::Table::new())
     };
-    if let toml::Value::Table(t) = &mut root {
-        if names.is_empty() {
-            t.remove("ignored");
-        } else {
-            let arr: Vec<toml::Value> = names.iter().map(|s| toml::Value::String(s.clone())).collect();
-            t.insert("ignored".to_string(), toml::Value::Array(arr));
-        }
-    } else {
+    let toml::Value::Table(t) = &mut root else {
         return Err(anyhow!("{} is not a TOML table", path.display()));
-    }
+    };
+    mutate(t);
     let out = toml::to_string_pretty(&root)
         .with_context(|| format!("serialize {}", path.display()))?;
     let tmp = path.with_extension("toml.tmp");
@@ -771,41 +799,47 @@ pub fn set_ignored(names: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Write the `ignored = [...]` field to `accounts.toml`, preserving
+/// any other content. Creates the file if it doesn't exist. Pass an
+/// empty slice to clear the ignore list.
+pub fn set_ignored(names: &[String]) -> Result<()> {
+    edit_config_table(|t| {
+        if names.is_empty() {
+            t.remove("ignored");
+        } else {
+            let arr: Vec<toml::Value> =
+                names.iter().map(|s| toml::Value::String(s.clone())).collect();
+            t.insert("ignored".to_string(), toml::Value::Array(arr));
+        }
+    })
+}
+
 /// Write the `defocus_input_after_send` field to `accounts.toml`,
 /// preserving any other content. Creates the file if it doesn't exist.
 pub fn set_defocus_input_after_send(enabled: bool) -> Result<()> {
-    let path = config_path().ok_or_else(|| anyhow!("no XDG config dir"))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let mut root: toml::Value = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
-        if raw.trim().is_empty() {
-            toml::Value::Table(toml::value::Table::new())
-        } else {
-            toml::from_str(&raw)
-                .with_context(|| format!("parse {}", path.display()))?
-        }
-    } else {
-        toml::Value::Table(toml::value::Table::new())
-    };
-    if let toml::Value::Table(t) = &mut root {
+    edit_config_table(|t| {
         t.insert(
             "defocus_input_after_send".to_string(),
             toml::Value::Boolean(enabled),
         );
-    } else {
-        return Err(anyhow!("{} is not a TOML table", path.display()));
-    }
-    let out = toml::to_string_pretty(&root)
-        .with_context(|| format!("serialize {}", path.display()))?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, out)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename into {}", path.display()))?;
-    Ok(())
+    })
+}
+
+/// Persist the self-update channel (`"release"` / `"dev"`).
+pub fn set_update_channel(channel: &str) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert(
+            "update_channel".to_string(),
+            toml::Value::String(channel.to_string()),
+        );
+    })
+}
+
+/// Persist whether the TUI asks about updates on startup.
+pub fn set_update_prompt(enabled: bool) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert("update_prompt".to_string(), toml::Value::Boolean(enabled));
+    })
 }
 
 /// Toggle the ignore flag for `name`. Returns the new ignored state

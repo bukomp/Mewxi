@@ -10,7 +10,7 @@ Claude Code writes JSONL.
 | `1` | **Overview**      | Every account's 5h / weekly / extra-usage bars. Table of live sessions.     |
 | `2` | **Session**       | Drill-down on the selected session: token breakdown, chat log, context.    |
 | `3` | **Account**       | Single-account dashboard — gauges + per-model / per-project / per-day.     |
-| `4` | **Setup**         | Same actions as `mewxi setup`, but with a checklist UI.                      |
+| `4` | **Config**        | statusLine wiring, watcher service, self-update channel, preferences.       |
 
 ## Keys
 
@@ -33,6 +33,33 @@ Press `n` anywhere to begin.
 
 The full flow, keybinds, and caveats live in
 [Agent sessions](sessions.md).
+
+## Config view (4)
+
+One navigable list, grouped into sections. `↑/↓` selects a row, `Enter`
+performs that row's action — the hint box under the list always says
+what `Enter` will do before you press it.
+
+- **Claude Code integration** — per-account statusLine wiring and the
+  background watcher service.
+- **Updates** — the self-update channel (`release` follows version
+  tags, `dev` follows the main branch), whether the TUI asks about
+  updates on startup, and a check/install row.
+- **Preferences** — TUI behaviour toggles.
+
+Shortcuts: `a` fixes everything that's missing, `i` ignores/un-ignores
+the selected account, `R` rescans, `Esc` goes back.
+
+## Updates
+
+On startup the TUI checks the source checkout's git remote in the
+background; if something newer exists it asks before installing
+(`Enter` updates, `Esc` postpones, `d` stops the startup question).
+Installing fast-forwards the checkout and rebuilds via
+`cargo install --path . --force`, then asks you to restart mewxi.
+`mewxi update` does the same from the CLI; `mewxi update --check` only
+reports. While an update is pending, the Claude Code statusline also
+shows a small `⬆ mewxi update` notice.
 
 ## What the gauges mean
 
