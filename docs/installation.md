@@ -90,7 +90,11 @@ release binaries it points at the CI runner). Either:
   `⬆ mewxi update` notice when a newer version is available.
 
 Other knobs in `accounts.toml`: `update_prompt = false` silences the
-startup question (the statusline notice stays).
+startup question (the statusline notice stays); `update_check = false`
+turns off automatic checks entirely — no fetch on TUI startup, none
+from the watcher (`mewxi update`, `--check`, and the Config view's
+"check for updates" row still work). Both are also toggleable from the
+Config view.
 
 ## Optional: watcher service
 

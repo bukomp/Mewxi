@@ -18,6 +18,10 @@ Dedup by canonicalised path, sort by name. Stable iteration order.
 ```toml
 default_account = "work"
 
+# View the TUI opens on: "overview" (default), "session", "account",
+# or "config" — the view's number key ("1"–"4") works too.
+default_view = "overview"
+
 [[account]]
 name = "work"
 dir  = "/Users/me/.claude-work"

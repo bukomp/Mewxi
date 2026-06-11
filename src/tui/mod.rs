@@ -324,6 +324,20 @@ enum ViewMode {
     Mewxi,
 }
 
+impl ViewMode {
+    /// Parse the `default_view` config value. Accepts the documented
+    /// view names and their `1`–`4` switch keys; anything else
+    /// (including `None`) falls back to the overview.
+    fn from_config(s: Option<&str>) -> Self {
+        match s.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("session" | "session_detail" | "2") => ViewMode::SessionDetail,
+            Some("account" | "account_detail" | "3") => ViewMode::AccountDetail,
+            Some("config" | "setup" | "4") => ViewMode::Setup,
+            _ => ViewMode::AllSessions,
+        }
+    }
+}
+
 /// Stylised cat-face brand logos at four sizes. We pick the biggest one
 /// that fits the splash area at runtime; the smaller variants are used
 /// on narrower terminals so the cat stays recognisable instead of being
@@ -844,7 +858,7 @@ fn run_loop<B: ratatui::backend::Backend>(
         live_pollers.push(spawn_live_poller(account.clone(), no_live, stagger));
     }
 
-    let mut mode = ViewMode::AllSessions;
+    let mut mode = ViewMode::from_config(view.default_view.as_deref());
     let mut selected_session: usize = 0;
     let mut last_selected_session: usize = usize::MAX;
     // Stable identity of the session currently being inspected in
@@ -972,19 +986,23 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut kill_confirm_modal: Option<KillConfirmModal> = None;
 
     // Self-update: kick a background check at startup (one git fetch
-    // against origin). The result lands on `update_rx`; when something
+    // against origin) unless `update_check = false` turned automatic
+    // checks off. The result lands on `update_rx`; when something
     // newer exists AND the startup prompt is enabled, the modal asks
     // the user once per run. The Config view reads the same state.
     let (update_tx, update_rx) =
         channel::<std::result::Result<UpdateStatus, String>>();
     let mut update_channel = update::channel_from_view(&view);
+    let mut update_check_enabled = view.update_check;
     let mut update_prompt_enabled = view.update_prompt;
     let mut update_status: Option<UpdateStatus> = None;
     let mut update_error: Option<String> = None;
-    let mut update_checking = true;
+    let mut update_checking = update_check_enabled;
     let mut update_prompt_modal: Option<UpdatePromptModal> = None;
     let mut update_prompted = false;
-    update::spawn_check(update_tx.clone());
+    if update_check_enabled {
+        update::spawn_check(update_tx.clone());
+    }
 
     // Refresh the launchd watcher if it's still running the previous
     // binary in memory — otherwise it will keep overwriting our cache
@@ -1481,6 +1499,7 @@ fn run_loop<B: ratatui::backend::Backend>(
         // from the event-loop's owned fields.
         let update_ui = view_setup::UpdateUi {
             channel: update_channel,
+            check_enabled: update_check_enabled,
             prompt_enabled: update_prompt_enabled,
             checking: update_checking,
             status: update_status.as_ref(),
@@ -3028,6 +3047,31 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             }
                                         }
                                     }
+                                    Some(view_setup::ConfigItem::UpdateCheck) => {
+                                        let next = !update_check_enabled;
+                                        match accounts::set_update_check(next) {
+                                            Ok(()) => {
+                                                update_check_enabled = next;
+                                                setup_message = Some(format!(
+                                                    "automatic update checks: {}",
+                                                    if next { "on" } else { "off" }
+                                                ));
+                                                // Turning them back on: check
+                                                // right away instead of waiting
+                                                // for the next TUI start.
+                                                if next && !update_checking {
+                                                    update_error = None;
+                                                    update_checking = true;
+                                                    update::spawn_check(update_tx.clone());
+                                                }
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
                                     Some(view_setup::ConfigItem::UpdatePrompt) => {
                                         let next = !update_prompt_enabled;
                                         match accounts::set_update_prompt(next) {
@@ -3868,7 +3912,25 @@ fn flatten_sessions(
 
 #[cfg(test)]
 mod tests {
-    use super::{cycle_mode, model_supports_auto, ModeCycle};
+    use super::{cycle_mode, model_supports_auto, ModeCycle, ViewMode};
+
+    #[test]
+    fn view_mode_from_config_accepts_names_and_keys() {
+        assert_eq!(ViewMode::from_config(Some("overview")), ViewMode::AllSessions);
+        assert_eq!(ViewMode::from_config(Some("session")), ViewMode::SessionDetail);
+        assert_eq!(ViewMode::from_config(Some("account")), ViewMode::AccountDetail);
+        assert_eq!(ViewMode::from_config(Some("config")), ViewMode::Setup);
+        assert_eq!(ViewMode::from_config(Some("setup")), ViewMode::Setup);
+        assert_eq!(ViewMode::from_config(Some("2")), ViewMode::SessionDetail);
+        assert_eq!(ViewMode::from_config(Some(" Config ")), ViewMode::Setup);
+    }
+
+    #[test]
+    fn view_mode_from_config_falls_back_to_overview() {
+        assert_eq!(ViewMode::from_config(None), ViewMode::AllSessions);
+        assert_eq!(ViewMode::from_config(Some("")), ViewMode::AllSessions);
+        assert_eq!(ViewMode::from_config(Some("garbage")), ViewMode::AllSessions);
+    }
 
     #[test]
     fn cycle_mode_three_step_without_auto() {

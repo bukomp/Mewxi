@@ -12,6 +12,11 @@ Claude Code writes JSONL.
 | `3` | **Account**       | Single-account dashboard — gauges + per-model / per-project / per-day.     |
 | `4` | **Config**        | statusLine wiring, watcher service, self-update channel, preferences.       |
 
+The TUI opens on the Overview; set `default_view` in
+`~/.config/mewxi/accounts.toml` (`"overview"`, `"session"`, `"account"`,
+or `"config"`) to start somewhere else. First run still lands on Config
+until setup is complete.
+
 ## Keys
 
 - `↑ ↓` — move selection in tables.

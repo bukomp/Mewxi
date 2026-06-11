@@ -338,11 +338,23 @@ struct AccountsConfig {
     /// the next prompt. Default: true.
     #[serde(default)]
     defocus_input_after_send: Option<bool>,
+    /// Which view the TUI opens on: `"overview"` (default),
+    /// `"session"`, `"account"`, or `"config"`. The view's number key
+    /// (`"1"`–`"4"`) is accepted too. Ignored on first run while setup
+    /// is incomplete — the setup view wins then.
+    #[serde(default)]
+    default_view: Option<String>,
     /// Self-update channel: `"release"` (tagged versions, the default)
     /// or `"dev"` (follow origin's main branch). Interpreted by
     /// [`crate::update::UpdateChannel::from_config`].
     #[serde(default)]
     update_channel: Option<String>,
+    /// When false, mewxi never checks origin for updates on its own —
+    /// no TUI startup check, no watch-daemon refresh. Manual checks
+    /// (`mewxi update`, the Config view's "check for updates") still
+    /// work. Default: true.
+    #[serde(default)]
+    update_check: Option<bool>,
     /// When true (default), the TUI checks for updates on startup and
     /// asks before installing one.
     #[serde(default)]
@@ -381,9 +393,15 @@ pub struct AccountsView {
     /// When true, the driver input row auto-unfocuses after a prompt is
     /// sent. Toggleable from the Config view. Defaults to true.
     pub defocus_input_after_send: bool,
+    /// Raw `default_view` value from `accounts.toml`; parsed by the
+    /// TUI's `ViewMode::from_config`. `None` = overview.
+    pub default_view: Option<String>,
     /// Raw `update_channel` value from `accounts.toml`; parsed by
     /// [`crate::update::UpdateChannel::from_config`]. `None` = release.
     pub update_channel: Option<String>,
+    /// Check origin for updates automatically (TUI startup, watch
+    /// daemon). Manual checks ignore this. Defaults to true.
+    pub update_check: bool,
     /// Ask about available updates on TUI startup. Defaults to true.
     pub update_prompt: bool,
     /// Optional override for the self-update source checkout location.
@@ -440,7 +458,9 @@ pub fn load_accounts() -> Result<AccountsView> {
     let mut ignored_names: Vec<String> = Vec::new();
     let mut default_new_session_dir: Option<PathBuf> = None;
     let mut defocus_input_after_send: bool = true;
+    let mut default_view: Option<String> = None;
     let mut update_channel: Option<String> = None;
+    let mut update_check: bool = true;
     let mut update_prompt: bool = true;
     let mut update_repo_dir: Option<PathBuf> = None;
 
@@ -456,7 +476,11 @@ pub fn load_accounts() -> Result<AccountsView> {
             if let Some(v) = cfg.defocus_input_after_send {
                 defocus_input_after_send = v;
             }
+            default_view = cfg.default_view;
             update_channel = cfg.update_channel;
+            if let Some(v) = cfg.update_check {
+                update_check = v;
+            }
             if let Some(v) = cfg.update_prompt {
                 update_prompt = v;
             }
@@ -515,7 +539,9 @@ pub fn load_accounts() -> Result<AccountsView> {
         default_account,
         default_new_session_dir,
         defocus_input_after_send,
+        default_view,
         update_channel,
+        update_check,
         update_prompt,
         update_repo_dir,
     })
@@ -832,6 +858,13 @@ pub fn set_update_channel(channel: &str) -> Result<()> {
             "update_channel".to_string(),
             toml::Value::String(channel.to_string()),
         );
+    })
+}
+
+/// Persist whether mewxi checks origin for updates automatically.
+pub fn set_update_check(enabled: bool) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert("update_check".to_string(), toml::Value::Boolean(enabled));
     })
 }
 

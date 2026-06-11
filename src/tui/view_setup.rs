@@ -31,6 +31,7 @@ pub enum ConfigItem {
     Account(usize),
     Watcher,
     UpdateChannel,
+    UpdateCheck,
     UpdatePrompt,
     UpdateCheckNow,
     DefocusToggle,
@@ -44,6 +45,7 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
     let mut v: Vec<ConfigItem> = (0..n).map(ConfigItem::Account).collect();
     v.push(ConfigItem::Watcher);
     v.push(ConfigItem::UpdateChannel);
+    v.push(ConfigItem::UpdateCheck);
     v.push(ConfigItem::UpdatePrompt);
     v.push(ConfigItem::UpdateCheckNow);
     v.push(ConfigItem::DefocusToggle);
@@ -53,6 +55,8 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
 /// Self-update state the renderer needs, owned by the TUI event loop.
 pub struct UpdateUi<'a> {
     pub channel: UpdateChannel,
+    /// Automatic checks (startup + watcher) are enabled.
+    pub check_enabled: bool,
     pub prompt_enabled: bool,
     /// A background check is in flight right now.
     pub checking: bool,
@@ -268,6 +272,20 @@ fn build_lines(
                 ));
                 owners.push(Some(i));
             }
+            ConfigItem::UpdateCheck => {
+                let (txt, color) = if update.check_enabled {
+                    ("✓ on", Color::Green)
+                } else {
+                    ("off", Color::Yellow)
+                };
+                lines.push(row(
+                    i,
+                    "automatic checks".to_string(),
+                    bold(format!("{txt:<16}"), color),
+                    "check origin in the background (startup + watcher)".to_string(),
+                ));
+                owners.push(Some(i));
+            }
             ConfigItem::UpdatePrompt => {
                 let (txt, color) = if update.prompt_enabled {
                     ("✓ on", Color::Green)
@@ -408,6 +426,12 @@ fn action_hint(
             "Enter: switch to {} — release follows tagged versions, dev follows the main branch",
             update.channel.toggled().as_str()
         ),
+        ConfigItem::UpdateCheck => if update.check_enabled {
+            "Enter: stop checking for updates automatically (manual checks still work)"
+                .to_string()
+        } else {
+            "Enter: check for updates automatically on startup and from the watcher".to_string()
+        },
         ConfigItem::UpdatePrompt => if update.prompt_enabled {
             "Enter: stop asking about updates when the TUI starts".to_string()
         } else {
@@ -490,6 +514,7 @@ mod tests {
     fn update_ui<'a>(status: Option<&'a UpdateStatus>) -> UpdateUi<'a> {
         UpdateUi {
             channel: UpdateChannel::Release,
+            check_enabled: true,
             prompt_enabled: true,
             checking: false,
             status,
@@ -505,11 +530,12 @@ mod tests {
         assert_eq!(list[1], ConfigItem::Account(1));
         assert_eq!(list[2], ConfigItem::Watcher);
         assert_eq!(list[3], ConfigItem::UpdateChannel);
-        assert_eq!(list[4], ConfigItem::UpdatePrompt);
-        assert_eq!(list[5], ConfigItem::UpdateCheckNow);
-        assert_eq!(list[6], ConfigItem::DefocusToggle);
+        assert_eq!(list[4], ConfigItem::UpdateCheck);
+        assert_eq!(list[5], ConfigItem::UpdatePrompt);
+        assert_eq!(list[6], ConfigItem::UpdateCheckNow);
+        assert_eq!(list[7], ConfigItem::DefocusToggle);
         // No snapshot yet → only the fixed rows.
-        assert_eq!(items(None).len(), 5);
+        assert_eq!(items(None).len(), 6);
     }
 
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
@@ -552,6 +578,7 @@ mod tests {
             "background watcher",
             "Updates",
             "channel",
+            "automatic checks",
             "ask on startup",
             "check for updates",
             "Preferences",
@@ -573,8 +600,8 @@ mod tests {
             latest: "v0.2.0".into(),
             detail: "tag v0.2.0 is newer than v0.1.0".into(),
         };
-        // Select the check-now row (index 5 with two accounts).
-        let text = render_to_text(5, Some(status));
+        // Select the check-now row (index 6 with two accounts).
+        let text = render_to_text(6, Some(status));
         assert!(text.contains("⬆ v0.2.0 available"), "header notice missing:\n{text}");
         assert!(text.contains("install the update now"), "hint missing:\n{text}");
     }

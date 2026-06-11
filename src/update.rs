@@ -22,7 +22,9 @@
 //! importantly the statusLine renderer that runs inside every Claude
 //! Code session — can show an "update available" notice without
 //! touching the network. The cache is refreshed by the TUI on startup
-//! and by the `watch` daemon every few hours.
+//! and by the `watch` daemon every few hours. Both automatic checks
+//! honor `update_check = false` in `accounts.toml`; explicit checks
+//! (`mewxi update`, the Config view row) always run.
 
 use crate::accounts::{self, AccountsView};
 use anyhow::{anyhow, Context, Result};
@@ -310,10 +312,14 @@ pub fn spawn_check(tx: std::sync::mpsc::Sender<std::result::Result<UpdateStatus,
 }
 
 /// Fire-and-forget cache refresh, skipped when the cache is still
-/// fresh. Used by the `watch` daemon so the statusLine notice stays
-/// honest without the TUI ever running.
+/// fresh or when `update_check = false` turned automatic checks off.
+/// Used by the `watch` daemon so the statusLine notice stays honest
+/// without the TUI ever running.
 pub fn refresh_cache_async() {
-    if cache_is_fresh() {
+    let auto_enabled = accounts::load_accounts()
+        .map(|v| v.update_check)
+        .unwrap_or(true);
+    if !auto_enabled || cache_is_fresh() {
         return;
     }
     std::thread::spawn(|| {
