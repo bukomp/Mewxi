@@ -449,6 +449,22 @@ pub fn apply_now() -> Result<String> {
     ))
 }
 
+/// Replace the current process with the freshly-installed binary,
+/// re-running the same command line. Both `cargo install` and
+/// [`replace_binary`] swap the file in via rename, so the path this
+/// process was started from now holds the new build — exec'ing it *is*
+/// the restart. Call only with the terminal fully restored (the new
+/// process sets up its own alternate screen). Returns the error when
+/// the exec itself fails; on success it never returns.
+pub fn restart_process() -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe()
+        .ok()
+        .filter(|p| p.is_file())
+        .unwrap_or_else(cargo_bin_path);
+    Command::new(exe).args(std::env::args_os().skip(1)).exec()
+}
+
 /// Where `cargo install` puts binaries: `$CARGO_INSTALL_ROOT`, then
 /// `$CARGO_HOME`, then `~/.cargo` — each with `/bin/mewxi` appended.
 fn cargo_bin_path() -> PathBuf {

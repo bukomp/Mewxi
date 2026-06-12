@@ -411,7 +411,26 @@ pub fn run(no_live: bool) -> Result<()> {
     )?;
     terminal.show_cursor()?;
     live_usage::set_tui_mode(false);
-    result
+    match result? {
+        LoopExit::Quit => Ok(()),
+        LoopExit::RestartAfterUpdate => {
+            // The loop already tore down driven sessions and pollers —
+            // same path as 'q' — and the terminal is restored, so the
+            // new binary can take over this process wholesale.
+            println!("mewxi updated — restarting …");
+            let err = update::restart_process();
+            Err(anyhow::anyhow!(
+                "failed to restart after update: {err} — restart mewxi manually"
+            ))
+        }
+    }
+}
+
+/// How [`run_loop`] ended: a normal quit, or a successful self-update
+/// that should be followed by exec'ing the new binary.
+enum LoopExit {
+    Quit,
+    RestartAfterUpdate,
 }
 
 /// Tear down the alt-screen / raw-mode / mouse-capture stack so an
@@ -451,17 +470,20 @@ fn resume_terminal<B: ratatui::backend::Backend>(
 /// Suspend the TUI, run the self-update (git fast-forward + cargo
 /// rebuild, streaming output to the real terminal so the user sees
 /// progress), then resume. Returns a one-line outcome message for the
-/// status banner.
-fn run_update_apply<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> String {
+/// status banner plus whether the update actually installed — callers
+/// use the flag to exit the loop and restart into the new binary.
+fn run_update_apply<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+) -> (String, bool) {
     if let Err(e) = suspend_terminal(terminal) {
-        return format!("update aborted — failed to suspend terminal: {e}");
+        return (format!("update aborted — failed to suspend terminal: {e}"), false);
     }
     let res = update::apply_now();
     let resume = resume_terminal(terminal);
     match (res, resume) {
-        (Ok(msg), Ok(())) => msg,
-        (Ok(msg), Err(e)) => format!("{msg} (terminal resume error: {e})"),
-        (Err(e), _) => format!("update FAILED: {e}"),
+        (Ok(msg), Ok(())) => (msg, true),
+        (Ok(msg), Err(e)) => (format!("{msg} (terminal resume error: {e})"), true),
+        (Err(e), _) => (format!("update FAILED: {e}"), false),
     }
 }
 
@@ -802,7 +824,7 @@ fn spawn_live_poller(
 fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     no_live: bool,
-) -> Result<()> {
+) -> Result<LoopExit> {
     crate::debug_log::log(&format!(
         "tui.start no_live={no_live} pid={}",
         std::process::id()
@@ -1020,6 +1042,11 @@ fn run_loop<B: ratatui::backend::Backend>(
     if setup_snapshot.as_ref().is_some_and(|s| !s.fully_ok()) {
         mode = ViewMode::Setup;
     }
+
+    // Set when a self-update installed successfully: exit the loop
+    // through the normal teardown below, then let `run` exec the new
+    // binary instead of returning to the shell.
+    let mut restart_after_update = false;
 
     loop {
         let sessions = flatten_sessions(&per_account, &driver_optimistic);
@@ -1976,7 +2003,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                             UpdatePromptOutcome::UpdateNow => {
                                 update_prompt_modal = None;
-                                let msg = run_update_apply(terminal);
+                                let (msg, updated) = run_update_apply(terminal);
                                 // The cache was rewritten by apply; drop
                                 // the stale in-memory status so the
                                 // Config view doesn't keep advertising
@@ -1984,6 +2011,13 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 update_status = None;
                                 update_error = None;
                                 setup_message = Some(msg);
+                                if updated {
+                                    for (_, cmd_tx) in &live_pollers {
+                                        let _ = cmd_tx.send(LiveCmd::Stop);
+                                    }
+                                    restart_after_update = true;
+                                    break;
+                                }
                             }
                         }
                         continue;
@@ -3096,10 +3130,18 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             .as_ref()
                                             .is_some_and(|s| s.available)
                                         {
-                                            let msg = run_update_apply(terminal);
+                                            let (msg, updated) =
+                                                run_update_apply(terminal);
                                             update_status = None;
                                             update_error = None;
                                             setup_message = Some(msg);
+                                            if updated {
+                                                for (_, cmd_tx) in &live_pollers {
+                                                    let _ = cmd_tx.send(LiveCmd::Stop);
+                                                }
+                                                restart_after_update = true;
+                                                break;
+                                            }
                                         } else {
                                             update_error = None;
                                             update_checking = true;
@@ -3312,7 +3354,11 @@ fn run_loop<B: ratatui::backend::Backend>(
     for mut ps in pending_spawns.drain(..) {
         let _ = ps.pty.kill();
     }
-    Ok(())
+    Ok(if restart_after_update {
+        LoopExit::RestartAfterUpdate
+    } else {
+        LoopExit::Quit
+    })
 }
 
 /// Short, table-friendly form of a session-id UUID (first 8 chars).
