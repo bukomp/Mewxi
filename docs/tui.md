@@ -49,7 +49,8 @@ what `Enter` will do before you press it.
   background watcher service.
 - **Updates** — the self-update channel (`release` follows version
   tags, `dev` follows the main branch), whether the TUI asks about
-  updates on startup, and a check/install row.
+  updates on startup, where updates clone + build (the OS temp dir by
+  default), and a check/install row.
 - **Preferences** — TUI behaviour toggles.
 
 Shortcuts: `a` fixes everything that's missing, `i` ignores/un-ignores
@@ -60,8 +61,11 @@ the selected account, `R` rescans, `Esc` goes back.
 On startup the TUI checks the source checkout's git remote in the
 background; if something newer exists it asks before installing
 (`Enter` updates, `Esc` postpones, `d` stops the startup question).
-Installing fast-forwards the checkout and rebuilds via
-`cargo install --path . --force`, then asks you to restart mewxi.
+Installing clones the target ref into a throwaway folder under the OS
+temp dir (configurable via the Config view's "update build dir" row or
+`update_build_dir` in `accounts.toml`), rebuilds it via
+`cargo install --path … --force`, deletes the clone, and restarts —
+your source checkout is never touched.
 `mewxi update` does the same from the CLI; `mewxi update --check` only
 reports. While an update is pending, the Claude Code statusline also
 shows a small `⬆ mewxi update` notice.

@@ -2,8 +2,11 @@
 //! mewxi and rebuild via `cargo install`.
 //!
 //! mewxi is installed from a git checkout (`cargo install --path .`),
-//! so "update" means: fetch the remote, compare, fast-forward the
-//! checkout, and re-run the install. Two channels, picked in
+//! so "update" means: fetch the remote, compare, clone the target ref
+//! into a throwaway build dir (the OS temp dir by default,
+//! `update_build_dir` in `accounts.toml` to override) and re-run the
+//! install from there — the source checkout itself is never touched.
+//! Two channels, picked in
 //! `accounts.toml` (`update_channel`) or from the TUI's Config view:
 //!
 //! - `release` — follow version tags (`v0.2.0`). An update exists when
@@ -452,55 +455,74 @@ pub fn refresh_cache_async() {
 // Apply
 // ---------------------------------------------------------------------------
 
-/// Update the checkout to the channel's newest point and rebuild via
-/// `cargo install --path <repo> --force`. Streams git/cargo output to
-/// the inherited stdout/stderr — call only with the terminal restored
-/// (the TUI suspends its alternate screen around this). Refuses to
-/// touch a dirty checkout.
+/// Where update builds happen: a per-run folder under the configured
+/// `update_build_dir`, or the OS temp dir (`/tmp` on Unix, `%TEMP%` on
+/// Windows) by default. Per-process name so concurrent updates can't
+/// trample each other.
+fn build_workdir(override_dir: Option<&Path>) -> PathBuf {
+    let root = override_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    root.join(format!("mewxi-update-{}", std::process::id()))
+}
+
+/// Build the channel's newest point in a throwaway clone and install
+/// it via `cargo install --path <clone> --force` — the source checkout
+/// is only consulted for its origin URL and never modified, so a dirty
+/// working tree or a checked-out feature branch is fine. Streams
+/// git/cargo output to the inherited stdout/stderr — call only with
+/// the terminal restored (the TUI suspends its alternate screen around
+/// this).
 pub fn apply_now() -> Result<String> {
     let view = accounts::load_accounts()?;
     let channel = channel_from_view(&view);
     let repo = repo_dir(view.update_repo_dir.as_deref())?;
 
-    let dirty = git(&repo, &["status", "--porcelain"])?;
-    if !dirty.is_empty() {
-        return Err(anyhow!(
-            "{} has uncommitted changes — update it manually (git pull && cargo install --path .)",
-            repo.display()
-        ));
-    }
-
     println!("mewxi update ({})", channel.as_str());
-    println!("  checkout: {}", repo.display());
     println!("  fetching origin …");
     git(&repo, &["fetch", "--quiet", "--tags", "origin"]).context("fetching origin")?;
 
+    let origin = git(&repo, &["remote", "get-url", "origin"]).context("reading origin URL")?;
+    let git_ref = match channel {
+        UpdateChannel::Release => latest_version_tag(&repo)?
+            .ok_or_else(|| anyhow!("no version tags on origin — switch to the dev channel?"))?,
+        UpdateChannel::Dev => remote_default_branch(&repo),
+    };
+
+    let workdir = build_workdir(view.update_build_dir.as_deref());
+    if workdir.exists() {
+        std::fs::remove_dir_all(&workdir)
+            .with_context(|| format!("clearing stale build dir {}", workdir.display()))?;
+    }
+    if let Some(parent) = workdir.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating build dir {}", parent.display()))?;
+    }
+    println!("  cloning {git_ref} into {} …", workdir.display());
+    let status = Command::new("git")
+        .args(["clone", "--quiet", "--depth", "1", "--branch", &git_ref])
+        .arg(&origin)
+        .arg(&workdir)
+        .status()
+        .context("running git clone")?;
+    if !status.success() {
+        return Err(anyhow!("git clone failed ({status})"));
+    }
     let target = match channel {
-        UpdateChannel::Release => {
-            let tag = latest_version_tag(&repo)?
-                .ok_or_else(|| anyhow!("no version tags on origin — switch to the dev channel?"))?;
-            println!("  checking out {tag} …");
-            git(&repo, &["checkout", "--quiet", &tag])?;
-            tag
-        }
-        UpdateChannel::Dev => {
-            let branch = remote_default_branch(&repo);
-            println!("  fast-forwarding {branch} …");
-            git(&repo, &["checkout", "--quiet", &branch])?;
-            git(&repo, &["merge", "--ff-only", "--quiet", &format!("origin/{branch}")])
-                .context("fast-forward failed (local commits on the branch?)")?;
-            git(&repo, &["rev-parse", "--short", "HEAD"])?
-        }
+        UpdateChannel::Release => git_ref.clone(),
+        UpdateChannel::Dev => git(&workdir, &["rev-parse", "--short", "HEAD"])?,
     };
 
     println!("  building (cargo install --path … --force) — this can take a minute …");
     let status = Command::new("cargo")
         .arg("install")
         .arg("--path")
-        .arg(&repo)
+        .arg(&workdir)
         .arg("--force")
         .status()
         .context("running cargo install (is cargo on PATH?)")?;
+    // Best-effort cleanup either way — the clone is throwaway.
+    let _ = std::fs::remove_dir_all(&workdir);
     if !status.success() {
         return Err(anyhow!("cargo install failed ({status})"));
     }

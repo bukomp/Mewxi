@@ -35,6 +35,7 @@ pub enum ConfigItem {
     UpdateCheck,
     UpdateInterval,
     UpdatePrompt,
+    UpdateBuildDir,
     UpdateCheckNow,
     DefaultView,
     DefocusToggle,
@@ -102,6 +103,7 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
     v.push(ConfigItem::UpdateCheck);
     v.push(ConfigItem::UpdateInterval);
     v.push(ConfigItem::UpdatePrompt);
+    v.push(ConfigItem::UpdateBuildDir);
     v.push(ConfigItem::UpdateCheckNow);
     v.push(ConfigItem::DefaultView);
     v.push(ConfigItem::DefocusToggle);
@@ -116,6 +118,11 @@ pub struct UpdateUi<'a> {
     /// Minimum time between automatic checks.
     pub interval: UpdateInterval,
     pub prompt_enabled: bool,
+    /// Configured build dir for updates; `None` = OS temp dir.
+    pub build_dir: Option<&'a str>,
+    /// When the build-dir row is being edited, the in-progress text
+    /// (with a trailing cursor marker rendered by this view).
+    pub build_dir_edit: Option<&'a str>,
     /// A background check is in flight right now.
     pub checking: bool,
     /// Most recent successful check this TUI run (or from cache).
@@ -369,6 +376,30 @@ fn build_lines(
                 ));
                 owners.push(Some(i));
             }
+            ConfigItem::UpdateBuildDir => {
+                let (txt, color, extra) = if let Some(edit) = update.build_dir_edit {
+                    (
+                        format!("{edit}▏"),
+                        Color::Yellow,
+                        "Enter save · Esc cancel · empty = system temp".to_string(),
+                    )
+                } else {
+                    match update.build_dir {
+                        Some(d) => (
+                            d.to_string(),
+                            Color::Magenta,
+                            "where updates clone + build".to_string(),
+                        ),
+                        None => (
+                            "system temp".to_string(),
+                            Color::Magenta,
+                            std::env::temp_dir().display().to_string(),
+                        ),
+                    }
+                };
+                lines.push(row(i, "update build dir".to_string(), bold(format!("{txt:<16}"), color), extra));
+                owners.push(Some(i));
+            }
             ConfigItem::UpdateCheckNow => {
                 let (txt, color, extra) = if update.checking {
                     ("checking…".to_string(), Color::DarkGray, String::new())
@@ -522,6 +553,14 @@ fn action_hint(
         } else {
             "Enter: ask about available updates when the TUI starts".to_string()
         },
+        ConfigItem::UpdateBuildDir => {
+            if update.build_dir_edit.is_some() {
+                "type the build directory — Enter: save · Esc: cancel · empty resets to the system temp dir"
+                    .to_string()
+            } else {
+                "Enter: edit where updates clone + build (default: the OS temp dir)".to_string()
+            }
+        }
         ConfigItem::UpdateCheckNow => {
             if update.checking {
                 "checking origin — hold on…".to_string()
@@ -608,6 +647,8 @@ mod tests {
             check_enabled: true,
             interval: UpdateInterval::Hour6,
             prompt_enabled: true,
+            build_dir: None,
+            build_dir_edit: None,
             checking: false,
             status,
             error: None,
@@ -625,11 +666,12 @@ mod tests {
         assert_eq!(list[4], ConfigItem::UpdateCheck);
         assert_eq!(list[5], ConfigItem::UpdateInterval);
         assert_eq!(list[6], ConfigItem::UpdatePrompt);
-        assert_eq!(list[7], ConfigItem::UpdateCheckNow);
-        assert_eq!(list[8], ConfigItem::DefaultView);
-        assert_eq!(list[9], ConfigItem::DefocusToggle);
+        assert_eq!(list[7], ConfigItem::UpdateBuildDir);
+        assert_eq!(list[8], ConfigItem::UpdateCheckNow);
+        assert_eq!(list[9], ConfigItem::DefaultView);
+        assert_eq!(list[10], ConfigItem::DefocusToggle);
         // No snapshot yet → only the fixed rows.
-        assert_eq!(items(None).len(), 8);
+        assert_eq!(items(None).len(), 9);
     }
 
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
@@ -676,6 +718,7 @@ mod tests {
             "automatic checks",
             "check interval",
             "ask on startup",
+            "update build dir",
             "check for updates",
             "Preferences",
             "defocus input after send",
@@ -696,8 +739,8 @@ mod tests {
             latest: "v0.2.0".into(),
             detail: "tag v0.2.0 is newer than v0.1.0".into(),
         };
-        // Select the check-now row (index 7 with two accounts).
-        let text = render_to_text(7, Some(status));
+        // Select the check-now row (index 8 with two accounts).
+        let text = render_to_text(8, Some(status));
         assert!(text.contains("⬆ v0.2.0 available"), "header notice missing:\n{text}");
         assert!(text.contains("install the update now"), "hint missing:\n{text}");
     }

@@ -63,7 +63,7 @@ will never reach the binary you actually run.
 Mewxi updates itself from a git checkout of this repo:
 
 ```bash
-mewxi update          # fetch, fast-forward, rebuild, replace the running binary
+mewxi update          # fetch, clone + rebuild in a temp dir, replace the running binary
 mewxi update --check  # just report
 ```
 
@@ -74,10 +74,14 @@ or from the TUI's Config view (`4`):
 - `release` (default) — follow version tags (`v1.0.1`).
 - `dev` — follow the main branch.
 
-The updater fast-forwards the checkout, rebuilds with
-`cargo install --path . --force`, and — if the mewxi you're running
-lives somewhere other than cargo's bin dir — installs over the running
-binary too. It refuses to touch a checkout with uncommitted changes.
+The updater clones the target ref into a throwaway folder under the OS
+temp dir (`/tmp` on Unix, `%TEMP%` on Windows — override with
+`update_build_dir` in `accounts.toml` or from the Config view), rebuilds
+there with `cargo install --path <clone> --force`, then deletes the
+clone. Your source checkout is never modified — uncommitted changes and
+checked-out feature branches are fine. If the mewxi you're running
+lives somewhere other than cargo's bin dir, the updater installs over
+the running binary too.
 
 **If you installed a prebuilt binary**, the self-updater doesn't know
 where the source lives (that path is baked in at build time, and for
@@ -89,7 +93,9 @@ release binaries it points at the CI runner). Either:
   got this one. The Claude Code statusline still shows a small
   `⬆ mewxi update` notice when a newer version is available.
 
-Other knobs in `accounts.toml`: `update_prompt = false` silences the
+Other knobs in `accounts.toml`: `update_build_dir = "~/builds"` moves
+the throwaway build folder somewhere other than the OS temp dir
+(useful when `/tmp` is small or mounted noexec); `update_prompt = false` silences the
 startup question (the statusline notice stays); `update_check = false`
 turns off automatic checks entirely — no fetch on TUI startup, none
 from the watcher (`mewxi update`, `--check`, and the Config view's

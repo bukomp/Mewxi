@@ -369,6 +369,11 @@ struct AccountsConfig {
     /// the compile-time manifest dir is used otherwise. `~` expands.
     #[serde(default)]
     update_repo_dir: Option<String>,
+    /// Where self-update clones + builds the source before installing.
+    /// Defaults to the OS temp dir (`/tmp` on Unix, `%TEMP%` on
+    /// Windows). `~` expands.
+    #[serde(default)]
+    update_build_dir: Option<String>,
     #[serde(default)]
     accounts: Vec<AccountEntry>,
 }
@@ -414,6 +419,9 @@ pub struct AccountsView {
     pub update_prompt: bool,
     /// Optional override for the self-update source checkout location.
     pub update_repo_dir: Option<PathBuf>,
+    /// Where self-update clones + builds before installing. `None` =
+    /// the OS temp dir.
+    pub update_build_dir: Option<PathBuf>,
 }
 
 impl AccountsView {
@@ -472,6 +480,7 @@ pub fn load_accounts() -> Result<AccountsView> {
     let mut update_interval: Option<String> = None;
     let mut update_prompt: bool = true;
     let mut update_repo_dir: Option<PathBuf> = None;
+    let mut update_build_dir: Option<PathBuf> = None;
 
     if let Some(cfg_path) = config_path() {
         if cfg_path.exists() {
@@ -495,6 +504,12 @@ pub fn load_accounts() -> Result<AccountsView> {
                 update_prompt = v;
             }
             update_repo_dir = cfg.update_repo_dir.map(|s| expand_tilde(&s));
+            update_build_dir = cfg
+                .update_build_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(expand_tilde);
             for entry in cfg.accounts {
                 accounts.push(Account {
                     name: entry.name,
@@ -555,6 +570,7 @@ pub fn load_accounts() -> Result<AccountsView> {
         update_interval,
         update_prompt,
         update_repo_dir,
+        update_build_dir,
     })
 }
 
@@ -898,6 +914,19 @@ pub fn set_update_interval(interval: &str) -> Result<()> {
             "update_interval".to_string(),
             toml::Value::String(interval.to_string()),
         );
+    })
+}
+
+/// Persist where self-update clones + builds the source. An empty (or
+/// whitespace) path removes the key, falling back to the OS temp dir.
+pub fn set_update_build_dir(dir: &str) -> Result<()> {
+    let dir = dir.trim().to_string();
+    edit_config_table(move |t| {
+        if dir.is_empty() {
+            t.remove("update_build_dir");
+        } else {
+            t.insert("update_build_dir".to_string(), toml::Value::String(dir));
+        }
     })
 }
 

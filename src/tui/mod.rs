@@ -1074,6 +1074,13 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut update_error: Option<String> = None;
     let mut update_checking = checking;
     let mut update_prompt_modal: Option<UpdatePromptModal> = None;
+    let mut update_build_dir: Option<String> = view
+        .update_build_dir
+        .as_ref()
+        .map(|p| p.display().to_string());
+    // While Some, the Config view's build-dir row is in text-edit mode
+    // and keys go to this input instead of navigation.
+    let mut update_build_dir_edit: Option<text_input::TextInput> = None;
     let mut update_prompted = false;
     if let Some(cached) = update_cached {
         if cached.available && update_prompt_enabled {
@@ -1586,6 +1593,8 @@ fn run_loop<B: ratatui::backend::Backend>(
             check_enabled: update_check_enabled,
             interval: update_interval,
             prompt_enabled: update_prompt_enabled,
+            build_dir: update_build_dir.as_deref(),
+            build_dir_edit: update_build_dir_edit.as_ref().map(|i| i.as_str()),
             checking: update_checking,
             status: update_status.as_ref(),
             error: update_error.as_deref(),
@@ -2077,6 +2086,42 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     restart_after_update = true;
                                     break;
                                 }
+                            }
+                        }
+                        continue;
+                    }
+                    // Build-dir edit on the Config view owns every
+                    // keystroke while active: Enter saves, Esc cancels,
+                    // everything else edits the path.
+                    if let Some(input) = update_build_dir_edit.as_mut() {
+                        match k.code {
+                            KeyCode::Enter => {
+                                let dir = input.as_str().trim().to_string();
+                                update_build_dir_edit = None;
+                                match accounts::set_update_build_dir(&dir) {
+                                    Ok(()) => {
+                                        update_build_dir =
+                                            if dir.is_empty() { None } else { Some(dir.clone()) };
+                                        setup_message = Some(match update_build_dir.as_deref() {
+                                            Some(d) => format!("update build dir → {d}"),
+                                            None => format!(
+                                                "update build dir → system temp ({})",
+                                                std::env::temp_dir().display()
+                                            ),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        setup_message =
+                                            Some(format!("failed to save build dir: {e}"));
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                update_build_dir_edit = None;
+                                setup_message = Some("build dir edit cancelled".into());
+                            }
+                            _ => {
+                                let _ = input.handle_edit_key(k);
                             }
                         }
                         continue;
@@ -3198,6 +3243,13 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                         }
+                                    }
+                                    Some(view_setup::ConfigItem::UpdateBuildDir) => {
+                                        update_build_dir_edit =
+                                            Some(text_input::TextInput::from_str(
+                                                update_build_dir.as_deref().unwrap_or(""),
+                                            ));
+                                        setup_message = None;
                                     }
                                     Some(view_setup::ConfigItem::UpdateCheckNow) => {
                                         if update_checking {
