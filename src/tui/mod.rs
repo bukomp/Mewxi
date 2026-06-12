@@ -826,9 +826,46 @@ fn spawn_live_poller(
     (out_rx, in_tx)
 }
 
+/// In-flight startup self-update check, started in [`run`] the moment
+/// the splash mascot appears and handed to [`run_loop`], which drains
+/// `rx` on every tick. `cached` is the still-fresh on-disk check (when
+/// one exists) so the UI can show a verdict instantly while the live
+/// check confirms it against origin.
+struct StartupUpdateCheck {
+    tx: Sender<std::result::Result<UpdateStatus, String>>,
+    rx: Receiver<std::result::Result<UpdateStatus, String>>,
+    cached: Option<UpdateStatus>,
+    checking: bool,
+}
+
+/// Start the startup update check. Unlike the periodic cache refresh,
+/// this always hits origin (one background git fetch) so every launch
+/// knows whether the running binary is outdated — a fresh cache only
+/// pre-seeds the answer, it doesn't suppress the check. The only
+/// opt-out is `update_check = false` in `accounts.toml`.
+fn start_update_check() -> StartupUpdateCheck {
+    let (tx, rx) = channel::<std::result::Result<UpdateStatus, String>>();
+    let view = accounts::load_accounts().ok();
+    let enabled = view.as_ref().map(|v| v.update_check).unwrap_or(true);
+    let mut cached = None;
+    let mut checking = false;
+    if enabled {
+        if let Some(view) = view.as_ref() {
+            cached = update::fresh_cached_status(
+                update::channel_from_view(view),
+                update::interval_from_view(view),
+            );
+        }
+        update::spawn_check(tx.clone());
+        checking = true;
+    }
+    StartupUpdateCheck { tx, rx, cached, checking }
+}
+
 fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     no_live: bool,
+    startup_update: StartupUpdateCheck,
 ) -> Result<LoopExit> {
     crate::debug_log::log(&format!(
         "tui.start no_live={no_live} pid={}",
@@ -1012,38 +1049,36 @@ fn run_loop<B: ratatui::backend::Backend>(
 
     let mut kill_confirm_modal: Option<KillConfirmModal> = None;
 
-    // Self-update: kick a background check at startup (one git fetch
-    // against origin) unless `update_check = false` turned automatic
-    // checks off or the cached check is still fresher than the
-    // configured `update_interval` — then the cache stands in. The
-    // result lands on `update_rx`; when something newer exists AND the
-    // startup prompt is enabled, the modal asks the user once per run.
-    // The Config view reads the same state.
-    let (update_tx, update_rx) =
-        channel::<std::result::Result<UpdateStatus, String>>();
+    // Self-update: the background check was kicked in `run` the moment
+    // the splash mascot appeared (see [`start_update_check`]), so by
+    // now its result is often already waiting on `update_rx` — the
+    // drain in the main loop picks it up on the first tick. A fresh
+    // cached check pre-seeds the status (and the startup prompt) so
+    // the verdict shows instantly even before the live result lands.
+    // When something newer exists AND the startup prompt is enabled,
+    // the modal asks the user once per run. The Config view reads the
+    // same state.
+    let StartupUpdateCheck {
+        tx: update_tx,
+        rx: update_rx,
+        cached: update_cached,
+        checking,
+    } = startup_update;
     let mut update_channel = update::channel_from_view(&view);
     let mut update_check_enabled = view.update_check;
     let mut update_interval = update::interval_from_view(&view);
     let mut update_prompt_enabled = view.update_prompt;
     let mut update_status: Option<UpdateStatus> = None;
     let mut update_error: Option<String> = None;
-    let mut update_checking = false;
+    let mut update_checking = checking;
     let mut update_prompt_modal: Option<UpdatePromptModal> = None;
     let mut update_prompted = false;
-    if update_check_enabled {
-        match update::fresh_cached_status(update_channel, update_interval) {
-            Some(cached) => {
-                if cached.available && update_prompt_enabled {
-                    update_prompt_modal = Some(UpdatePromptModal::new(cached.clone()));
-                    update_prompted = true;
-                }
-                update_status = Some(cached);
-            }
-            None => {
-                update_checking = true;
-                update::spawn_check(update_tx.clone());
-            }
+    if let Some(cached) = update_cached {
+        if cached.available && update_prompt_enabled {
+            update_prompt_modal = Some(UpdatePromptModal::new(cached.clone()));
+            update_prompted = true;
         }
+        update_status = Some(cached);
     }
 
     // Refresh the launchd watcher if it's still running the previous

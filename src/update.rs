@@ -24,10 +24,12 @@
 //! `~/.cache/mewxi/update-check.json` so cheap consumers — most
 //! importantly the statusLine renderer that runs inside every Claude
 //! Code session — can show an "update available" notice without
-//! touching the network. The cache is refreshed by the TUI on startup
-//! and by the `watch` daemon every few hours. Both automatic checks
-//! honor `update_check = false` in `accounts.toml`; explicit checks
-//! (`mewxi update`, the Config view row) always run.
+//! touching the network. The TUI checks on every startup (kicked the
+//! moment the splash appears, with a fresh cache pre-seeding the
+//! verdict while the check runs); the `watch` daemon refreshes the
+//! cache every few hours, skipping while it's still fresh. Both
+//! automatic checks honor `update_check = false` in `accounts.toml`;
+//! explicit checks (`mewxi update`, the Config view row) always run.
 
 use crate::accounts::{self, AccountsView};
 use anyhow::{anyhow, Context, Result};
