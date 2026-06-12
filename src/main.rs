@@ -353,16 +353,24 @@ fn run_drive(
     Ok(())
 }
 
-/// Read Claude Code's hook payload from stdin and pull `session_id`.
-/// The payload shape is `{"session_id": "<uuid>", ...}` — every hook
-/// event includes it. Best-effort: returns None if stdin is empty,
-/// not JSON, or missing the field.
-fn read_session_id_from_stdin() -> Option<String> {
+/// Read Claude Code's hook payload from stdin and pull `session_id`
+/// plus the current `permission_mode`. The payload shape is
+/// `{"session_id": "<uuid>", "permission_mode": "default", ...}` —
+/// every hook event includes both (older Claude Code spelled the mode
+/// `permissionMode`, accept either). Best-effort: returns None if
+/// stdin is empty, not JSON, or missing session_id.
+fn read_hook_payload_from_stdin() -> Option<(String, Option<String>)> {
     use std::io::Read;
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf).ok()?;
     let v: serde_json::Value = serde_json::from_str(buf.trim()).ok()?;
-    v.get("session_id").and_then(|s| s.as_str()).map(String::from)
+    let session_id = v.get("session_id").and_then(|s| s.as_str())?.to_string();
+    let mode = v
+        .get("permission_mode")
+        .or_else(|| v.get("permissionMode"))
+        .and_then(|s| s.as_str())
+        .map(String::from);
+    Some((session_id, mode))
 }
 
 fn run_hook(action: HookAction) -> Result<()> {
@@ -372,17 +380,28 @@ fn run_hook(action: HookAction) -> Result<()> {
         HookAction::AwaitingSet { dir } => (dir, true),
         HookAction::AwaitingClear { dir } => (dir, false),
     };
-    let Some(session_id) = read_session_id_from_stdin() else {
+    let Some((session_id, mode)) = read_hook_payload_from_stdin() else {
         return Ok(());
     };
-    let marker = dir.join("sessions").join(format!("{session_id}.awaiting"));
+    let sessions = dir.join("sessions");
+    let marker = sessions.join(format!("{session_id}.awaiting"));
     if do_set {
-        if let Some(parent) = marker.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+        let _ = std::fs::create_dir_all(&sessions);
         let _ = std::fs::File::create(&marker);
     } else {
         let _ = std::fs::remove_file(&marker);
+    }
+    // Persist the live permission mode alongside the marker. The
+    // transcript only records the mode on typed user prompts (Claude
+    // Code ≥2.1.x no longer writes dedicated `permission-mode`
+    // records), so Shift-Tab cycles inside a session would otherwise
+    // be invisible until the next prompt. Hooks fire on every tool
+    // use and turn end and always carry the current mode — the
+    // freshest signal available. scan() prefers this file over the
+    // transcript tail.
+    if let Some(mode) = mode {
+        let _ = std::fs::create_dir_all(&sessions);
+        let _ = std::fs::write(sessions.join(format!("{session_id}.mode")), mode);
     }
     Ok(())
 }

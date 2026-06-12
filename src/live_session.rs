@@ -278,7 +278,7 @@ fn tail_activity(path: &Path) -> Option<TailKind> {
 ///    field reflecting the mode active when the prompt was submitted.
 ///    Fallback for sessions whose initial dedicated record is outside
 ///    the tail window.
-fn tail_permission_mode(path: &Path) -> Option<String> {
+fn tail_permission_mode(path: &Path) -> Option<(String, DateTime<Utc>)> {
     let tail = read_tail(path, 256 * 1024)?;
     for line in tail.lines().rev() {
         if line.is_empty() {
@@ -286,21 +286,45 @@ fn tail_permission_mode(path: &Path) -> Option<String> {
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let record_type = v.get("type").and_then(|x| x.as_str());
-        if record_type == Some("permission-mode") {
-            if let Some(m) = v.get("permissionMode").and_then(|x| x.as_str()) {
-                return Some(m.to_string());
-            }
-        }
         // Fallback only for `user` records — assistant/system records
         // can echo a permissionMode field that doesn't reflect a real
         // mode change.
-        if record_type == Some("user") {
+        if record_type == Some("permission-mode") || record_type == Some("user") {
             if let Some(m) = v.get("permissionMode").and_then(|x| x.as_str()) {
-                return Some(m.to_string());
+                let ts = v
+                    .get("timestamp")
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|t| t.with_timezone(&Utc))
+                    .unwrap_or(DateTime::<Utc>::MIN_UTC);
+                return Some((m.to_string(), ts));
             }
         }
     }
     None
+}
+
+/// Read the `sessions/<id>.mode` sidecar written by the mewxi hook
+/// handler on every PermissionRequest / PostToolUse / Stop event. Its
+/// mtime is the moment Claude Code last reported the mode, so callers
+/// can compare freshness against transcript records. Returns None if
+/// the file is missing or empty.
+fn hook_permission_mode(account: &Account, session_id: &str) -> Option<(String, DateTime<Utc>)> {
+    let path = account
+        .dir
+        .join("sessions")
+        .join(format!("{session_id}.mode"));
+    let mode = std::fs::read_to_string(&path).ok()?;
+    let mode = mode.trim();
+    if mode.is_empty() {
+        return None;
+    }
+    let mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(DateTime::<Utc>::from)
+        .unwrap_or(DateTime::<Utc>::MIN_UTC);
+    Some((mode.to_string(), mtime))
 }
 
 fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailKind> {
@@ -720,22 +744,34 @@ pub fn scan(
             None => last_activity,
         };
 
-        // Claude Code writes a `permission-mode` record to the JSONL
-        // on session start, but the transcript file isn't created
-        // until the first prompt. For a brand-new idle session we'd
-        // have nothing to read.
+        // The mode comes from two signals, each fresher in different
+        // situations, so pick whichever was stamped most recently:
         //
-        // Fall back to the account's configured default mode (derived
+        //  * `sessions/<id>.mode` sidecar — written by our hook on
+        //    every PermissionRequest / PostToolUse / Stop. Catches
+        //    Shift-Tab cycles done inside the session, which modern
+        //    Claude Code never writes to the transcript.
+        //  * Transcript tail — `user` records carry the mode active
+        //    when the prompt was typed; momentarily fresher than the
+        //    sidecar right after a new prompt (the sidecar last
+        //    updated at the previous turn's Stop).
+        //
+        // Neither exists for a brand-new idle session (the transcript
+        // isn't created until the first prompt, no hook has fired) —
+        // fall back to the account's configured default mode (derived
         // from `skipAutoPermissionPrompt` in the account's
-        // `settings.json` — `true` means the user has opted into
-        // auto-mode-by-default). This way the badge shows the right
-        // mode immediately on spawn, and the post-prompt scan
-        // overwrites with whatever claude actually settles on.
-        let fallback_mode = account.default_permission_mode();
-        let permission_mode = if transcript_exists {
-            tail_permission_mode(&transcript).or_else(|| Some(fallback_mode.clone()))
-        } else {
-            Some(fallback_mode)
+        // `settings.json`). This way the badge shows the right mode
+        // immediately on spawn, and later scans overwrite with
+        // whatever claude actually settles on.
+        let hook_mode = hook_permission_mode(account, &marker.session_id);
+        let tail_mode = transcript_exists
+            .then(|| tail_permission_mode(&transcript))
+            .flatten();
+        let permission_mode = match (hook_mode, tail_mode) {
+            (Some((h, ht)), Some((t, tt))) => Some(if ht >= tt { h } else { t }),
+            (Some((h, _)), None) => Some(h),
+            (None, Some((t, _))) => Some(t),
+            (None, None) => Some(account.default_permission_mode()),
         };
 
         out.push(LiveSession {

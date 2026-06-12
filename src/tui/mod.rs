@@ -217,19 +217,14 @@ impl ModeCycle {
 }
 
 /// True when claude would accept auto mode on this model. Mirrors
-/// claude's own gate ("auto mode unavailable for this model"): Haiku is
-/// out; Opus and Sonnet are in. An empty / `default` slug is treated as
-/// "probably supported" so the cycle includes auto on a freshly-spawned
-/// session before the first assistant record lands the real model name.
+/// claude's own gate ("auto mode unavailable for this model"): only
+/// Haiku is rejected. Everything else — including unknown/future model
+/// families — is treated as supported. An opus/sonnet allowlist here
+/// silently dropped `auto` from the predicted cycle on fable sessions,
+/// leaving the badge stuck on a wrong mode; with the denylist a wrong
+/// guess costs one mispredicted frame instead.
 fn model_supports_auto(model: &str) -> bool {
-    let m = model.trim().to_ascii_lowercase();
-    if m.is_empty() || m == "default" {
-        return true;
-    }
-    if m.contains("haiku") {
-        return false;
-    }
-    m.contains("opus") || m.contains("sonnet")
+    !model.trim().to_ascii_lowercase().contains("haiku")
 }
 
 /// Human label shown in the status banner — mirrors the rendered badge.
