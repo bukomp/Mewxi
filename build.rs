@@ -11,6 +11,16 @@ fn main() {
     // picks up the new hash without needing a clean build.
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");
+    println!("cargo:rerun-if-env-changed=MEWXI_SOURCE_REPO");
+
+    // Where the source checkout lives, as seen by the *installed*
+    // binary. Normally the dir being built — but when the self-updater
+    // builds in a throwaway temp clone, it sets MEWXI_SOURCE_REPO to
+    // the original checkout so the new binary doesn't bake in a temp
+    // path that's deleted the moment the install finishes.
+    let source_repo = std::env::var("MEWXI_SOURCE_REPO")
+        .unwrap_or_else(|_| std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+    println!("cargo:rustc-env=MEWXI_SOURCE_REPO={source_repo}");
 
     let hash = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])

@@ -19,9 +19,11 @@
 //!   in the same checkout the binary was installed from).
 //!
 //! The source checkout is located via the compile-time
-//! `CARGO_MANIFEST_DIR` (exactly right for `cargo install --path .`),
-//! overridable with `update_repo_dir` in `accounts.toml` when the
-//! checkout has moved since the build.
+//! `MEWXI_SOURCE_REPO` embedded by `build.rs` (the dir that was built,
+//! or — for binaries the self-updater built in a temp clone — the
+//! original checkout that clone came from), overridable with
+//! `update_repo_dir` in `accounts.toml` when the checkout has moved
+//! since the build.
 //!
 //! Every successful check is cached at
 //! `~/.cache/mewxi/update-check.json` so cheap consumers — most
@@ -250,14 +252,16 @@ pub fn fresh_cached_status(
 // Repo discovery + git plumbing
 // ---------------------------------------------------------------------------
 
-/// Locate the source checkout this binary was built from. Compile-time
-/// `CARGO_MANIFEST_DIR` is authoritative for `cargo install --path .`;
-/// `update_repo_dir` in `accounts.toml` overrides it when the checkout
-/// has moved since the build.
+/// Locate the source checkout this binary was built from. The
+/// compile-time `MEWXI_SOURCE_REPO` (embedded by `build.rs`: the dir
+/// that was built, or the original checkout when the self-updater
+/// built in a temp clone) is authoritative; `update_repo_dir` in
+/// `accounts.toml` overrides it when the checkout has moved since the
+/// build.
 pub fn repo_dir(override_dir: Option<&Path>) -> Result<PathBuf> {
     let dir = override_dir
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        .unwrap_or_else(|| PathBuf::from(env!("MEWXI_SOURCE_REPO")));
     if !dir.is_dir() {
         return Err(anyhow!(
             "source checkout not found at {} — set update_repo_dir in accounts.toml",
@@ -514,11 +518,15 @@ pub fn apply_now() -> Result<String> {
     };
 
     println!("  building (cargo install --path … --force) — this can take a minute …");
+    // MEWXI_SOURCE_REPO: make the new binary remember the real source
+    // checkout, not this throwaway clone (build.rs embeds it) — else
+    // its own update checks point at a dir we delete a few lines down.
     let status = Command::new("cargo")
         .arg("install")
         .arg("--path")
         .arg(&workdir)
         .arg("--force")
+        .env("MEWXI_SOURCE_REPO", &repo)
         .status()
         .context("running cargo install (is cargo on PATH?)")?;
     // Best-effort cleanup either way — the clone is throwaway.
