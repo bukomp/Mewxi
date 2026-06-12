@@ -723,6 +723,13 @@ fn models_match(primary: &str, active: &str) -> bool {
     a.contains(&p) || p.contains(&a)
 }
 
+/// Model names shown in badges drop the redundant `claude-` vendor
+/// prefix (`claude-sonnet-4-6` → `sonnet-4-6`) to save horizontal
+/// space; short slugs (`opus`, `default`) pass through untouched.
+fn trim_model(m: &str) -> &str {
+    m.strip_prefix("claude-").unwrap_or(m)
+}
+
 fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
     let spans = vec![
         Span::styled(
@@ -763,7 +770,7 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
     // permission mode) read left-to-right in pick order.
     if let Some(eff) = s.effort.as_deref() {
         push_sep(&mut spans);
-        let model = if s.model.is_empty() { "default" } else { s.model.as_str() };
+        let model = if s.model.is_empty() { "default" } else { trim_model(&s.model) };
         spans.push(Span::styled(
             format!("[{model}:{eff}]"),
             Style::default()
@@ -799,7 +806,7 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
     {
         push_sep(&mut spans);
         spans.push(Span::styled(
-            format!("via {}", s.active_model),
+            format!("via {}", trim_model(&s.active_model)),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
@@ -838,7 +845,7 @@ fn build_status_reserve_width(s: &SessionRef) -> usize {
         let model_w = if s.model.is_empty() {
             "default".len()
         } else {
-            s.model.chars().count()
+            trim_model(&s.model).chars().count()
         };
         // "[model:effort]"
         w += 2 + model_w + 1 + eff.chars().count();
@@ -862,7 +869,7 @@ fn build_status_reserve_width(s: &SessionRef) -> usize {
         && !models_match(&s.model, &s.active_model)
     {
         push_sep(&mut w);
-        w += 4 + s.active_model.chars().count(); // "via <model>"
+        w += 4 + trim_model(&s.active_model).chars().count(); // "via <model>"
     }
     if s.state == SessionState::Idle {
         push_sep(&mut w);
@@ -2449,7 +2456,15 @@ fn pick_mascot(area_w: u16, area_h: u16, caption_h: u16) -> (&'static str, u16, 
 
 #[cfg(test)]
 mod tests {
-    use super::models_match;
+    use super::{models_match, trim_model};
+
+    #[test]
+    fn trim_model_drops_vendor_prefix() {
+        assert_eq!(trim_model("claude-sonnet-4-6"), "sonnet-4-6");
+        assert_eq!(trim_model("claude-haiku-4-5-20251001"), "haiku-4-5-20251001");
+        assert_eq!(trim_model("opus"), "opus");
+        assert_eq!(trim_model("default"), "default");
+    }
 
     #[test]
     fn slug_matches_full_name() {
