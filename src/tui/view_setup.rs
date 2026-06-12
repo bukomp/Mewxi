@@ -4,7 +4,8 @@
 //! - Claude Code integration — per-account statusLine wiring + the
 //!   background watcher service.
 //! - Updates — self-update channel (release tags vs main branch),
-//!   the startup prompt toggle, and an on-demand check/install row.
+//!   the automatic-check toggle + interval, the startup prompt
+//!   toggle, and an on-demand check/install row.
 //! - Preferences — TUI behaviour toggles.
 //!
 //! Interaction model: ↑/↓ (or Tab) moves over actionable rows, Enter
@@ -15,7 +16,7 @@
 
 use super::widgets::render_footer;
 use crate::setup::{SetupSnapshot, StatusLineState, WatcherState};
-use crate::update::{UpdateChannel, UpdateStatus};
+use crate::update::{UpdateChannel, UpdateInterval, UpdateStatus};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -32,6 +33,7 @@ pub enum ConfigItem {
     Watcher,
     UpdateChannel,
     UpdateCheck,
+    UpdateInterval,
     UpdatePrompt,
     UpdateCheckNow,
     DefocusToggle,
@@ -46,6 +48,7 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
     v.push(ConfigItem::Watcher);
     v.push(ConfigItem::UpdateChannel);
     v.push(ConfigItem::UpdateCheck);
+    v.push(ConfigItem::UpdateInterval);
     v.push(ConfigItem::UpdatePrompt);
     v.push(ConfigItem::UpdateCheckNow);
     v.push(ConfigItem::DefocusToggle);
@@ -57,6 +60,8 @@ pub struct UpdateUi<'a> {
     pub channel: UpdateChannel,
     /// Automatic checks (startup + watcher) are enabled.
     pub check_enabled: bool,
+    /// Minimum time between automatic checks.
+    pub interval: UpdateInterval,
     pub prompt_enabled: bool,
     /// A background check is in flight right now.
     pub checking: bool,
@@ -286,6 +291,15 @@ fn build_lines(
                 ));
                 owners.push(Some(i));
             }
+            ConfigItem::UpdateInterval => {
+                lines.push(row(
+                    i,
+                    "check interval".to_string(),
+                    bold(format!("{:<16}", update.interval.as_str()), Color::Magenta),
+                    format!("check at most {}", update.interval.label()),
+                ));
+                owners.push(Some(i));
+            }
             ConfigItem::UpdatePrompt => {
                 let (txt, color) = if update.prompt_enabled {
                     ("✓ on", Color::Green)
@@ -432,6 +446,11 @@ fn action_hint(
         } else {
             "Enter: check for updates automatically on startup and from the watcher".to_string()
         },
+        ConfigItem::UpdateInterval => format!(
+            "Enter: check {} instead (currently {})",
+            update.interval.cycled().label(),
+            update.interval.label()
+        ),
         ConfigItem::UpdatePrompt => if update.prompt_enabled {
             "Enter: stop asking about updates when the TUI starts".to_string()
         } else {
@@ -515,6 +534,7 @@ mod tests {
         UpdateUi {
             channel: UpdateChannel::Release,
             check_enabled: true,
+            interval: UpdateInterval::Hour6,
             prompt_enabled: true,
             checking: false,
             status,
@@ -531,11 +551,12 @@ mod tests {
         assert_eq!(list[2], ConfigItem::Watcher);
         assert_eq!(list[3], ConfigItem::UpdateChannel);
         assert_eq!(list[4], ConfigItem::UpdateCheck);
-        assert_eq!(list[5], ConfigItem::UpdatePrompt);
-        assert_eq!(list[6], ConfigItem::UpdateCheckNow);
-        assert_eq!(list[7], ConfigItem::DefocusToggle);
+        assert_eq!(list[5], ConfigItem::UpdateInterval);
+        assert_eq!(list[6], ConfigItem::UpdatePrompt);
+        assert_eq!(list[7], ConfigItem::UpdateCheckNow);
+        assert_eq!(list[8], ConfigItem::DefocusToggle);
         // No snapshot yet → only the fixed rows.
-        assert_eq!(items(None).len(), 6);
+        assert_eq!(items(None).len(), 7);
     }
 
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
@@ -579,6 +600,7 @@ mod tests {
             "Updates",
             "channel",
             "automatic checks",
+            "check interval",
             "ask on startup",
             "check for updates",
             "Preferences",
@@ -600,8 +622,8 @@ mod tests {
             latest: "v0.2.0".into(),
             detail: "tag v0.2.0 is newer than v0.1.0".into(),
         };
-        // Select the check-now row (index 6 with two accounts).
-        let text = render_to_text(6, Some(status));
+        // Select the check-now row (index 7 with two accounts).
+        let text = render_to_text(7, Some(status));
         assert!(text.contains("⬆ v0.2.0 available"), "header notice missing:\n{text}");
         assert!(text.contains("install the update now"), "hint missing:\n{text}");
     }

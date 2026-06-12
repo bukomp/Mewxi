@@ -85,6 +85,74 @@ pub fn channel_from_view(view: &AccountsView) -> UpdateChannel {
 }
 
 // ---------------------------------------------------------------------------
+// Check interval
+// ---------------------------------------------------------------------------
+
+/// How long a cached check stays fresh before automatic checks (TUI
+/// startup, watch daemon) hit origin again.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum UpdateInterval {
+    Min15,
+    Hour1,
+    Hour6,
+    Hour24,
+}
+
+impl UpdateInterval {
+    /// Parse the `update_interval` config value. Anything unrecognized
+    /// falls back to 6h (the historical hardcoded cadence).
+    pub fn from_config(s: Option<&str>) -> Self {
+        match s.map(str::trim) {
+            Some("15m") => UpdateInterval::Min15,
+            Some("1h") => UpdateInterval::Hour1,
+            Some("24h") => UpdateInterval::Hour24,
+            _ => UpdateInterval::Hour6,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdateInterval::Min15 => "15m",
+            UpdateInterval::Hour1 => "1h",
+            UpdateInterval::Hour6 => "6h",
+            UpdateInterval::Hour24 => "24h",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            UpdateInterval::Min15 => "every 15 minutes",
+            UpdateInterval::Hour1 => "every hour",
+            UpdateInterval::Hour6 => "every 6 hours",
+            UpdateInterval::Hour24 => "once a day",
+        }
+    }
+
+    /// Next option in the Config view's Enter-to-cycle order.
+    pub fn cycled(self) -> Self {
+        match self {
+            UpdateInterval::Min15 => UpdateInterval::Hour1,
+            UpdateInterval::Hour1 => UpdateInterval::Hour6,
+            UpdateInterval::Hour6 => UpdateInterval::Hour24,
+            UpdateInterval::Hour24 => UpdateInterval::Min15,
+        }
+    }
+
+    pub fn max_age(self) -> chrono::Duration {
+        match self {
+            UpdateInterval::Min15 => chrono::Duration::minutes(15),
+            UpdateInterval::Hour1 => chrono::Duration::hours(1),
+            UpdateInterval::Hour6 => chrono::Duration::hours(6),
+            UpdateInterval::Hour24 => chrono::Duration::hours(24),
+        }
+    }
+}
+
+pub fn interval_from_view(view: &AccountsView) -> UpdateInterval {
+    UpdateInterval::from_config(view.update_interval.as_deref())
+}
+
+// ---------------------------------------------------------------------------
 // Check result + on-disk cache
 // ---------------------------------------------------------------------------
 
@@ -146,8 +214,31 @@ fn write_cache(status: &UpdateStatus) {
 
 /// True when the cached check is recent enough that re-fetching origin
 /// would be wasted work.
-fn cache_is_fresh() -> bool {
-    load_cached().is_some_and(|c| Utc::now() - c.checked_at < chrono::Duration::hours(6))
+fn cache_is_fresh(interval: UpdateInterval) -> bool {
+    load_cached().is_some_and(|c| Utc::now() - c.checked_at < interval.max_age())
+}
+
+/// The cached check as an [`UpdateStatus`], but only when it's fresher
+/// than `interval` and was taken against `channel` — a stale or
+/// cross-channel cache is no substitute for a real check.
+pub fn fresh_cached_status(
+    channel: UpdateChannel,
+    interval: UpdateInterval,
+) -> Option<UpdateStatus> {
+    let c = load_cached()?;
+    if Utc::now() - c.checked_at >= interval.max_age() {
+        return None;
+    }
+    if UpdateChannel::from_config(Some(&c.channel)) != channel {
+        return None;
+    }
+    Some(UpdateStatus {
+        channel,
+        available: c.available,
+        current: c.current,
+        latest: c.latest,
+        detail: c.detail,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -336,14 +427,18 @@ pub fn spawn_check(tx: std::sync::mpsc::Sender<std::result::Result<UpdateStatus,
 }
 
 /// Fire-and-forget cache refresh, skipped when the cache is still
-/// fresh or when `update_check = false` turned automatic checks off.
-/// Used by the `watch` daemon so the statusLine notice stays honest
-/// without the TUI ever running.
+/// fresher than the configured `update_interval` or when
+/// `update_check = false` turned automatic checks off. Used by the
+/// `watch` daemon so the statusLine notice stays honest without the
+/// TUI ever running.
 pub fn refresh_cache_async() {
-    let auto_enabled = accounts::load_accounts()
-        .map(|v| v.update_check)
-        .unwrap_or(true);
-    if !auto_enabled || cache_is_fresh() {
+    let view = accounts::load_accounts().ok();
+    let auto_enabled = view.as_ref().map(|v| v.update_check).unwrap_or(true);
+    let interval = view
+        .as_ref()
+        .map(interval_from_view)
+        .unwrap_or(UpdateInterval::Hour6);
+    if !auto_enabled || cache_is_fresh(interval) {
         return;
     }
     std::thread::spawn(|| {
@@ -551,6 +646,36 @@ mod tests {
     fn channel_toggles_between_the_two() {
         assert_eq!(UpdateChannel::Release.toggled(), UpdateChannel::Dev);
         assert_eq!(UpdateChannel::Dev.toggled(), UpdateChannel::Release);
+    }
+
+    #[test]
+    fn interval_parses_with_6h_fallback() {
+        assert_eq!(UpdateInterval::from_config(Some("15m")), UpdateInterval::Min15);
+        assert_eq!(UpdateInterval::from_config(Some("1h")), UpdateInterval::Hour1);
+        assert_eq!(UpdateInterval::from_config(Some("6h")), UpdateInterval::Hour6);
+        assert_eq!(UpdateInterval::from_config(Some("24h")), UpdateInterval::Hour24);
+        assert_eq!(UpdateInterval::from_config(Some("garbage")), UpdateInterval::Hour6);
+        assert_eq!(UpdateInterval::from_config(None), UpdateInterval::Hour6);
+    }
+
+    #[test]
+    fn interval_cycle_visits_every_option_and_wraps() {
+        let mut seen = vec![UpdateInterval::Min15];
+        let mut cur = UpdateInterval::Min15;
+        for _ in 0..3 {
+            cur = cur.cycled();
+            seen.push(cur);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                UpdateInterval::Min15,
+                UpdateInterval::Hour1,
+                UpdateInterval::Hour6,
+                UpdateInterval::Hour24,
+            ]
+        );
+        assert_eq!(cur.cycled(), UpdateInterval::Min15);
     }
 
     /// Scratch repo with two commits; returns (dir, older short hash).

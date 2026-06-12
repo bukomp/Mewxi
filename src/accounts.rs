@@ -355,6 +355,11 @@ struct AccountsConfig {
     /// work. Default: true.
     #[serde(default)]
     update_check: Option<bool>,
+    /// Minimum time between automatic update checks: `"15m"`, `"1h"`,
+    /// `"6h"` (default) or `"24h"`. Interpreted by
+    /// [`crate::update::UpdateInterval::from_config`].
+    #[serde(default)]
+    update_interval: Option<String>,
     /// When true (default), the TUI checks for updates on startup and
     /// asks before installing one.
     #[serde(default)]
@@ -402,6 +407,9 @@ pub struct AccountsView {
     /// Check origin for updates automatically (TUI startup, watch
     /// daemon). Manual checks ignore this. Defaults to true.
     pub update_check: bool,
+    /// Raw `update_interval` value from `accounts.toml`; parsed by
+    /// [`crate::update::UpdateInterval::from_config`]. `None` = 6h.
+    pub update_interval: Option<String>,
     /// Ask about available updates on TUI startup. Defaults to true.
     pub update_prompt: bool,
     /// Optional override for the self-update source checkout location.
@@ -461,6 +469,7 @@ pub fn load_accounts() -> Result<AccountsView> {
     let mut default_view: Option<String> = None;
     let mut update_channel: Option<String> = None;
     let mut update_check: bool = true;
+    let mut update_interval: Option<String> = None;
     let mut update_prompt: bool = true;
     let mut update_repo_dir: Option<PathBuf> = None;
 
@@ -481,6 +490,7 @@ pub fn load_accounts() -> Result<AccountsView> {
             if let Some(v) = cfg.update_check {
                 update_check = v;
             }
+            update_interval = cfg.update_interval;
             if let Some(v) = cfg.update_prompt {
                 update_prompt = v;
             }
@@ -542,6 +552,7 @@ pub fn load_accounts() -> Result<AccountsView> {
         default_view,
         update_channel,
         update_check,
+        update_interval,
         update_prompt,
         update_repo_dir,
     })
@@ -865,6 +876,17 @@ pub fn set_update_channel(channel: &str) -> Result<()> {
 pub fn set_update_check(enabled: bool) -> Result<()> {
     edit_config_table(|t| {
         t.insert("update_check".to_string(), toml::Value::Boolean(enabled));
+    })
+}
+
+/// Persist the minimum time between automatic update checks
+/// (`"15m"` / `"1h"` / `"6h"` / `"24h"`).
+pub fn set_update_interval(interval: &str) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert(
+            "update_interval".to_string(),
+            toml::Value::String(interval.to_string()),
+        );
     })
 }
 

@@ -398,8 +398,13 @@ pub fn run(no_live: bool) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     enable_hover_tracking();
 
+    // Kick the self-update check the moment the splash mascot appears,
+    // so the network round-trip overlaps the splash hold and the
+    // initial account/session load instead of starting after them —
+    // by the time the main view is up the answer is usually in.
+    let startup_update = start_update_check();
     let _ = show_splash(&mut terminal, SPLASH_DURATION);
-    let result = run_loop(&mut terminal, no_live);
+    let result = run_loop(&mut terminal, no_live, startup_update);
 
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     disable_hover_tracking();
@@ -1009,21 +1014,36 @@ fn run_loop<B: ratatui::backend::Backend>(
 
     // Self-update: kick a background check at startup (one git fetch
     // against origin) unless `update_check = false` turned automatic
-    // checks off. The result lands on `update_rx`; when something
-    // newer exists AND the startup prompt is enabled, the modal asks
-    // the user once per run. The Config view reads the same state.
+    // checks off or the cached check is still fresher than the
+    // configured `update_interval` — then the cache stands in. The
+    // result lands on `update_rx`; when something newer exists AND the
+    // startup prompt is enabled, the modal asks the user once per run.
+    // The Config view reads the same state.
     let (update_tx, update_rx) =
         channel::<std::result::Result<UpdateStatus, String>>();
     let mut update_channel = update::channel_from_view(&view);
     let mut update_check_enabled = view.update_check;
+    let mut update_interval = update::interval_from_view(&view);
     let mut update_prompt_enabled = view.update_prompt;
     let mut update_status: Option<UpdateStatus> = None;
     let mut update_error: Option<String> = None;
-    let mut update_checking = update_check_enabled;
+    let mut update_checking = false;
     let mut update_prompt_modal: Option<UpdatePromptModal> = None;
     let mut update_prompted = false;
     if update_check_enabled {
-        update::spawn_check(update_tx.clone());
+        match update::fresh_cached_status(update_channel, update_interval) {
+            Some(cached) => {
+                if cached.available && update_prompt_enabled {
+                    update_prompt_modal = Some(UpdatePromptModal::new(cached.clone()));
+                    update_prompted = true;
+                }
+                update_status = Some(cached);
+            }
+            None => {
+                update_checking = true;
+                update::spawn_check(update_tx.clone());
+            }
+        }
     }
 
     // Refresh the launchd watcher if it's still running the previous
@@ -1527,6 +1547,7 @@ fn run_loop<B: ratatui::backend::Backend>(
         let update_ui = view_setup::UpdateUi {
             channel: update_channel,
             check_enabled: update_check_enabled,
+            interval: update_interval,
             prompt_enabled: update_prompt_enabled,
             checking: update_checking,
             status: update_status.as_ref(),
@@ -3098,6 +3119,23 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                     update_checking = true;
                                                     update::spawn_check(update_tx.clone());
                                                 }
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Some(view_setup::ConfigItem::UpdateInterval) => {
+                                        let next = update_interval.cycled();
+                                        match accounts::set_update_interval(next.as_str()) {
+                                            Ok(()) => {
+                                                update_interval = next;
+                                                setup_message = Some(format!(
+                                                    "check for updates {}",
+                                                    next.label()
+                                                ));
                                             }
                                             Err(e) => {
                                                 setup_message = Some(format!(

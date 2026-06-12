@@ -394,8 +394,11 @@ pub fn run_forever(no_live: bool) -> Result<()> {
             wrote_any = true;
         }
 
-        // Re-check for mewxi updates every 6h of daemon runtime.
-        if last_update_refresh.elapsed() > Duration::from_secs(6 * 3600) {
+        // Nudge the update cache once a minute; refresh_cache_async
+        // itself enforces the configured `update_interval` (15m–24h)
+        // via cache freshness, so this only bounds how often the
+        // config + cache files get re-read.
+        if last_update_refresh.elapsed() > Duration::from_secs(60) {
             update::refresh_cache_async();
             last_update_refresh = Instant::now();
         }
