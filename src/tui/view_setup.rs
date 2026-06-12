@@ -36,7 +36,59 @@ pub enum ConfigItem {
     UpdateInterval,
     UpdatePrompt,
     UpdateCheckNow,
+    DefaultView,
     DefocusToggle,
+}
+
+/// Which view the TUI opens in — the `default_view` key in
+/// `accounts.toml`. Mirrors `ViewMode::from_config` in `tui::mod`, so
+/// `as_str()` must only emit strings that parser accepts.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DefaultView {
+    All,
+    Session,
+    Account,
+    Config,
+}
+
+impl DefaultView {
+    pub fn from_config(s: Option<&str>) -> Self {
+        match s.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("session" | "session_detail" | "2") => DefaultView::Session,
+            Some("account" | "account_detail" | "3") => DefaultView::Account,
+            Some("config" | "setup" | "4") => DefaultView::Config,
+            _ => DefaultView::All,
+        }
+    }
+
+    pub fn cycled(self) -> Self {
+        match self {
+            DefaultView::All => DefaultView::Session,
+            DefaultView::Session => DefaultView::Account,
+            DefaultView::Account => DefaultView::Config,
+            DefaultView::Config => DefaultView::All,
+        }
+    }
+
+    /// Value written to `accounts.toml`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DefaultView::All => "all",
+            DefaultView::Session => "session",
+            DefaultView::Account => "account",
+            DefaultView::Config => "config",
+        }
+    }
+
+    /// Human label including the view's switch key.
+    pub fn label(self) -> &'static str {
+        match self {
+            DefaultView::All => "all sessions (view 1)",
+            DefaultView::Session => "session detail (view 2)",
+            DefaultView::Account => "account detail (view 3)",
+            DefaultView::Config => "config (view 4)",
+        }
+    }
 }
 
 /// Actionable rows, in display order. Accounts come first so the
@@ -51,6 +103,7 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
     v.push(ConfigItem::UpdateInterval);
     v.push(ConfigItem::UpdatePrompt);
     v.push(ConfigItem::UpdateCheckNow);
+    v.push(ConfigItem::DefaultView);
     v.push(ConfigItem::DefocusToggle);
     v
 }
@@ -79,6 +132,7 @@ pub fn render(
     selected: usize,
     last_message: Option<&str>,
     defocus_input_after_send: bool,
+    default_view: DefaultView,
     update: &UpdateUi,
     setup_rect: &mut Option<Rect>,
 ) {
@@ -94,8 +148,8 @@ pub fn render(
 
     render_header(f, rows[0], snap, update);
     *setup_rect = Some(rows[1]);
-    render_list(f, rows[1], snap, selected, defocus_input_after_send, update);
-    render_info(f, rows[2], snap, selected, defocus_input_after_send, update, last_message);
+    render_list(f, rows[1], snap, selected, defocus_input_after_send, default_view, update);
+    render_info(f, rows[2], snap, selected, defocus_input_after_send, default_view, update, last_message);
     render_footer(
         f,
         rows[3],
@@ -169,6 +223,7 @@ fn build_lines(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     defocus: bool,
+    default_view: DefaultView,
     update: &UpdateUi,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
     let mut lines: Vec<Line> = Vec::new();
@@ -337,6 +392,15 @@ fn build_lines(
 
                 push_header(&mut lines, &mut owners, "Preferences", false);
             }
+            ConfigItem::DefaultView => {
+                lines.push(row(
+                    i,
+                    "default view".to_string(),
+                    bold(format!("{:<16}", default_view.as_str()), Color::Magenta),
+                    format!("open {} when mewxi starts", default_view.label()),
+                ));
+                owners.push(Some(i));
+            }
             ConfigItem::DefocusToggle => {
                 let (txt, color) = if defocus { ("✓ on", Color::Green) } else { ("off", Color::Yellow) };
                 lines.push(row(
@@ -359,6 +423,7 @@ fn render_list(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     defocus: bool,
+    default_view: DefaultView,
     update: &UpdateUi,
 ) {
     let block = Block::default().borders(Borders::ALL).title("Settings");
@@ -374,7 +439,7 @@ fn render_list(
         return;
     }
 
-    let (lines, owners) = build_lines(snap, selected, defocus, update);
+    let (lines, owners) = build_lines(snap, selected, defocus, default_view, update);
 
     // Window the lines so the selected row is always visible.
     let visible_h = area.height.saturating_sub(2) as usize; // borders
@@ -398,6 +463,7 @@ fn action_hint(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     defocus: bool,
+    default_view: DefaultView,
     update: &UpdateUi,
 ) -> String {
     let list = items(snap);
@@ -465,6 +531,11 @@ fn action_hint(
                 "Enter: check origin for a newer mewxi now".to_string()
             }
         }
+        ConfigItem::DefaultView => format!(
+            "Enter: start in {} instead (currently {})",
+            default_view.cycled().label(),
+            default_view.label()
+        ),
         ConfigItem::DefocusToggle => if defocus {
             "Enter: keep the prompt box focused after sending (type follow-ups immediately)"
                 .to_string()
@@ -480,10 +551,11 @@ fn render_info(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     defocus: bool,
+    default_view: DefaultView,
     update: &UpdateUi,
     last_message: Option<&str>,
 ) {
-    let hint = action_hint(snap, selected, defocus, update);
+    let hint = action_hint(snap, selected, defocus, default_view, update);
     let msg_line = match last_message {
         Some(m) => Line::from(Span::styled(m.to_string(), Style::default().fg(Color::Cyan))),
         None => Line::from(Span::styled(
@@ -554,9 +626,10 @@ mod tests {
         assert_eq!(list[5], ConfigItem::UpdateInterval);
         assert_eq!(list[6], ConfigItem::UpdatePrompt);
         assert_eq!(list[7], ConfigItem::UpdateCheckNow);
-        assert_eq!(list[8], ConfigItem::DefocusToggle);
+        assert_eq!(list[8], ConfigItem::DefaultView);
+        assert_eq!(list[9], ConfigItem::DefocusToggle);
         // No snapshot yet → only the fixed rows.
-        assert_eq!(items(None).len(), 7);
+        assert_eq!(items(None).len(), 8);
     }
 
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
@@ -573,6 +646,7 @@ mod tests {
                     selected,
                     Some("did a thing"),
                     true,
+                    DefaultView::All,
                     &update_ui(status.as_ref()),
                     &mut rect,
                 );

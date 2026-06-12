@@ -862,6 +862,17 @@ pub fn set_defocus_input_after_send(enabled: bool) -> Result<()> {
     })
 }
 
+/// Persist which view opens when the TUI starts
+/// (`"all"` / `"session"` / `"account"` / `"config"`).
+pub fn set_default_view(view: &str) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert(
+            "default_view".to_string(),
+            toml::Value::String(view.to_string()),
+        );
+    })
+}
+
 /// Persist the self-update channel (`"release"` / `"dev"`).
 pub fn set_update_channel(channel: &str) -> Result<()> {
     edit_config_table(|t| {

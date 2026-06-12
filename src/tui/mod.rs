@@ -1000,6 +1000,8 @@ fn run_loop<B: ratatui::backend::Backend>(
     // hits an edge.
     let mut driver_input_scroll: usize = 0;
     let mut defocus_input_after_send: bool = view.defocus_input_after_send;
+    let mut default_view_pref =
+        view_setup::DefaultView::from_config(view.default_view.as_deref());
     let mut driver_status: Option<(String, Instant)> = None;
     let mut driver_optimistic: HashMap<(String, String), DriverOptimistic> = HashMap::new();
     // Self-learning Shift-Tab cycle. Seeded empty; the reconcile pass
@@ -1618,6 +1620,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 setup_snapshot.as_ref(),
                 combined_message.as_deref(),
                 defocus_input_after_send,
+                default_view_pref,
                 &update_ui,
                 live_error,
                 driver_pane.as_mut(),
@@ -3223,6 +3226,23 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 Some("checking origin for updates…".into());
                                         }
                                     }
+                                    Some(view_setup::ConfigItem::DefaultView) => {
+                                        let next = default_view_pref.cycled();
+                                        match accounts::set_default_view(next.as_str()) {
+                                            Ok(()) => {
+                                                default_view_pref = next;
+                                                setup_message = Some(format!(
+                                                    "start in {}",
+                                                    next.label()
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
                                     Some(view_setup::ConfigItem::DefocusToggle) => {
                                         let next = !defocus_input_after_send;
                                         match accounts::set_defocus_input_after_send(next) {
@@ -3640,6 +3660,7 @@ fn render(
     setup: Option<&SetupSnapshot>,
     setup_message: Option<&str>,
     defocus_input_after_send: bool,
+    default_view: view_setup::DefaultView,
     update_ui: &view_setup::UpdateUi,
     live_error: Option<&str>,
     driver: Option<&mut view_session::DriverPane<'_>>,
@@ -3724,6 +3745,7 @@ fn render(
             selected_setup,
             setup_message,
             defocus_input_after_send,
+            default_view,
             update_ui,
             setup_rect,
         ),
