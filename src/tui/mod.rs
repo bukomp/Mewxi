@@ -753,7 +753,6 @@ enum LiveMsg {
     },
 }
 enum LiveCmd {
-    Refresh,
     Stop,
 }
 
@@ -803,7 +802,7 @@ fn spawn_live_poller(
         loop {
             match in_rx.recv_timeout(POLLER_TICK) {
                 Ok(LiveCmd::Stop) => break,
-                Ok(LiveCmd::Refresh) | Err(_) => {
+                Err(_) => {
                     let live = live_usage::fetch_or_cached(&account, no_live);
                     if out_tx
                         .send(LiveMsg::Update {
@@ -2833,17 +2832,6 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 pinned_session = None;
                             }
                         },
-                        KeyCode::Char('r') => {
-                            let alive = live_session::alive_pids();
-                            for pa in per_account.iter_mut() {
-                                pa.agg = stats::load_and_aggregate_for(&pa.account).unwrap_or_default();
-                                pa.live_sessions = live_session::scan(&pa.account, &alive, &pa.live_sessions);
-                                last_reload.insert(pa.account.name.clone(), Instant::now());
-                            }
-                            for (_, cmd_tx) in &live_pollers {
-                                let _ = cmd_tx.send(LiveCmd::Refresh);
-                            }
-                        }
                         KeyCode::Char('x') | KeyCode::Char('X') => {
                             if error_shown.is_some() {
                                 error_dismissed = true;
