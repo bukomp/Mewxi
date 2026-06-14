@@ -695,7 +695,7 @@ fn mode_badge(raw: &str) -> (&'static str, Color) {
 /// gradient so the badge reads as a thermometer: dim grey for `auto`
 /// (let claude decide), blue/green for the cheap levels, magenta/red
 /// for the expensive ones. `?` for unknown future levels.
-fn effort_color(raw: &str) -> Color {
+pub(crate) fn effort_color(raw: &str) -> Color {
     match raw {
         "auto" => Color::DarkGray,
         "low" => Color::Blue,

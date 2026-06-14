@@ -544,7 +544,22 @@ fn render_sessions_table(
                 cells.push(Cell::from(fmt_tokens_compact(s.totals.cache_read)));
             }
             cells.push(Cell::from(format!("${:.2}", s.cost_usd)));
-            cells.push(Cell::from(short_model(&s.model)));
+            // Model + thinking budget, e.g. `opus:xhigh` / `sonnet[1m]:medium`.
+            // The effort suffix is omitted when the model has no effort
+            // support (Haiku) or nothing is configured, and coloured on the
+            // same thermometer gradient as the session-detail badge.
+            let model_label = short_model(&s.model, s.context_cap == Some(1_000_000));
+            let model_cell = match s.effort.as_deref() {
+                Some(eff) => Cell::from(Line::from(vec![
+                    Span::raw(model_label),
+                    Span::styled(
+                        format!(":{eff}"),
+                        Style::default().fg(super::view_session::effort_color(eff)),
+                    ),
+                ])),
+                None => Cell::from(model_label),
+            };
+            cells.push(model_cell);
             cells.push(Cell::from(Span::styled(state_label, Style::default().fg(state_color))));
             session_rows.push(rows.len());
             rows.push(Row::new(cells).style(base_style));
@@ -585,7 +600,9 @@ fn render_sessions_table(
     header_labels.push("cost");
     constraints.push(Constraint::Length(9));
     header_labels.push("model");
-    constraints.push(Constraint::Length(8));
+    // Worst case is `sonnet[1m]:medium` (17 chars); size to fit so the
+    // thinking-budget suffix never gets clipped.
+    constraints.push(Constraint::Length(17));
     header_labels.push("state");
     constraints.push(Constraint::Length(7));
 
@@ -687,16 +704,24 @@ fn fmt_ctx(current: Option<u64>, cap: Option<u64>) -> String {
     }
 }
 
-fn short_model(m: &str) -> String {
+/// Short model slug for the table, with the extended-context marker
+/// appended when the session is on the 1M tier so it reads `sonnet[1m]`
+/// rather than masquerading as the 200K variant (mirrors the statusline).
+fn short_model(m: &str, extended_ctx: bool) -> String {
     let lower = m.to_ascii_lowercase();
-    if lower.contains("opus") {
-        "opus".into()
+    let base = if lower.contains("opus") {
+        "opus"
     } else if lower.contains("sonnet") {
-        "sonnet".into()
+        "sonnet"
     } else if lower.contains("haiku") {
-        "haiku".into()
+        "haiku"
     } else {
-        m.chars().take(8).collect()
+        return m.chars().take(8).collect();
+    };
+    if extended_ctx {
+        format!("{base}[1m]")
+    } else {
+        base.to_string()
     }
 }
 
