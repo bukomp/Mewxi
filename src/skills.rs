@@ -590,25 +590,21 @@ mod tests {
         let skill_md = plugin_root.join("skills/review/SKILL.md");
         write(&skill_md, "---\ndescription: Review a PR.\n---\n");
 
-        // installed_plugins.json pointing at it
+        // installed_plugins.json pointing at it. Build via serde_json so the
+        // installPath is escaped correctly on Windows (backslash paths would
+        // otherwise produce invalid JSON escapes).
         let installed = cfg.path().join("plugins/installed_plugins.json");
-        write(
-            &installed,
-            &format!(
-                r#"{{
-  "version": 2,
-  "plugins": {{
-    "pr-review-toolkit@official": [{{
-      "scope": "user",
-      "installPath": "{}",
-      "version": "1.0.0"
-    }}]
-  }}
-}}
-"#,
-                plugin_root.display()
-            ),
-        );
+        let manifest = serde_json::json!({
+            "version": 2,
+            "plugins": {
+                "pr-review-toolkit@official": [{
+                    "scope": "user",
+                    "installPath": plugin_root.to_str().unwrap(),
+                    "version": "1.0.0"
+                }]
+            }
+        });
+        write(&installed, &serde_json::to_string_pretty(&manifest).unwrap());
 
         let skills = discover(cfg.path(), project.path(), None);
         let review = skills
