@@ -102,9 +102,9 @@ pub struct SessionRef {
     /// `acceptEdits`, `plan`). `None` until a record exposes one.
     pub permission_mode: Option<String>,
     /// Current `/effort` level (`auto`, `low`, `medium`, `high`,
-    /// `xhigh`, `max`). Sourced from the optimistic pick first, falling
-    /// back to the account's `settings.json` `effortLevel` since claude
-    /// persists effort globally rather than in the transcript. `None`
+    /// `xhigh`, `max`). Sourced from the optimistic pick first, then the
+    /// per-session level claude reported through `mewxi status`, then the
+    /// account's `settings.json` `effortLevel` as a last resort. `None`
     /// when the model has no effort support (Haiku) or nothing's
     /// configured yet.
     pub effort: Option<String>,
@@ -4031,12 +4031,15 @@ fn flatten_sessions(
                     }
                     _ => permission_mode,
                 };
-                // Effort: user's in-session pick wins; otherwise read
-                // the account's persisted `effortLevel`. Suppress when
-                // the resolved model has no effort support so the badge
-                // doesn't claim a level claude is silently ignoring.
+                // Effort: user's in-session pick wins; otherwise the
+                // per-session level claude reported through `mewxi status`
+                // (kept fresh on every statusline refresh); otherwise the
+                // account's persisted `effortLevel`. Suppress when the
+                // resolved model has no effort support so the badge doesn't
+                // claim a level claude is silently ignoring.
                 let effort = opt
                     .and_then(|o| o.effort.clone())
+                    .or_else(|| stats::session_effort(&pa.account, &ls.session_id))
                     .or_else(|| pa.account.default_effort());
                 let effort = effort.filter(|_| {
                     !model_picker_modal::effort_levels_for(&model).is_empty()

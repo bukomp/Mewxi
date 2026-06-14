@@ -175,6 +175,15 @@ pub(crate) fn render_status_for_account(
             stats::mark_extended_context(account, sid);
         }
     }
+    // Persist the reported reasoning effort for the same reason: the TUI
+    // never sees this stdin payload, so without a per-session record its
+    // all-sessions table shows every session the account-global default.
+    if let (Some(eff), Some(sid)) = (
+        meta.effort_level.filter(|s| !s.is_empty()),
+        session_id.as_deref(),
+    ) {
+        stats::mark_session_effort(account, sid, eff);
+    }
     let ctx_segment = transcript_path
         .and_then(stats::current_context_from_transcript)
         .map(|sc| {

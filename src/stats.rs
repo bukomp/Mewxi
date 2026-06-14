@@ -623,6 +623,39 @@ pub fn extended_context_marked(account: &Account, session_id: &str) -> bool {
         .is_some_and(|p| p.exists())
 }
 
+fn session_effort_path(account: &Account, session_id: &str) -> Option<std::path::PathBuf> {
+    dirs::cache_dir().map(|c| {
+        c.join("mewxi")
+            .join("effort")
+            .join(format!("{}-{}.txt", account.slug(), session_id))
+    })
+}
+
+/// Record the reasoning effort Claude Code reported for this session via
+/// the statusline payload. The TUI never sees that stdin payload, so
+/// without this its all-sessions table falls back to the account-global
+/// `effortLevel` and shows every session the same level. Overwritten on
+/// each `mewxi status` refresh so it tracks the live value.
+pub fn mark_session_effort(account: &Account, session_id: &str, effort: &str) {
+    let Some(p) = session_effort_path(account, session_id) else { return };
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&p, effort.as_bytes());
+}
+
+/// The last per-session effort recorded by [`mark_session_effort`], if any.
+pub fn session_effort(account: &Account, session_id: &str) -> Option<String> {
+    let p = session_effort_path(account, session_id)?;
+    let raw = std::fs::read_to_string(&p).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Given a chronological list of 5h-block records and the plan's token cap,
 /// return the USD cost of tokens that exceeded the cap. The message that
 /// crosses the threshold is billed proportionally by the fraction of its
