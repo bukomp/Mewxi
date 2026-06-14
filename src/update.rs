@@ -690,7 +690,7 @@ pub fn statusline_segment() -> Option<String> {
     // front of the statusline and stay visible when narrow terminals
     // truncate the tail. Mirrors the setup-incomplete hint's shape.
     Some(format!(
-        "\x1b[35m↑  mewxi {what}\x1b[0m \x1b[90m|\x1b[0m "
+        "\x1b[35m↑ mewxi {what}\x1b[0m \x1b[90m|\x1b[0m "
     ))
 }
 
