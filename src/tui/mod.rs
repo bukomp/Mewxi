@@ -1121,6 +1121,9 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut detail_scroll: usize = 0;
     let mut selected_account: usize = 0;
     let mut selected_setup: usize = 0;
+    // Persistent windowed offset for the config list so it scrolls only
+    // when the cursor reaches the top or bottom edge of the visible area.
+    let mut setup_scroll: usize = 0;
     // View 1's session selection highlight fades out after a short
     // idle period so the table doesn't stay visually pinned to a row
     // the user picked once and forgot. The selection *index* still
@@ -1786,6 +1789,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 visible_selection,
                 selected_account,
                 selected_setup,
+                &mut setup_scroll,
                 setup_snapshot.as_ref(),
                 combined_message.as_deref(),
                 defocus_input_after_send,
@@ -3913,6 +3917,7 @@ fn render(
     visible_session_selection: Option<usize>,
     selected_account: usize,
     selected_setup: usize,
+    setup_scroll: &mut usize,
     setup: Option<&SetupSnapshot>,
     setup_message: Option<&str>,
     defocus_input_after_send: bool,
@@ -3999,6 +4004,7 @@ fn render(
             view_area,
             setup,
             selected_setup,
+            setup_scroll,
             setup_message,
             defocus_input_after_send,
             default_view,

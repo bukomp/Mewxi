@@ -140,6 +140,7 @@ pub fn render(
     area: Rect,
     snap: Option<&SetupSnapshot>,
     selected: usize,
+    scroll: &mut usize,
     last_message: Option<&str>,
     defocus_input_after_send: bool,
     default_view: DefaultView,
@@ -158,7 +159,7 @@ pub fn render(
 
     render_header(f, rows[0], snap, update);
     *setup_rect = Some(rows[1]);
-    render_list(f, rows[1], snap, selected, defocus_input_after_send, default_view, update);
+    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, default_view, update);
     render_info(f, rows[2], snap, selected, defocus_input_after_send, default_view, update, last_message);
     render_footer(
         f,
@@ -468,6 +469,7 @@ fn render_list(
     area: Rect,
     snap: Option<&SetupSnapshot>,
     selected: usize,
+    scroll: &mut usize,
     defocus: bool,
     default_view: DefaultView,
     update: &UpdateUi,
@@ -487,17 +489,26 @@ fn render_list(
 
     let (lines, owners) = build_lines(snap, selected, defocus, default_view, update);
 
-    // Window the lines so the selected row is always visible.
+    // Edge-triggered scrolling: the cursor moves freely inside the visible
+    // window and the list only scrolls once the cursor reaches the top or
+    // bottom edge. `scroll` persists the windowed offset across renders.
     let visible_h = area.height.saturating_sub(2) as usize; // borders
     let sel_line = owners
         .iter()
         .position(|o| *o == Some(selected))
         .unwrap_or(0);
-    let offset = if visible_h == 0 || sel_line < visible_h {
-        0
-    } else {
-        sel_line + 1 - visible_h
-    };
+    let max_offset = lines.len().saturating_sub(visible_h);
+    let mut offset = (*scroll).min(max_offset);
+    if visible_h > 0 {
+        if sel_line < offset {
+            // cursor pushed past the top edge — scroll up to meet it
+            offset = sel_line;
+        } else if sel_line >= offset + visible_h {
+            // cursor pushed past the bottom edge — scroll down to meet it
+            offset = sel_line + 1 - visible_h;
+        }
+    }
+    *scroll = offset;
     let windowed: Vec<Line> = lines.into_iter().skip(offset).take(visible_h.max(1)).collect();
 
     f.render_widget(Paragraph::new(windowed).block(block), area);
