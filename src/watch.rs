@@ -226,7 +226,7 @@ pub(crate) fn render_status_for_account(
     // Nudge to open the TUI when setup looks incomplete (an account
     // isn't wired, or the watcher daemon's heartbeat has gone stale).
     // The probe is filesystem-only — safe to run on every refresh.
-    let hint_segment = if crate::setup::setup_incomplete(no_live) {
+    let hint_segment = if crate::setup::setup_incomplete() {
         " \x1b[90m|\x1b[0m \x1b[33m⚠ mewxi: setup incomplete — open mewxi\x1b[0m".to_string()
     } else {
         String::new()

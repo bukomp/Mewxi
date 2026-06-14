@@ -112,14 +112,16 @@ pub fn current_binary() -> Result<PathBuf> {
     std::env::current_exe().context("resolving current executable path")
 }
 
-pub fn inspect(no_live: bool) -> Result<SetupSnapshot> {
+// `no_live` no longer affects inspection (statusLine detection is now
+// path- and flag-independent), but the param is kept so callers don't churn.
+pub fn inspect(_no_live: bool) -> Result<SetupSnapshot> {
     let binary = current_binary()?;
     let view = accounts::load_accounts()?;
     let accounts: Vec<AccountSetupState> = view
         .all_accounts()
         .map(|(a, ignored)| {
             let path = settings_path_for(a);
-            let state = inspect_statusline(&path, &binary, no_live);
+            let state = inspect_statusline(&path);
             AccountSetupState {
                 account_name: a.name.clone(),
                 settings_path: path,
@@ -147,15 +149,12 @@ fn settings_path_for(account: &Account) -> PathBuf {
 /// liveness is inferred from the freshness of the status cache files the
 /// daemon rewrites on its 15s heartbeat. Returns true when setup looks
 /// incomplete (an active account isn't wired, or the watcher is down).
-pub fn setup_incomplete(no_live: bool) -> bool {
+pub fn setup_incomplete() -> bool {
     let Ok(view) = accounts::load_accounts() else {
         return true; // can't even read our own config → definitely an issue
     };
-    let Ok(binary) = current_binary() else {
-        return false; // can't introspect ourselves → don't nag
-    };
     let any_unwired = view.all_accounts().any(|(a, ignored)| {
-        !ignored && !inspect_statusline(&settings_path_for(a), &binary, no_live).is_ok()
+        !ignored && !inspect_statusline(&settings_path_for(a)).is_ok()
     });
     any_unwired || watcher_heartbeat_stale(&view)
 }
@@ -185,7 +184,7 @@ fn desired_command(binary: &Path, no_live: bool) -> String {
     }
 }
 
-fn inspect_statusline(path: &Path, binary: &Path, no_live: bool) -> StatusLineState {
+fn inspect_statusline(path: &Path) -> StatusLineState {
     if !path.exists() {
         return StatusLineState::Missing;
     }
@@ -202,20 +201,43 @@ fn inspect_statusline(path: &Path, binary: &Path, no_live: bool) -> StatusLineSt
         return StatusLineState::Missing;
     };
     let cmd = sl.get("command").and_then(|c| c.as_str()).unwrap_or("");
-    let desired = desired_command(binary, no_live);
-    // Tolerate either spelling (with/without --no-live) as equivalent to "wired".
-    let desired_other = if no_live {
-        format!("{} status", shell_quote(binary))
-    } else {
-        format!("{} --no-live status", shell_quote(binary))
-    };
-    if cmd == desired || cmd == desired_other {
+    // Match the subcommand signature, not the exact wired path: an update
+    // that moves the binary (e.g. into ~/.cargo/bin) leaves the old path in
+    // settings, and a path-sensitive check would mislabel it "other command".
+    // Mirrors `is_mewxi_hook_command`.
+    if is_mewxi_statusline_command(cmd) {
         StatusLineState::Wired
     } else if cmd.is_empty() {
         StatusLineState::Missing
     } else {
         StatusLineState::OtherCommand(cmd.to_string())
     }
+}
+
+/// True when `cmd` is our statusLine invocation — `<binary> status` or
+/// `<binary> --no-live status` — regardless of where the binary lived when
+/// it was wired. Keys on the subcommand signature plus a `mewxi` binary
+/// basename so an update that relocates the binary still reads as "wired",
+/// while a third-party `… status` command (e.g. `git status`) never matches.
+fn is_mewxi_statusline_command(cmd: &str) -> bool {
+    let Some(prefix) = cmd.trim().strip_suffix(" status") else {
+        return false;
+    };
+    let prefix = prefix.strip_suffix(" --no-live").unwrap_or(prefix);
+    binary_token_is_mewxi(prefix)
+}
+
+/// The leading program token of a wired command refers to the mewxi binary —
+/// basename `mewxi` or `mewxi.exe`, with POSIX/Windows shell quoting stripped.
+fn binary_token_is_mewxi(token: &str) -> bool {
+    let token = token.trim();
+    let unquoted = token
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .or_else(|| token.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+        .unwrap_or(token);
+    let base = unquoted.rsplit(['/', '\\']).next().unwrap_or(unquoted);
+    base == "mewxi" || base == "mewxi.exe"
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +317,7 @@ pub fn wire_statusline(settings_path: &Path, binary: &Path, no_live: bool, force
 
     match obj.get("statusLine") {
         Some(v) if v == &desired => return Ok(false),
-        Some(v) if existing_points_at_us(v, binary, no_live) => {
+        Some(v) if existing_points_at_us(v) => {
             // Same command, different/missing fields → safe to overwrite
             // (this is the "add refreshInterval to an older wiring" path).
         }
@@ -317,17 +339,10 @@ pub fn wire_statusline(settings_path: &Path, binary: &Path, no_live: bool, force
 /// True when the existing `statusLine` block already invokes our binary —
 /// tolerates either spelling of the `--no-live` flag so toggling that flag
 /// doesn't get classified as a third-party statusLine.
-fn existing_points_at_us(sl: &serde_json::Value, binary: &Path, no_live: bool) -> bool {
-    let Some(cmd) = sl.get("command").and_then(|c| c.as_str()) else {
-        return false;
-    };
-    let a = desired_command(binary, no_live);
-    let b = if no_live {
-        format!("{} status", shell_quote(binary))
-    } else {
-        format!("{} --no-live status", shell_quote(binary))
-    };
-    cmd == a || cmd == b
+fn existing_points_at_us(sl: &serde_json::Value) -> bool {
+    sl.get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(is_mewxi_statusline_command)
 }
 
 /// True when `cmd` is one of our hook invocations — `<binary> hook
@@ -1179,6 +1194,23 @@ mod tests {
         assert!(!is_mewxi_hook_command("/usr/bin/other-tool hook something"));
         assert!(!is_mewxi_hook_command("echo hook awaiting-setup")); // not our subcommand
         assert!(!is_mewxi_hook_command("hook awaiting-set --dir /x")); // no binary part
+    }
+
+    #[test]
+    fn mewxi_statusline_command_detection() {
+        // Any binary path counts (so an update that moves the binary still
+        // reads as "wired"), with or without --no-live, quoted or not.
+        assert!(is_mewxi_statusline_command("/old/place/mewxi status"));
+        assert!(is_mewxi_statusline_command("/home/u/.cargo/bin/mewxi status"));
+        assert!(is_mewxi_statusline_command("/old/place/mewxi --no-live status"));
+        assert!(is_mewxi_statusline_command("'/path with spaces/mewxi' status"));
+        assert!(is_mewxi_statusline_command(r#""C:\Program Files\mewxi.exe" status"#));
+        assert!(is_mewxi_statusline_command(r"C:\tools\mewxi.exe --no-live status"));
+        // Third-party `… status` commands must never match.
+        assert!(!is_mewxi_statusline_command("git status"));
+        assert!(!is_mewxi_statusline_command("/usr/bin/other-tool status"));
+        assert!(!is_mewxi_statusline_command("mewxi tui")); // wrong subcommand
+        assert!(!is_mewxi_statusline_command("")); // empty
     }
 
     fn settings_with(hooks: serde_json::Value) -> tempfile::TempDir {
