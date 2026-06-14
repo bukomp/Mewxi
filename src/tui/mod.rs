@@ -2140,12 +2140,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         pid
                                     )
                                 } else {
-                                    match std::process::Command::new("kill")
-                                        .arg(pid.to_string())
-                                        .status()
-                                    {
+                                    match crate::platform::terminate_pid(pid) {
                                         Ok(s) if s.success() => format!(
-                                            "sent SIGTERM to {} (pid {})",
+                                            "terminated {} (pid {})",
                                             short_sid(&sid),
                                             pid
                                         ),

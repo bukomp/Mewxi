@@ -123,8 +123,8 @@ impl NewSessionModal {
         // well-defined: the tail is empty (no filter), and any chars
         // the user types next become the filter for `browse_cwd`.
         let mut path_str = browse_cwd.to_string_lossy().into_owned();
-        if !path_str.ends_with('/') {
-            path_str.push('/');
+        if !ends_with_sep(&path_str) {
+            path_str.push(std::path::MAIN_SEPARATOR);
         }
         let path_input = TextInput::from_str(&path_str);
         let recent = accounts
@@ -185,19 +185,18 @@ impl NewSessionModal {
     }
 
     /// Directory portion of `path_input` — everything up to and
-    /// including the last `/`. `~` is expanded.
+    /// including the last path separator. `~` is expanded.
     fn derived_dir(&self) -> PathBuf {
         let s = self.path_input.as_str();
-        let cut = s.rfind('/').map(|i| i + 1).unwrap_or(0);
-        expand_tilde(&s[..cut])
+        expand_tilde(&s[..after_last_sep(s)])
     }
 
-    /// Fragment after the last `/` of `path_input`. This is the live
-    /// fuzzy filter applied to the entries of [`Self::derived_dir`].
+    /// Fragment after the last path separator of `path_input`. This is
+    /// the live fuzzy filter applied to the entries of
+    /// [`Self::derived_dir`].
     fn derived_filter(&self) -> &str {
         let s = self.path_input.as_str();
-        let cut = s.rfind('/').map(|i| i + 1).unwrap_or(0);
-        &s[cut..]
+        &s[after_last_sep(s)..]
     }
 
     /// Indices of `entries` that match the live fuzzy filter
@@ -260,8 +259,8 @@ impl NewSessionModal {
     fn navigate_to(&mut self, dir: PathBuf) {
         let canonical = dir.canonicalize().unwrap_or(dir);
         let mut s = canonical.to_string_lossy().into_owned();
-        if !s.ends_with('/') {
-            s.push('/');
+        if !ends_with_sep(&s) {
+            s.push(std::path::MAIN_SEPARATOR);
         }
         self.path_input.set(s);
         self.refresh_entries_if_dir_changed();
@@ -422,7 +421,7 @@ impl NewSessionModal {
                     if filter_empty {
                         // Verify the dir actually exists before
                         // spawning under a typo.
-                        let typed = expand_tilde(self.path_input.as_str().trim_end_matches('/'));
+                        let typed = expand_tilde(self.path_input.as_str().trim_end_matches(is_sep));
                         if typed.is_dir() || self.browse_cwd.is_dir() {
                             return self.confirm_spawn();
                         }
@@ -847,12 +846,11 @@ impl NewSessionModal {
     }
 
     /// String slice of the dir portion of `path_input` (everything up
-    /// to and including the last `/`). Used by the renderer to colour
-    /// dir and filter halves differently.
+    /// to and including the last path separator). Used by the renderer
+    /// to colour dir and filter halves differently.
     fn dir_part(&self) -> &str {
         let s = self.path_input.as_str();
-        let cut = s.rfind('/').map(|i| i + 1).unwrap_or(0);
-        &s[..cut]
+        &s[..after_last_sep(s)]
     }
 }
 
@@ -1073,9 +1071,35 @@ fn read_dirs(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// True for characters that separate path components in the path bar.
+/// Forward slash is always a separator; backslash joins it on Windows so
+/// typed `C:\Users\foo\` splits exactly like `/home/foo/` does on Unix.
+fn is_sep(c: char) -> bool {
+    c == '/' || (cfg!(windows) && c == '\\')
+}
+
+/// Byte index just past the last path separator in `s` (0 when none).
+fn after_last_sep(s: &str) -> usize {
+    s.rfind(is_sep).map(|i| i + 1).unwrap_or(0)
+}
+
+/// Does the path-bar text already end in a path separator?
+fn ends_with_sep(s: &str) -> bool {
+    s.chars().next_back().map(is_sep).unwrap_or(false)
+}
+
 fn expand_tilde(s: &str) -> PathBuf {
     let s = s.trim();
-    if let Some(rest) = s.strip_prefix("~/") {
+    let tilde_rest = s.strip_prefix("~/").or_else(|| {
+        // Backslash is only a separator on Windows; on Unix it's a legal
+        // filename character, so `~\x` must stay literal there.
+        if cfg!(windows) {
+            s.strip_prefix("~\\")
+        } else {
+            None
+        }
+    });
+    if let Some(rest) = tilde_rest {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest);
         }

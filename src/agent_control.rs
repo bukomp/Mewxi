@@ -72,7 +72,7 @@ impl PtySession {
             })
             .map_err(|e| anyhow!("openpty: {e}"))?;
 
-        let mut cmd = CommandBuilder::new(&claude_bin);
+        let mut cmd = build_claude_command(&claude_bin);
         cmd.cwd(&cwd);
         // Honour the account's auto-mode opt-in by starting claude in
         // auto. Claude itself always launches in `default` regardless of
@@ -253,8 +253,8 @@ impl Drop for PtySession {
 /// (`$HOME/.claude`). Used to decide whether to forward
 /// `CLAUDE_CONFIG_DIR` to the child — see [`PtySession::spawn`].
 fn is_default_claude_dir(dir: &std::path::Path) -> bool {
-    let Some(home) = std::env::var_os("HOME") else { return false };
-    PathBuf::from(home).join(".claude") == dir
+    let Some(home) = dirs::home_dir() else { return false };
+    home.join(".claude") == dir
 }
 
 /// Convert a crossterm `KeyEvent` to the byte sequence claude (and most
@@ -381,5 +381,53 @@ pub fn resolve_claude_bin(_account: &Account) -> PathBuf {
     // alias `claude-foo`. We set `CLAUDE_CONFIG_DIR` directly so any
     // generic `claude` binary on PATH works — no need to hunt for the
     // alias.
+    #[cfg(windows)]
+    {
+        // npm's installer drops a `claude.cmd` shim (no `.exe`), which
+        // `CreateProcess` won't discover from the bare name. Resolve the
+        // real file off PATH; `spawn` wraps `.cmd`/`.bat` in `cmd /c`.
+        if let Some(found) = find_on_path("claude", &["exe", "cmd", "bat"]) {
+            return found;
+        }
+    }
     PathBuf::from("claude")
+}
+
+/// Search `PATH` for `<stem>.<ext>` over the given extensions, in order.
+/// Returns the first existing file. Windows-only — Unix resolves bare
+/// names through the usual `execvp` lookup.
+#[cfg(windows)]
+fn find_on_path(stem: &str, exts: &[&str]) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for ext in exts {
+            let cand = dir.join(format!("{stem}.{ext}"));
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// Build the `CommandBuilder` that launches `claude`. On Windows a
+/// `.cmd`/`.bat` shim (what npm installs) can't be executed directly by
+/// `CreateProcess`, so it's run through `cmd /c`; a real `.exe` and every
+/// Unix binary launch directly.
+fn build_claude_command(bin: &std::path::Path) -> CommandBuilder {
+    #[cfg(windows)]
+    {
+        let is_batch = bin
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+            .unwrap_or(false);
+        if is_batch {
+            let mut c = CommandBuilder::new("cmd");
+            c.arg("/c");
+            c.arg(bin);
+            return c;
+        }
+    }
+    CommandBuilder::new(bin)
 }

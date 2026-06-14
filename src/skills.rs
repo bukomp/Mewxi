@@ -661,10 +661,10 @@ mod tests {
     #[test]
     #[ignore]
     fn smoke_against_real_config() {
-        let home = std::env::var("HOME").unwrap();
-        let cfg = std::path::PathBuf::from(&home).join(".claude");
+        let home = dirs::home_dir().unwrap();
+        let cfg = home.join(".claude");
         let cwd = std::env::current_dir().unwrap();
-        let bin = std::path::PathBuf::from(&home).join(".local/bin/claude");
+        let bin = home.join(".local/bin/claude");
         let bin_opt = bin.exists().then_some(bin.as_path());
         let skills = discover(&cfg, &cwd, bin_opt);
         eprintln!("found {} skills/commands:", skills.len());

@@ -10,7 +10,8 @@
 //!
 //! Watcher service: a single user-scope unit (one on the box). On
 //! macOS it's a `launchd` agent under `~/Library/LaunchAgents/`; on
-//! Linux it's a `systemd` user unit.
+//! Linux it's a `systemd` user unit; on Windows it's a per-user
+//! `ONLOGON` Scheduled Task (`schtasks`).
 
 use crate::accounts::{self, Account};
 use crate::watch;
@@ -136,6 +137,44 @@ pub fn inspect(no_live: bool) -> Result<SetupSnapshot> {
 
 fn settings_path_for(account: &Account) -> PathBuf {
     account.dir.join("settings.json")
+}
+
+/// Cheap config-health probe behind the statusLine "open mewxi" hint.
+///
+/// The statusLine runs every few seconds, so this deliberately avoids
+/// spawning `systemctl`/`launchctl` (unlike [`inspect_watcher`]): wiring
+/// is read straight from each account's settings.json, and watcher
+/// liveness is inferred from the freshness of the status cache files the
+/// daemon rewrites on its 15s heartbeat. Returns true when setup looks
+/// incomplete (an active account isn't wired, or the watcher is down).
+pub fn setup_incomplete(no_live: bool) -> bool {
+    let Ok(view) = accounts::load_accounts() else {
+        return true; // can't even read our own config → definitely an issue
+    };
+    let Ok(binary) = current_binary() else {
+        return false; // can't introspect ourselves → don't nag
+    };
+    let any_unwired = view.all_accounts().any(|(a, ignored)| {
+        !ignored && !inspect_statusline(&settings_path_for(a), &binary, no_live).is_ok()
+    });
+    any_unwired || watcher_heartbeat_stale(&view)
+}
+
+/// True when the freshest `status-<slug>.txt` is missing or older than
+/// 90s — i.e. the watcher daemon (15s heartbeat) isn't running.
+fn watcher_heartbeat_stale(view: &accounts::AccountsView) -> bool {
+    use std::time::Duration;
+    let freshest = view
+        .accounts
+        .iter()
+        .filter_map(crate::stats::status_cache_path_for)
+        .filter_map(|p| fs::metadata(p).ok())
+        .filter_map(|m| m.modified().ok())
+        .max();
+    match freshest {
+        Some(t) => t.elapsed().map(|e| e > Duration::from_secs(90)).unwrap_or(false),
+        None => true,
+    }
 }
 
 fn desired_command(binary: &Path, no_live: bool) -> String {
@@ -565,7 +604,39 @@ fn inspect_watcher() -> WatcherState {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows: the watcher runs as a per-user Scheduled Task triggered
+/// `ONLOGON` (the closest analogue to a launchd agent / systemd user
+/// unit — survives reboots, no admin rights needed).
+#[cfg(windows)]
+const WATCH_TASK_NAME: &str = "mewxi-watch";
+
+#[cfg(windows)]
+fn inspect_watcher() -> WatcherState {
+    match Command::new("schtasks")
+        .args(["/Query", "/TN", WATCH_TASK_NAME, "/FO", "LIST", "/V"])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            // The verbose LIST view carries a `Status: Running/Ready` line;
+            // a long-lived `mewxi watch` process keeps it at Running.
+            let running = text.lines().any(|l| {
+                let l = l.trim();
+                l.starts_with("Status:") && l.contains("Running")
+            });
+            if running {
+                WatcherState::Running
+            } else {
+                WatcherState::Installed
+            }
+        }
+        // schtasks exits non-zero when the task doesn't exist.
+        Ok(_) => WatcherState::NotInstalled,
+        Err(e) => WatcherState::Unknown(format!("schtasks: {e}")),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn inspect_watcher() -> WatcherState {
     WatcherState::Unknown("unsupported platform".into())
 }
@@ -657,7 +728,30 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
+    let tr = if no_live {
+        format!("\"{}\" --no-live watch", binary.display())
+    } else {
+        format!("\"{}\" watch", binary.display())
+    };
+    // `/F` recreates the task so a binary-path change is picked up.
+    // `/RL LIMITED` keeps it in the user's normal token (no elevation).
+    run_cmd(
+        "schtasks",
+        &[
+            "/Create", "/TN", WATCH_TASK_NAME, "/SC", "ONLOGON", "/TR", &tr, "/F", "/RL", "LIMITED",
+        ],
+    )?;
+    // Start it now too, so setup doesn't have to wait for the next logon.
+    // Best-effort: ignore failure (e.g. an instance is already running).
+    let _ = Command::new("schtasks")
+        .args(["/Run", "/TN", WATCH_TASK_NAME])
+        .output();
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn install_watcher(_binary: &Path, _no_live: bool) -> Result<()> {
     Err(anyhow!("watcher service install is not supported on this OS"))
 }
@@ -691,7 +785,20 @@ pub fn stop_watcher_now() -> Result<()> {
     run_cmd("systemctl", &["--user", "stop", "mewxi-watch.service"])
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub fn stop_watcher_now() -> Result<()> {
+    // `/End` stops the running instance; the task stays registered so it
+    // comes back on next logon. Idempotent — no-op when not installed.
+    if matches!(inspect_watcher(), WatcherState::NotInstalled) {
+        return Ok(());
+    }
+    let _ = Command::new("schtasks")
+        .args(["/End", "/TN", WATCH_TASK_NAME])
+        .output();
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn stop_watcher_now() -> Result<()> {
     Err(anyhow!("watcher service stop is not supported on this OS"))
 }
@@ -721,7 +828,19 @@ pub fn uninstall_watcher() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub fn uninstall_watcher() -> Result<()> {
+    if matches!(inspect_watcher(), WatcherState::NotInstalled) {
+        return Ok(());
+    }
+    // Stop the live instance first, then drop the task registration.
+    let _ = Command::new("schtasks")
+        .args(["/End", "/TN", WATCH_TASK_NAME])
+        .output();
+    run_cmd("schtasks", &["/Delete", "/TN", WATCH_TASK_NAME, "/F"])
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn uninstall_watcher() -> Result<()> {
     Err(anyhow!("watcher service uninstall is not supported on this OS"))
 }
@@ -926,7 +1045,10 @@ pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
         if let Some(parent) = cache.parent() {
             fs::create_dir_all(parent).ok();
         }
-        let _ = atomic_write(&cache, watch::render_status(None, None, no_live).as_bytes());
+        let _ = atomic_write(
+            &cache,
+            watch::render_status(None, watch::SessionMeta::default(), no_live).as_bytes(),
+        );
         println!();
         println!("  cache:    seeded {}", cache.display());
     }
@@ -967,7 +1089,7 @@ pub fn stop(disable: bool) -> Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn run_cmd(bin: &str, args: &[&str]) -> Result<()> {
     let out = Command::new(bin)
         .args(args)
@@ -1002,6 +1124,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Quote a path for embedding in the `statusLine`/hook command strings
+/// that Claude Code later runs through the platform shell. POSIX uses
+/// single-quote escaping; Windows (`cmd.exe`) uses double quotes and
+/// treats the backslash separator as an ordinary character.
+#[cfg(not(windows))]
 fn shell_quote(p: &Path) -> String {
     let s = p.to_string_lossy();
     let safe = |c: char| {
@@ -1011,6 +1138,23 @@ fn shell_quote(p: &Path) -> String {
         s.into_owned()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(windows)]
+fn shell_quote(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    // Backslash and colon are normal in Windows paths, so they're left
+    // unquoted; anything outside the safe set (notably spaces) forces a
+    // double-quoted form, which is what cmd.exe understands.
+    let safe = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '/' | '\\' | '_' | '-' | '.' | ':' | '+' | '=' | ',')
+    };
+    if !s.is_empty() && s.chars().all(safe) {
+        s.into_owned()
+    } else {
+        format!("\"{}\"", s.replace('"', "\\\""))
     }
 }
 

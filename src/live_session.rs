@@ -477,21 +477,12 @@ struct SessionMarker {
 }
 
 /// Snapshot the currently-alive PIDs once per scan wave so we don't
-/// shell out per marker. Returns the empty set if `ps` is unusable —
-/// callers that get an empty set should treat every marker as stale.
+/// shell out per marker. Returns the empty set if the platform process
+/// tool is unusable — callers that get an empty set should treat every
+/// marker as stale. See [`crate::platform::alive_pids`] for the
+/// per-OS mechanism (`ps` on Unix, `tasklist` on Windows).
 pub fn alive_pids() -> HashSet<u32> {
-    use std::process::Command;
-    Command::new("ps")
-        .args(["-A", "-o", "pid="])
-        .output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .split_whitespace()
-                .filter_map(|s| s.parse().ok())
-                .collect()
-        })
-        .unwrap_or_default()
+    crate::platform::alive_pids()
 }
 
 /// Reverse of Claude Code's project-dir flattening: every `/` in the
@@ -501,11 +492,28 @@ fn cwd_to_project_dir(cwd: &Path) -> String {
     // replacing `/`, `_`, and `.` with `-` (one dash per source char), so
     // `/Users/foo/.claude/bar_baz` becomes `-Users-foo--claude-bar-baz`.
     // Mirror that here or the transcript JSONL lookup misses for any
-    // path containing `_` or `.`.
+    // path containing `_` or `.`. On Windows the same scheme also folds
+    // the backslash separator and the drive-letter colon, so
+    // `C:\Users\foo\proj` becomes `C--Users-foo-proj`.
     cwd.to_string_lossy()
         .chars()
-        .map(|c| if matches!(c, '/' | '_' | '.') { '-' } else { c })
+        .map(|c| if is_project_dir_sep(c) { '-' } else { c })
         .collect()
+}
+
+/// Characters Claude Code rewrites to `-` when flattening a cwd into a
+/// `projects/<dir>` name. The backslash and colon only matter on
+/// Windows; they're harmless to include elsewhere but we gate them so a
+/// (legal) `:` in a Unix path isn't silently rewritten.
+fn is_project_dir_sep(c: char) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(c, '/' | '\\' | '_' | '.' | ':')
+    }
+    #[cfg(not(windows))]
+    {
+        matches!(c, '/' | '_' | '.')
+    }
 }
 
 fn read_markers(account: &Account, alive: &HashSet<u32>) -> Vec<SessionMarker> {
@@ -810,6 +818,27 @@ pub fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn project_dir_encoding_unix() {
+        // `/`, `_`, `.` each fold to one `-`; nothing else changes.
+        assert_eq!(
+            cwd_to_project_dir(Path::new("/Users/foo/.claude/bar_baz")),
+            "-Users-foo--claude-bar-baz"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_dir_encoding_windows() {
+        // Backslash separators and the drive-letter colon fold too, so a
+        // Windows cwd maps to the same projects/<dir> name Claude Code writes.
+        assert_eq!(
+            cwd_to_project_dir(Path::new(r"C:\Users\foo\proj")),
+            "C--Users-foo-proj"
+        );
+    }
 
     fn now() -> DateTime<Utc> {
         // Fixed reference point so timestamped fixtures have a stable "now".

@@ -8,8 +8,8 @@ expects — see [Updating](#updating) for the trade-off.
 
 ## Prebuilt binaries
 
-Every tagged release ships binaries for macOS (arm64 / x86_64) and
-Linux (arm64 / x86_64), plus a `SHA256SUMS` file:
+Every tagged release ships binaries for macOS (arm64 / x86_64),
+Linux (arm64 / x86_64), and Windows (x86_64), plus a `SHA256SUMS` file:
 <https://github.com/bukomp/Mewxi/releases>
 
 The repo is private, so the easiest download is the `gh` CLI:
@@ -20,6 +20,15 @@ The repo is private, so the easiest download is the `gh` CLI:
 gh release download --repo bukomp/Mewxi --pattern '*aarch64-apple-darwin*'
 tar -xzf mewxi-v*-aarch64-apple-darwin.tar.gz
 install -m 755 mewxi ~/.cargo/bin/   # or any dir on your PATH
+```
+
+On Windows the release ships a `.zip` instead of a `.tar.gz`:
+
+```powershell
+# x86_64-pc-windows-msvc
+gh release download --repo bukomp/Mewxi --pattern '*x86_64-pc-windows-msvc*'
+Expand-Archive mewxi-v*-x86_64-pc-windows-msvc.zip -DestinationPath .
+# move mewxi.exe somewhere on your PATH, e.g. %USERPROFILE%\.cargo\bin
 ```
 
 On macOS, a binary downloaded through a browser carries the quarantine
@@ -53,8 +62,9 @@ will never reach the binary you actually run.
 ## Requirements
 
 - An existing Claude Code install — Mewxi reads from `~/.claude*/projects/`
-  and the OAuth credentials those directories already hold.
-- Linux or macOS. Windows isn't tested.
+  and the OAuth credentials those directories already hold. On Windows
+  that's `%USERPROFILE%\.claude*\projects\`.
+- Linux, macOS, or Windows.
 - Rust 1.75+ (2021 edition) — only when building from source or using
   the self-updater (which rebuilds with cargo).
 
@@ -108,8 +118,9 @@ Config view.
 mewxi setup --service
 ```
 
-Installs a user-scope `systemd` unit (Linux) or `launchd` agent (macOS)
-that runs `mewxi watch` at login. Without it, the statusLine still works —
-it just recomputes on every Claude Code tick instead of reading a cache.
+Installs a user-scope `systemd` unit (Linux), `launchd` agent (macOS),
+or `ONLOGON` Scheduled Task (Windows, via `schtasks`) that runs
+`mewxi watch` at login. Without it, the statusLine still works — it just
+recomputes on every Claude Code tick instead of reading a cache.
 
 Uninstall with `mewxi stop --disable`.

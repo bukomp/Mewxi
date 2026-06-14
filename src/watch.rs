@@ -55,13 +55,29 @@ fn fmt_tokens_compact(n: u64) -> String {
     }
 }
 
+/// Optional per-session metadata Claude Code passes to `mewxi status`
+/// on stdin (the "Status" hook payload). Every field is absent when the
+/// line is rendered by the watcher (no stdin) or seeded during setup.
+#[derive(Default, Clone, Copy)]
+pub struct SessionMeta<'a> {
+    /// `model.id` — the configured alias (may contain `[1m]`). Drives
+    /// the context-window cap heuristic.
+    pub model_alias: Option<&'a str>,
+    /// `model.display_name` — short human label, e.g. "Opus".
+    pub model_display: Option<&'a str>,
+    /// `thinking.enabled` — whether extended thinking is on this turn.
+    pub thinking_enabled: bool,
+    /// `effort.level` — reasoning effort: low|medium|high|xhigh|max.
+    pub effort_level: Option<&'a str>,
+}
+
 /// Render the current usage as an ANSI-colored one-liner for Claude
 /// Code's statusLine. Picks the account that owns `transcript_path`;
 /// falls back to the configured default. When more than one account is
 /// known, the line is prefixed with `[name]`.
 pub fn render_status(
     transcript_path: Option<&Path>,
-    model_alias: Option<&str>,
+    meta: SessionMeta<'_>,
     no_live: bool,
 ) -> String {
     let view = match accounts::load_accounts() {
@@ -79,14 +95,14 @@ pub fn render_status(
         },
     };
 
-    render_status_for_account(account, view.accounts.len() > 1, transcript_path, model_alias, no_live)
+    render_status_for_account(account, view.accounts.len() > 1, transcript_path, meta, no_live)
 }
 
 pub(crate) fn render_status_for_account(
     account: &Account,
     prefix_name: bool,
     transcript_path: Option<&Path>,
-    model_alias: Option<&str>,
+    meta: SessionMeta<'_>,
     no_live: bool,
 ) -> String {
     let agg = stats::load_and_aggregate_for(account).unwrap_or_default();
@@ -154,7 +170,7 @@ pub(crate) fn render_status_for_account(
     // so the TUI (which doesn't see stdin) renders the same cap. Without
     // this, ctx% in the all-sessions table can read ~5x higher than the
     // statusline until any single message crosses 200K tokens.
-    if let (Some(alias), Some(sid)) = (model_alias, session_id.as_deref()) {
+    if let (Some(alias), Some(sid)) = (meta.model_alias, session_id.as_deref()) {
         if alias.contains("[1m]") {
             stats::mark_extended_context(account, sid);
         }
@@ -165,7 +181,7 @@ pub(crate) fn render_status_for_account(
             let cap = stats::context_cap_for(
                 &sc.model,
                 sc.max_observed,
-                model_alias,
+                meta.model_alias,
                 account,
                 session_id.as_deref(),
             );
@@ -187,14 +203,39 @@ pub(crate) fn render_status_for_account(
         String::new()
     };
 
+    // --- Model + thinking segment -----------------------------------------
+    // Only present on the live `mewxi status` path (the watcher has no
+    // stdin). Shows e.g. `Opus · think:high |` or just `Opus |`.
+    let model_segment = match meta.model_display {
+        Some(name) if !name.is_empty() => {
+            let think = if meta.thinking_enabled {
+                let lvl = meta.effort_level.filter(|s| !s.is_empty()).unwrap_or("on");
+                format!(" \x1b[90m·\x1b[0m \x1b[35mthink:{lvl}\x1b[0m")
+            } else {
+                String::new()
+            };
+            format!("\x1b[36m{name}\x1b[0m{think} \x1b[90m|\x1b[0m ")
+        }
+        _ => String::new(),
+    };
+
     // Small "mewxi has an update" notice, fed from the cached update
     // check — surfaces inside every Claude Code session's statusline.
     let update_segment = crate::update::statusline_segment().unwrap_or_default();
 
-    if billing_extra {
-        format!("{prefix}{extra_segment}{reset_segment}{ctx_segment}{update_segment}")
+    // Nudge to open the TUI when setup looks incomplete (an account
+    // isn't wired, or the watcher daemon's heartbeat has gone stale).
+    // The probe is filesystem-only — safe to run on every refresh.
+    let hint_segment = if crate::setup::setup_incomplete(no_live) {
+        " \x1b[90m|\x1b[0m \x1b[33m⚠ mewxi: setup incomplete — open mewxi\x1b[0m".to_string()
     } else {
-        format!("{prefix}{five_h_segment}{reset_segment}{ctx_segment}{update_segment}")
+        String::new()
+    };
+
+    if billing_extra {
+        format!("{prefix}{model_segment}{extra_segment}{reset_segment}{ctx_segment}{update_segment}{hint_segment}")
+    } else {
+        format!("{prefix}{model_segment}{five_h_segment}{reset_segment}{ctx_segment}{update_segment}{hint_segment}")
     }
 }
 
@@ -291,7 +332,7 @@ fn write_status_cache(path: &Path, line: &str) -> Result<()> {
 /// `status.txt` mirror so single-statusLine deployments still get the
 /// most-recently-modified account.
 fn write_account_status(account: &Account, prefix_name: bool, no_live: bool) {
-    let line = render_status_for_account(account, prefix_name, None, None, no_live);
+    let line = render_status_for_account(account, prefix_name, None, SessionMeta::default(), no_live);
     if let Some(p) = stats::status_cache_path_for(account) {
         let _ = write_status_cache(&p, &line);
     }

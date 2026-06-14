@@ -150,10 +150,10 @@ impl Account {
         // account always returns None and the badge shows the literal
         // `default` placeholder forever.
         if out.is_none() {
-            if let Some(home) = std::env::var_os("HOME") {
-                let home_claude = PathBuf::from(&home).join(".claude");
+            if let Some(home) = dirs::home_dir() {
+                let home_claude = home.join(".claude");
                 if self.dir == home_claude {
-                    let path = PathBuf::from(home).join(".claude.json");
+                    let path = home.join(".claude.json");
                     if let Ok(raw) = std::fs::read_to_string(&path) {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
                             if let Some(m) = v.get("model").and_then(|x| x.as_str()) {
@@ -196,7 +196,8 @@ impl Account {
     /// External editor command used by the "open in editor" composer
     /// shortcut. Resolution order: `"editor"` field in
     /// `<dir>/settings.json` (or `settings.local.json` when it
-    /// overrides) → `$VISUAL` → `$EDITOR` → `vim`. Returns a shell-style
+    /// overrides) → `$VISUAL` → `$EDITOR` → a platform default (`vim` on
+    /// Unix, `notepad` on Windows). Returns a shell-style
     /// command line that may include args, e.g. `"code --wait"`; callers
     /// split on whitespace before spawning.
     pub fn editor_command(&self) -> String {
@@ -214,7 +215,18 @@ impl Account {
         configured
             .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.trim().is_empty()))
             .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
-            .unwrap_or_else(|| "vim".to_string())
+            .unwrap_or_else(|| default_editor().to_string())
+    }
+}
+
+/// Fallback editor when neither config nor `$VISUAL`/`$EDITOR` is set.
+/// `notepad` ships with every Windows install; `vim` is the long-
+/// standing Unix default mewxi has always used.
+fn default_editor() -> &'static str {
+    if cfg!(windows) {
+        "notepad"
+    } else {
+        "vim"
     }
 }
 
@@ -1034,7 +1046,16 @@ fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 fn expand_tilde(s: &str) -> PathBuf {
-    if let Some(rest) = s.strip_prefix("~/") {
+    // Accept the native separator after `~` too: `~\foo` on Windows,
+    // where backslash is the path separator (it stays literal on Unix).
+    let tilde_rest = s.strip_prefix("~/").or_else(|| {
+        if cfg!(windows) {
+            s.strip_prefix("~\\")
+        } else {
+            None
+        }
+    });
+    if let Some(rest) = tilde_rest {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest);
         }

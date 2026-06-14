@@ -584,12 +584,26 @@ pub fn apply_now() -> Result<String> {
 /// process sets up its own alternate screen). Returns the error when
 /// the exec itself fails; on success it never returns.
 pub fn restart_process() -> std::io::Error {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe()
         .ok()
         .filter(|p| p.is_file())
         .unwrap_or_else(cargo_bin_path);
-    Command::new(exe).args(std::env::args_os().skip(1)).exec()
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // `exec` replaces this image — on success it never returns.
+        Command::new(exe).args(std::env::args_os().skip(1)).exec()
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no `exec`: spawn the freshly-installed binary as a
+        // child wired to the same stdio, wait for it, then exit with its
+        // code so the parent terminal hands control to the new process.
+        match Command::new(exe).args(std::env::args_os().skip(1)).status() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(0)),
+            Err(e) => e,
+        }
+    }
 }
 
 /// Where `cargo install` puts binaries: `$CARGO_INSTALL_ROOT`, then
@@ -600,12 +614,26 @@ fn cargo_bin_path() -> PathBuf {
         .or_else(|| std::env::var_os("CARGO_HOME").map(PathBuf::from))
         .or_else(|| dirs::home_dir().map(|h| h.join(".cargo")))
         .unwrap_or_default();
-    root.join("bin").join("mewxi")
+    root.join("bin").join(MEWXI_BIN_NAME)
 }
+
+/// Executable file name `cargo install` produces for this crate —
+/// `mewxi.exe` on Windows, `mewxi` elsewhere.
+#[cfg(windows)]
+const MEWXI_BIN_NAME: &str = "mewxi.exe";
+#[cfg(not(windows))]
+const MEWXI_BIN_NAME: &str = "mewxi";
 
 /// Atomically replace `dst` with a copy of `src` (copy to a sibling
 /// tempfile, then rename). The running process keeps its old inode, so
 /// overwriting a live executable's path is safe on unix.
+///
+/// On Windows a file that is currently executing can't be renamed *over*
+/// (sharing violation), but it *can* be renamed *away*. So when the
+/// straight rename fails we move the live `dst` aside to a `.old-…`
+/// sidecar first, then drop the new binary in. The stale sidecar is
+/// best-effort deleted (it's still mapped until the old process exits;
+/// a later update sweeps it).
 fn replace_binary(src: &Path, dst: &Path) -> Result<()> {
     let mut tmp = dst.as_os_str().to_owned();
     tmp.push(".update-tmp");
@@ -613,6 +641,25 @@ fn replace_binary(src: &Path, dst: &Path) -> Result<()> {
     std::fs::copy(src, &tmp)
         .with_context(|| format!("copying {} to {}", src.display(), tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, dst) {
+        #[cfg(windows)]
+        {
+            // dst is likely the running exe — move it out of the way and retry.
+            let mut aside = dst.as_os_str().to_owned();
+            aside.push(".old-update");
+            let aside = PathBuf::from(aside);
+            let _ = std::fs::remove_file(&aside);
+            if std::fs::rename(dst, &aside).is_ok() {
+                if let Err(e2) = std::fs::rename(&tmp, dst) {
+                    // Roll back so we don't leave dst missing.
+                    let _ = std::fs::rename(&aside, dst);
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e2)
+                        .with_context(|| format!("renaming into {}", dst.display()));
+                }
+                let _ = std::fs::remove_file(&aside);
+                return Ok(());
+            }
+        }
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("renaming into {}", dst.display()));
     }
@@ -752,6 +799,7 @@ mod tests {
         assert_eq!(dev_baseline(repo.path(), "1111111").unwrap(), head);
     }
 
+    #[cfg(unix)]
     #[test]
     fn replace_binary_overwrites_dst_and_keeps_exec_bit() {
         use std::os::unix::fs::PermissionsExt;

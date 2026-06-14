@@ -24,6 +24,7 @@ mod debug_log;
 mod live_session;
 mod live_usage;
 mod mcp;
+mod platform;
 mod pricing;
 mod setup;
 mod skills;
@@ -59,7 +60,7 @@ enum Cmd {
     Watch,
     /// Wire Claude Code's statusLine into every discovered account and (optionally) install the watcher service. Same actions are available inside the TUI under view 4 (no CLI run required).
     Setup {
-        /// Also install a user-scope service (systemd on Linux, launchd on macOS) to run the watcher at login.
+        /// Also install a user-scope service (systemd on Linux, launchd on macOS, Scheduled Task on Windows) to run the watcher at login.
         #[arg(long)]
         service: bool,
         /// Overwrite an existing non-mewxi statusLine entry in each account's settings.json.
@@ -75,7 +76,7 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
-    /// Stop the watcher service (systemd user unit on Linux, launchd agent on macOS).
+    /// Stop the watcher service (systemd user unit on Linux, launchd agent on macOS, Scheduled Task on Windows).
     Stop {
         /// Also disable the service so it does not start again on login.
         #[arg(long)]
@@ -128,32 +129,52 @@ enum HookAction {
     },
 }
 
-/// Read Claude Code's statusLine JSON payload from stdin and extract
-/// (transcript_path, model_alias). Stdin may be empty — returns (None, None).
-fn read_status_payload_from_stdin() -> (Option<std::path::PathBuf>, Option<String>) {
+/// Owned form of the fields we pull from Claude Code's statusLine JSON
+/// payload. Borrowed into a [`watch::SessionMeta`] at the call site.
+#[derive(Default)]
+struct StatusPayload {
+    transcript: Option<std::path::PathBuf>,
+    model_alias: Option<String>,
+    model_display: Option<String>,
+    thinking_enabled: bool,
+    effort_level: Option<String>,
+}
+
+/// Read Claude Code's statusLine JSON payload from stdin. Stdin may be
+/// empty (e.g. invoked from a terminal) — returns a default payload.
+fn read_status_payload_from_stdin() -> StatusPayload {
     use std::io::Read;
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        return (None, None);
+        return StatusPayload::default();
     }
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() {
-        return (None, None);
+        return StatusPayload::default();
     }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(buf.trim()) else {
-        return (None, None);
+        return StatusPayload::default();
     };
-    let transcript = v
-        .get("transcript_path")
-        .and_then(|x| x.as_str())
-        .map(std::path::PathBuf::from);
-    // Claude Code payload shape: {"model": {"id": "...", "display_name": "..."}}
-    // "id" is typically the alias the user configured (may contain [1m]).
-    let model_alias = v
-        .get("model")
-        .and_then(|m| m.get("id"))
-        .and_then(|x| x.as_str())
-        .map(String::from);
-    (transcript, model_alias)
+    let str_at = |path: &[&str]| -> Option<String> {
+        let mut cur = &v;
+        for key in path {
+            cur = cur.get(key)?;
+        }
+        cur.as_str().map(String::from)
+    };
+    StatusPayload {
+        transcript: str_at(&["transcript_path"]).map(std::path::PathBuf::from),
+        // "model.id" is typically the alias the user configured (may
+        // contain [1m]); "model.display_name" is the short label, e.g. "Opus".
+        model_alias: str_at(&["model", "id"]),
+        model_display: str_at(&["model", "display_name"]),
+        // "thinking.enabled" (bool) + "effort.level" (low|medium|high|xhigh|max).
+        thinking_enabled: v
+            .get("thinking")
+            .and_then(|t| t.get("enabled"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+        effort_level: str_at(&["effort", "level"]),
+    }
 }
 
 fn main() -> Result<()> {
@@ -188,8 +209,14 @@ fn main() -> Result<()> {
         Cmd::Status => {
             // Claude Code writes a JSON payload to stdin containing the active session's
             // transcript path and model. We use both to render context with the right cap.
-            let (transcript, model_alias) = read_status_payload_from_stdin();
-            let line = watch::render_status(transcript.as_deref(), model_alias.as_deref(), no_live);
+            let p = read_status_payload_from_stdin();
+            let meta = watch::SessionMeta {
+                model_alias: p.model_alias.as_deref(),
+                model_display: p.model_display.as_deref(),
+                thinking_enabled: p.thinking_enabled,
+                effort_level: p.effort_level.as_deref(),
+            };
+            let line = watch::render_status(p.transcript.as_deref(), meta, no_live);
             print!("{line}");
             Ok(())
         }

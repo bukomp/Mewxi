@@ -10,7 +10,12 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -31,6 +36,8 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -39,13 +46,17 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Package
-        run: |
-          tar -C target/${{ matrix.target }}/release -czf mewxi-${{ matrix.target }}.tar.gz mewxi
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: tar -C target/${{ matrix.target }}/release -czf mewxi-${{ matrix.target }}.tar.gz mewxi
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/mewxi.exe -DestinationPath mewxi-${{ matrix.target }}.zip
       - uses: actions/upload-artifact@v4
         with:
           name: mewxi-${{ matrix.target }}
-          path: mewxi-${{ matrix.target }}.tar.gz
+          path: mewxi-${{ matrix.target }}.*
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -70,10 +81,11 @@ jobs:
       - name: Rename and checksum
         run: |
           cd artifacts
-          for f in mewxi-*.tar.gz; do
+          shopt -s nullglob
+          for f in mewxi-*.tar.gz mewxi-*.zip; do
             mv "$f" "${f/mewxi-/mewxi-$GITHUB_REF_NAME-}"
           done
-          sha256sum mewxi-*.tar.gz > SHA256SUMS
+          sha256sum mewxi-*.tar.gz mewxi-*.zip > SHA256SUMS
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
