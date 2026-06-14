@@ -1,0 +1,8 @@
+# "mewxi has an update" nudge. `{update_segment}` is a pre-rendered ANSI
+# segment (with its own trailing " | "), only present when a newer mewxi
+# is available. Kept near the front so it survives narrow-terminal
+# truncation of the tail.
+id = "update"
+label = "update nudge"
+when = "update_available"
+template = "{update_segment}"

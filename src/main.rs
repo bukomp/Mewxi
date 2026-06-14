@@ -28,6 +28,7 @@ mod platform;
 mod pricing;
 mod setup;
 mod skills;
+mod statusline;
 mod stats;
 mod tui;
 mod update;

@@ -1,0 +1,7 @@
+# Setup-incomplete nudge — shown at the front of the line when an account
+# isn't wired or the watcher heartbeat has gone stale. `{hint_segment}` is
+# a pre-rendered ANSI segment (its own trailing " | " separator included).
+id = "hint"
+label = "setup nudge"
+when = "setup_incomplete"
+template = "{hint_segment}"

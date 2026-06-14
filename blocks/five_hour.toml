@@ -1,0 +1,9 @@
+# The 5-hour usage meter, e.g. "5h 12.3% (live)" or "5h 12% (1.4M/11.5M)
+# (est)". {five_h_segment} is the whole meter (label + percent + live/
+# stale/est tag + any overage) as one self-colored ANSI run, because the
+# live and local-estimate forms differ structurally. Hidden while extra
+# usage is being billed (the `extra` block leads instead).
+id = "five_hour"
+label = "5-hour window"
+when = "five_h_visible"
+template = "{five_h_segment}"

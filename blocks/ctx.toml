@@ -1,0 +1,8 @@
+# Per-session context window, e.g. "| ctx 45% (90k/200k)". Only present
+# on the live `mewxi status` path (needs the session transcript).
+# {ctx_pct} self-colors (green/yellow/red); {ctx_cur}/{ctx_cap} are the
+# compacted token counts. The leading " | " separates it from the meters.
+id = "ctx"
+label = "context %"
+when = "ctx_present"
+template = " <grey>|</grey> <cyan>ctx</cyan> {ctx_pct} ({ctx_cur}/{ctx_cap})"

@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 /// Pro ≈ 2.3M, Max 20× ≈ 46M.
 const DEFAULT_5H_CAP_TOKENS: u64 = 11_500_000;
 
-fn five_h_cap_tokens() -> u64 {
+pub(crate) fn five_h_cap_tokens() -> u64 {
     std::env::var("MEWXI_5H_CAP_TOKENS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -45,7 +45,7 @@ fn five_h_cap_tokens() -> u64 {
         .unwrap_or(DEFAULT_5H_CAP_TOKENS)
 }
 
-fn fmt_tokens_compact(n: u64) -> String {
+pub(crate) fn fmt_tokens_compact(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
@@ -60,7 +60,7 @@ fn fmt_tokens_compact(n: u64) -> String {
 /// extended-context parenthetical to a bracketed `[1M]` so the segment
 /// stays narrow (`Opus 4.8 [1M]`). Families that are natively 1M (Fable,
 /// Opus 4.8+) drop the parenthetical entirely — the badge would be noise.
-fn compact_model_name(name: &str) -> String {
+pub(crate) fn compact_model_name(name: &str) -> String {
     let Some(idx) = name.find(" (1M context)") else {
         return name.to_string();
     };
@@ -122,43 +122,51 @@ pub(crate) fn render_status_for_account(
     meta: SessionMeta<'_>,
     no_live: bool,
 ) -> String {
-    let agg = stats::load_and_aggregate_for(account).unwrap_or_default();
-    let live = live_usage::fetch_or_cached(account, no_live);
+    // The line is now composed from reorderable blocks loaded from disk
+    // (built-in defaults + the user's `status_blocks_dir`), ordered by
+    // `status_blocks` in `accounts.toml`. With no user config this is
+    // byte-for-byte identical to the legacy renderer preserved as
+    // `render_status_legacy` below — see the golden tests in this module.
+    // The per-session persistence side effects (`mark_extended_context` /
+    // `mark_session_effort`) now live in `statusline::engine::Ctx`.
+    crate::statusline::compose(account, prefix_name, transcript_path, meta, no_live)
+}
 
-    // Promote `extra` to the lead only once the *current* 5h window is at its
-    // cap. `extra_usage.used_credits` accumulates over the billing period, so
-    // testing it alone hides the 5h meter for the rest of the month after the
-    // first extra credit is ever spent — even when the current 5h window is
-    // fresh. Require both signals: credits actively burning AND 5h at cap.
-    // When promoted, the 5h label+pct is dropped but the reset time stays so
-    // the user still sees when the main meter frees up.
+/// The legacy hardcoded renderer, kept only for the golden byte-identity
+/// tests: it must produce exactly what the block-composed default set
+/// does. Takes the aggregate + live usage as parameters (rather than
+/// fetching) so a test can feed deterministic fixtures to both paths.
+#[cfg(test)]
+pub(crate) fn render_status_legacy(
+    account: &Account,
+    prefix_name: bool,
+    transcript_path: Option<&Path>,
+    meta: SessionMeta<'_>,
+    agg: &stats::Aggregate,
+    live: Option<&live_usage::LiveUsage>,
+) -> String {
     let five_h_at_cap = live
-        .as_ref()
         .and_then(|l| l.five_hour.as_ref())
         .is_some_and(|w| w.utilization >= 100.0);
 
     let billing_extra = five_h_at_cap
         && live
-            .as_ref()
             .and_then(|l| l.extra_usage.as_ref())
             .filter(|e| e.is_enabled)
             .and_then(|e| e.used_credits)
             .is_some_and(|c| c > 0.0);
 
-    // --- 5h window segment -------------------------------------------------
     let (five_h_segment, reset_segment) = if billing_extra {
-        (String::new(), five_h_reset_from_live(live.as_ref()))
+        (String::new(), five_h_reset_from_live(live))
     } else {
-        match five_h_from_live(live.as_ref()) {
+        match five_h_from_live(live) {
             Some((seg, reset)) => (seg, reset),
-            None => local_five_h_segment(&agg),
+            None => local_five_h_segment(agg),
         }
     };
 
-    // --- Extra usage segment (only when actually billing) -----------------
     let extra_segment = if billing_extra {
-        live.as_ref()
-            .and_then(|l| l.extra_usage.as_ref())
+        live.and_then(|l| l.extra_usage.as_ref())
             .map(|e| {
                 let used = e.used_credits.unwrap_or(0.0) / 100.0;
                 let limit = e.monthly_limit.unwrap_or(0.0) / 100.0;
@@ -178,29 +186,10 @@ pub(crate) fn render_status_for_account(
         String::new()
     };
 
-    // --- Context segment ---------------------------------------------------
     let session_id = transcript_path
         .and_then(|p| p.file_stem())
         .and_then(|s| s.to_str())
         .map(str::to_string);
-    // If Claude Code told us this session is on `[1m]`, persist that fact
-    // so the TUI (which doesn't see stdin) renders the same cap. Without
-    // this, ctx% in the all-sessions table can read ~5x higher than the
-    // statusline until any single message crosses 200K tokens.
-    if let (Some(alias), Some(sid)) = (meta.model_alias, session_id.as_deref()) {
-        if alias.contains("[1m]") {
-            stats::mark_extended_context(account, sid);
-        }
-    }
-    // Persist the reported reasoning effort for the same reason: the TUI
-    // never sees this stdin payload, so without a per-session record its
-    // all-sessions table shows every session the account-global default.
-    if let (Some(eff), Some(sid)) = (
-        meta.effort_level.filter(|s| !s.is_empty()),
-        session_id.as_deref(),
-    ) {
-        stats::mark_session_effort(account, sid, eff);
-    }
     let ctx_segment = transcript_path
         .and_then(stats::current_context_from_transcript)
         .map(|sc| {
@@ -229,9 +218,6 @@ pub(crate) fn render_status_for_account(
         String::new()
     };
 
-    // --- Model + thinking segment -----------------------------------------
-    // Only present on the live `mewxi status` path (the watcher has no
-    // stdin). Shows e.g. `Opus · think:high |` or just `Opus |`.
     let model_segment = match meta.model_display {
         Some(name) if !name.is_empty() => {
             let name = compact_model_name(name);
@@ -246,17 +232,8 @@ pub(crate) fn render_status_for_account(
         _ => String::new(),
     };
 
-    // Small "mewxi has an update" notice, fed from the cached update
-    // check — surfaces inside every Claude Code session's statusline.
-    // Rendered as a leading segment (right after any setup-incomplete
-    // hint) so the update nudge survives narrow-terminal truncation.
     let update_segment = crate::update::statusline_segment().unwrap_or_default();
 
-    // Nudge to open the TUI when setup looks incomplete (an account
-    // isn't wired, or the watcher daemon's heartbeat has gone stale).
-    // The probe is filesystem-only — safe to run on every refresh.
-    // Rendered as the leading segment so it stays visible even when the
-    // statusline is truncated on narrow terminals.
     let hint_segment = if crate::setup::setup_incomplete() {
         "\x1b[33m⚠ mewxi: setup incomplete — open mewxi\x1b[0m \x1b[90m|\x1b[0m ".to_string()
     } else {
@@ -270,7 +247,7 @@ pub(crate) fn render_status_for_account(
     }
 }
 
-fn currency_symbol(code: Option<&str>) -> &'static str {
+pub(crate) fn currency_symbol(code: Option<&str>) -> &'static str {
     match code.map(|s| s.to_ascii_uppercase()).as_deref() {
         Some("USD") => "$",
         Some("EUR") => "€",
@@ -280,11 +257,11 @@ fn currency_symbol(code: Option<&str>) -> &'static str {
     }
 }
 
-fn pct_color(pct: f64) -> &'static str {
+pub(crate) fn pct_color(pct: f64) -> &'static str {
     if pct >= 85.0 { "31" } else if pct >= 60.0 { "33" } else { "32" }
 }
 
-fn five_h_from_live(live: Option<&live_usage::LiveUsage>) -> Option<(String, String)> {
+pub(crate) fn five_h_from_live(live: Option<&live_usage::LiveUsage>) -> Option<(String, String)> {
     let l = live?;
     let w = l.five_hour.as_ref()?;
     let pct = w.utilization;
@@ -303,13 +280,13 @@ fn five_h_from_live(live: Option<&live_usage::LiveUsage>) -> Option<(String, Str
     Some((seg, format_reset(w.resets_at)))
 }
 
-fn five_h_reset_from_live(live: Option<&live_usage::LiveUsage>) -> String {
+pub(crate) fn five_h_reset_from_live(live: Option<&live_usage::LiveUsage>) -> String {
     live.and_then(|l| l.five_hour.as_ref())
         .map(|w| format_reset(w.resets_at))
         .unwrap_or_default()
 }
 
-fn format_reset(resets_at: Option<DateTime<Utc>>) -> String {
+pub(crate) fn format_reset(resets_at: Option<DateTime<Utc>>) -> String {
     resets_at
         .map(|t| {
             let local = t.with_timezone(&Local);
@@ -324,7 +301,7 @@ fn format_reset(resets_at: Option<DateTime<Utc>>) -> String {
 }
 
 /// Local-JSONL fallback: compute 5h usage from transcripts + a token cap.
-fn local_five_h_segment(agg: &stats::Aggregate) -> (String, String) {
+pub(crate) fn local_five_h_segment(agg: &stats::Aggregate) -> (String, String) {
     let five_h_tokens = agg.rolling_5h.total_tokens();
     let cap = five_h_cap_tokens();
     let pct = (five_h_tokens as f64 / cap as f64 * 100.0).min(999.0);
@@ -498,5 +475,124 @@ pub fn run_forever(no_live: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Golden byte-identity tests: the block-composed default set must render
+/// exactly what the legacy hardcoded renderer produced. We compare the two
+/// implementations against the *same* fixed `(agg, live)` inputs, so any
+/// environment-dependent segments (the update notice, the setup-incomplete
+/// hint) appear identically on both sides and cancel out — the assertion
+/// is "new == old", never "new == a frozen string".
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use crate::accounts::{Account, TokenSource};
+    use crate::live_usage::{ExtraUsage, LiveUsage, WindowUsage};
+    use chrono::Duration as ChronoDuration;
+
+    fn account() -> (tempfile::TempDir, Account) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let account = Account {
+            name: "priv".into(),
+            dir: tmp.path().to_path_buf(),
+            token_source: TokenSource::default(),
+        };
+        (tmp, account)
+    }
+
+    fn live_with(five: Option<WindowUsage>, extra: Option<ExtraUsage>) -> LiveUsage {
+        LiveUsage {
+            five_hour: five,
+            seven_day: None,
+            extra_usage: extra,
+            fetched_at: Utc::now(),
+            cache_schema_version: crate::live_usage::CACHE_SCHEMA_VERSION,
+        }
+    }
+
+    /// Assert the block-composed default equals the legacy renderer for
+    /// identical inputs.
+    fn assert_identical(
+        account: &Account,
+        prefix: bool,
+        transcript: Option<&Path>,
+        meta: SessionMeta<'_>,
+        agg: &stats::Aggregate,
+        live: Option<&LiveUsage>,
+    ) {
+        let legacy = render_status_legacy(account, prefix, transcript, meta, agg, live);
+        let composed =
+            crate::statusline::compose_default_from_data(account, prefix, transcript, meta, agg, live);
+        assert_eq!(composed, legacy);
+    }
+
+    #[test]
+    fn live_window_with_model_reset_and_prefix() {
+        let (_tmp, account) = account();
+        let agg = stats::Aggregate::default();
+        let live = live_with(
+            Some(WindowUsage {
+                utilization: 12.34,
+                resets_at: Some(Utc::now() + ChronoDuration::hours(3)),
+            }),
+            None,
+        );
+        let meta = SessionMeta {
+            model_alias: None,
+            model_display: Some("Opus 4.8 (1M context)"),
+            thinking_enabled: true,
+            effort_level: Some("high"),
+        };
+        assert_identical(&account, true, None, meta, &agg, Some(&live));
+    }
+
+    #[test]
+    fn local_estimate_fallback_no_live() {
+        let (_tmp, account) = account();
+        let agg = stats::Aggregate::default();
+        assert_identical(&account, false, None, SessionMeta::default(), &agg, None);
+    }
+
+    #[test]
+    fn billing_extra_promotes_extra_and_hides_5h() {
+        let (_tmp, account) = account();
+        let agg = stats::Aggregate::default();
+        let extra = ExtraUsage {
+            is_enabled: true,
+            monthly_limit: Some(1000.0),
+            used_credits: Some(420.0),
+            utilization: Some(42.0),
+            currency: Some("USD".into()),
+        };
+        let live = live_with(
+            Some(WindowUsage {
+                utilization: 100.0,
+                resets_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            }),
+            Some(extra),
+        );
+        assert_identical(&account, false, None, SessionMeta::default(), &agg, Some(&live));
+    }
+
+    #[test]
+    fn multi_account_prefix_with_estimate() {
+        let (_tmp, account) = account();
+        let agg = stats::Aggregate::default();
+        assert_identical(&account, true, None, SessionMeta::default(), &agg, None);
+    }
+
+    #[test]
+    fn no_model_live_window_only() {
+        let (_tmp, account) = account();
+        let agg = stats::Aggregate::default();
+        let live = live_with(
+            Some(WindowUsage {
+                utilization: 73.5,
+                resets_at: Some(Utc::now() + ChronoDuration::minutes(45)),
+            }),
+            None,
+        );
+        assert_identical(&account, false, None, SessionMeta::default(), &agg, Some(&live));
+    }
 }
 

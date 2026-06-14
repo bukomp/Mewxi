@@ -1,0 +1,8 @@
+# Active model + thinking effort, e.g. "Opus 4.8 · think:high |".
+# Only present on the live `mewxi status` path (the watcher has no stdin).
+# {model} = compacted display name; {think} = " · think:LVL" (self-colored)
+# or empty when extended thinking is off.
+id = "model"
+label = "model + thinking"
+when = "model_present"
+template = "<cyan>{model}</cyan>{think} <grey>|</grey> "

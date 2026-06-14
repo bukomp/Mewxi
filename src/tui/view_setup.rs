@@ -39,6 +39,8 @@ pub enum ConfigItem {
     UpdateCheckNow,
     DefaultView,
     DefocusToggle,
+    /// Opens the status-line block composer modal.
+    StatusLineComposer,
 }
 
 /// Which view the TUI opens in — the `default_view` key in
@@ -107,6 +109,7 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
     v.push(ConfigItem::UpdateCheckNow);
     v.push(ConfigItem::DefaultView);
     v.push(ConfigItem::DefocusToggle);
+    v.push(ConfigItem::StatusLineComposer);
     v
 }
 
@@ -442,6 +445,17 @@ fn build_lines(
                     "unfocus the prompt box after sending".to_string(),
                 ));
                 owners.push(Some(i));
+
+                push_header(&mut lines, &mut owners, "Status line", false);
+            }
+            ConfigItem::StatusLineComposer => {
+                lines.push(row(
+                    i,
+                    "status line blocks".to_string(),
+                    bold(format!("{:<16}", "open ↵"), Color::Magenta),
+                    "reorder · toggle · add blocks (live preview)".to_string(),
+                ));
+                owners.push(Some(i));
             }
         }
     }
@@ -582,6 +596,10 @@ fn action_hint(
         } else {
             "Enter: unfocus the prompt box after sending (keys go back to navigation)".to_string()
         },
+        ConfigItem::StatusLineComposer => {
+            "Enter: open the status-line composer — reorder / toggle / add / edit blocks with a live preview"
+                .to_string()
+        }
     }
 }
 
@@ -671,8 +689,9 @@ mod tests {
         assert_eq!(list[8], ConfigItem::UpdateCheckNow);
         assert_eq!(list[9], ConfigItem::DefaultView);
         assert_eq!(list[10], ConfigItem::DefocusToggle);
+        assert_eq!(list[11], ConfigItem::StatusLineComposer);
         // No snapshot yet → only the fixed rows.
-        assert_eq!(items(None).len(), 9);
+        assert_eq!(items(None).len(), 10);
     }
 
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
@@ -723,6 +742,8 @@ mod tests {
             "check for updates",
             "Preferences",
             "defocus input after send",
+            "Status line",
+            "status line blocks",
             "did a thing",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");

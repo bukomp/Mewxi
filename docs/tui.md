@@ -52,6 +52,10 @@ what `Enter` will do before you press it.
   updates on startup, where updates clone + build (the OS temp dir by
   default), and a check/install row.
 - **Preferences** — TUI behaviour toggles.
+- **Status line** — open the **block composer** (`Enter` on "status line
+  blocks") to reorder, toggle, add, and edit the pieces of the Claude
+  Code status line, with a live preview. See
+  [Status line](statusline.md).
 
 Shortcuts: `a` fixes everything that's missing, `i` ignores/un-ignores
 the selected account, `R` rescans, `Esc` goes back.

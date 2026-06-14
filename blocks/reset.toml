@@ -1,0 +1,8 @@
+# When the 5h window resets, e.g. "→ reset 14:30 (42m)". {reset_segment}
+# is the whole pre-rendered run (grey arrow, yellow time, grey minutes
+# remaining), with its own leading space. Empty when no reset time is
+# known.
+id = "reset"
+label = "reset time"
+when = "reset_present"
+template = "{reset_segment}"

@@ -1,0 +1,8 @@
+# Extra-usage (pay-as-you-go) meter, e.g. "extra 42.0% ($4.20/$10.00)".
+# Only shown once the current 5h window is at its cap AND extra credits
+# are actively burning. {extra_pct} self-colors by utilization; the
+# amounts are grey.
+id = "extra"
+label = "extra usage"
+when = "billing_extra"
+template = "<cyan>extra</cyan> {extra_pct} {extra_amounts}"

@@ -533,3 +533,109 @@ pub fn render_footer(f: &mut Frame, area: Rect, active: &str, hint: &str, show_m
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Parse a string carrying ANSI SGR escapes (the kind the status line
+/// emits — foreground colors + reset/bold) into ratatui spans, so a
+/// colored status-line string can be shown faithfully inside the TUI
+/// (e.g. the composer's live preview). Only color + bold/dim SGR codes
+/// are interpreted; other escapes are dropped. Returns owned (`'static`)
+/// spans.
+pub fn ansi_to_spans(input: &str) -> Vec<Span<'static>> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cur = String::new();
+    let mut style = Style::default();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\x1b' && chars.get(i + 1) == Some(&'[') {
+            if !cur.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut cur), style));
+            }
+            let mut j = i + 2;
+            let mut params = String::new();
+            while j < chars.len() && chars[j] != 'm' {
+                params.push(chars[j]);
+                j += 1;
+            }
+            style = apply_sgr(style, &params);
+            i = if j < chars.len() { j + 1 } else { j };
+            continue;
+        }
+        cur.push(chars[i]);
+        i += 1;
+    }
+    if !cur.is_empty() {
+        spans.push(Span::styled(cur, style));
+    }
+    spans
+}
+
+fn apply_sgr(mut style: Style, params: &str) -> Style {
+    if params.is_empty() {
+        return Style::default(); // `ESC[m` == reset
+    }
+    for part in params.split(';') {
+        match part {
+            "0" | "" => style = Style::default(),
+            "1" => style = style.add_modifier(Modifier::BOLD),
+            "2" => style = style.add_modifier(Modifier::DIM),
+            "39" => style = style.fg(Color::Reset),
+            _ => {
+                if let Some(c) = sgr_color(part) {
+                    style = style.fg(c);
+                }
+            }
+        }
+    }
+    style
+}
+
+fn sgr_color(code: &str) -> Option<Color> {
+    Some(match code {
+        "30" => Color::Black,
+        "31" => Color::Red,
+        "32" => Color::Green,
+        "33" => Color::Yellow,
+        "34" => Color::Blue,
+        "35" => Color::Magenta,
+        "36" => Color::Cyan,
+        "37" => Color::Gray,
+        "90" => Color::DarkGray,
+        "91" => Color::LightRed,
+        "92" => Color::LightGreen,
+        "93" => Color::LightYellow,
+        "94" => Color::LightBlue,
+        "95" => Color::LightMagenta,
+        "96" => Color::LightCyan,
+        "97" => Color::White,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod ansi_tests {
+    use super::*;
+
+    #[test]
+    fn parses_fg_color_and_reset() {
+        let spans = ansi_to_spans("\x1b[36mctx\x1b[0m 45%");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), "ctx");
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[1].content.as_ref(), " 45%");
+        assert_eq!(spans[1].style.fg, None);
+    }
+
+    #[test]
+    fn plain_text_is_single_span() {
+        let spans = ansi_to_spans("hello");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "hello");
+        assert_eq!(spans[0].style.fg, None);
+    }
+
+    #[test]
+    fn empty_input_no_spans() {
+        assert!(ansi_to_spans("").is_empty());
+    }
+}
+

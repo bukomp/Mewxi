@@ -1,0 +1,7 @@
+# Account name, shown only when more than one account is configured so
+# you can tell which account a session belongs to. `{account}` is the
+# bare name; the <magenta> tag colors the whole "[name]".
+id = "prefix"
+label = "account name"
+when = "multi_account"
+template = "<magenta>[{account}]</magenta> "

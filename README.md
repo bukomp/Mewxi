@@ -19,6 +19,7 @@ One binary. Every account. No telemetry going anywhere but your terminal.
 - [Installation](docs/installation.md) — prebuilt release binaries or build from source, plus self-update.
 - [Quick start](docs/quickstart.md) — five minutes from zero to a live status line.
 - [TUI guide](docs/tui.md) — the four views, keybinds, what each pane means.
+- [Status line](docs/statusline.md) — compose the Claude Code status line from reorderable blocks (incl. your own command blocks).
 - [Agent sessions](docs/sessions.md) — create and drive Claude Code sessions from the TUI (beta).
 - [MCP server](docs/mcp.md) — wire Mewxi into Claude Code as a read-only data source.
 - [Multi-account](docs/accounts.md) — point Mewxi at every `CLAUDE_CONFIG_DIR` you have.

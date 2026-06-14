@@ -386,6 +386,17 @@ struct AccountsConfig {
     /// Windows). `~` expands.
     #[serde(default)]
     update_build_dir: Option<String>,
+    /// Folder of user statusline blocks. Files here (override built-in
+    /// blocks by id, or add new ones) feed the composable status line.
+    /// `~` expands. Default: `<dir(accounts.toml)>/blocks/`
+    /// (`~/.config/mewxi/blocks`). See [`crate::statusline`].
+    #[serde(default)]
+    status_blocks_dir: Option<String>,
+    /// Ordered composition of the status line: which blocks render and
+    /// in what order. When absent, the built-in default order is used
+    /// (and renders byte-for-byte identically to the legacy line).
+    #[serde(default)]
+    status_blocks: Option<Vec<StatusBlockEntry>>,
     #[serde(default)]
     accounts: Vec<AccountEntry>,
 }
@@ -396,6 +407,20 @@ struct AccountEntry {
     dir: String,
     #[serde(default)]
     token_source: Option<TokenSource>,
+}
+
+/// One row of the `[[status_blocks]]` array in `accounts.toml`: a block
+/// id plus whether it's currently enabled. Disabled rows stay in the
+/// list (so the composer can re-enable them) but render nothing.
+#[derive(Debug, Deserialize, Clone)]
+struct StatusBlockEntry {
+    id: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Result of [`load_accounts`] — accounts plus tunables from `accounts.toml`.
@@ -434,6 +459,12 @@ pub struct AccountsView {
     /// Where self-update clones + builds before installing. `None` =
     /// the OS temp dir.
     pub update_build_dir: Option<PathBuf>,
+    /// User statusline blocks folder (tilde-expanded). `None` falls back
+    /// to [`default_status_blocks_dir`].
+    pub status_blocks_dir: Option<PathBuf>,
+    /// Ordered `(id, enabled)` composition of the status line. `None`
+    /// means "use the built-in default order".
+    pub status_blocks: Option<Vec<(String, bool)>>,
 }
 
 impl AccountsView {
@@ -479,6 +510,14 @@ pub fn config_path() -> Option<PathBuf> {
     Some(base.join("mewxi").join("accounts.toml"))
 }
 
+/// Default folder for user statusline blocks — `blocks/` beside
+/// `accounts.toml` (i.e. `~/.config/mewxi/blocks`). Used when the config
+/// doesn't set `status_blocks_dir`. The folder need not exist; the
+/// statusline renderer treats a missing dir as "no user overrides".
+pub fn default_status_blocks_dir() -> Option<PathBuf> {
+    config_path().and_then(|p| p.parent().map(|d| d.join("blocks")))
+}
+
 /// Discover accounts; never fails just because the config file is absent.
 pub fn load_accounts() -> Result<AccountsView> {
     let mut accounts: Vec<Account> = Vec::new();
@@ -493,6 +532,8 @@ pub fn load_accounts() -> Result<AccountsView> {
     let mut update_prompt: bool = true;
     let mut update_repo_dir: Option<PathBuf> = None;
     let mut update_build_dir: Option<PathBuf> = None;
+    let mut status_blocks_dir: Option<PathBuf> = None;
+    let mut status_blocks: Option<Vec<(String, bool)>> = None;
 
     if let Some(cfg_path) = config_path() {
         if cfg_path.exists() {
@@ -522,6 +563,15 @@ pub fn load_accounts() -> Result<AccountsView> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(expand_tilde);
+            status_blocks_dir = cfg
+                .status_blocks_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(expand_tilde);
+            status_blocks = cfg.status_blocks.map(|rows| {
+                rows.into_iter().map(|r| (r.id, r.enabled)).collect()
+            });
             for entry in cfg.accounts {
                 accounts.push(Account {
                     name: entry.name,
@@ -583,6 +633,8 @@ pub fn load_accounts() -> Result<AccountsView> {
         update_prompt,
         update_repo_dir,
         update_build_dir,
+        status_blocks_dir,
+        status_blocks,
     })
 }
 
@@ -946,6 +998,31 @@ pub fn set_update_build_dir(dir: &str) -> Result<()> {
 pub fn set_update_prompt(enabled: bool) -> Result<()> {
     edit_config_table(|t| {
         t.insert("update_prompt".to_string(), toml::Value::Boolean(enabled));
+    })
+}
+
+/// Persist the ordered status-line composition as a `[[status_blocks]]`
+/// array of `{ id, enabled }` tables. An empty slice removes the key,
+/// restoring the built-in default order.
+pub fn set_status_blocks(order: &[(String, bool)]) -> Result<()> {
+    edit_config_table(|t| {
+        if order.is_empty() {
+            t.remove("status_blocks");
+        } else {
+            let arr: Vec<toml::Value> = order
+                .iter()
+                .map(|(id, enabled)| {
+                    let mut tbl = toml::value::Table::new();
+                    tbl.insert("id".to_string(), toml::Value::String(id.clone()));
+                    tbl.insert(
+                        "enabled".to_string(),
+                        toml::Value::Boolean(*enabled),
+                    );
+                    toml::Value::Table(tbl)
+                })
+                .collect();
+            t.insert("status_blocks".to_string(), toml::Value::Array(arr));
+        }
     })
 }
 

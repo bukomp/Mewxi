@@ -28,6 +28,10 @@ ureq = { version = "2", features = ["json"] }
 vt100 = "0.16"
 walkdir = "2"
 
+[build-dependencies]
+# Used by build.rs to enumerate blocks/*.toml for embedding.
+walkdir = "2"
+
 [dev-dependencies]
 tempfile = "3"
 

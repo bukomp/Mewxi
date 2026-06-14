@@ -17,6 +17,7 @@
 //!  - On every event-loop tick we drain channels, debounce dirty
 //!    reloads to ≥500ms per account, and rescan live sessions.
 
+mod composer_modal;
 mod kill_confirm_modal;
 mod markdown;
 mod model_picker_modal;
@@ -32,6 +33,7 @@ mod view_session;
 mod view_setup;
 mod widgets;
 
+use composer_modal::{ComposerModal, ComposerOutcome};
 use kill_confirm_modal::{KillConfirmModal, KillConfirmOutcome};
 use model_picker_modal::{ModelOutcome, ModelPickerModal};
 use new_session_modal::{ModalOutcome, NewSessionModal};
@@ -583,6 +585,166 @@ fn open_editor_for_input<B: ratatui::backend::Backend>(
     }
 }
 
+/// Open `path` in the user's editor (no tempfile, no content returned).
+/// Like [`open_editor_for_input`] but for an existing on-disk file —
+/// used by the status-line composer to deep-edit a block's TOML. Always
+/// restores the terminal, even on failure.
+fn open_editor_for_path<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    account: &Account,
+    path: &std::path::Path,
+) -> Result<()> {
+    let cmd = account.editor_command();
+    let mut parts = cmd.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("editor command is empty"))?
+        .to_string();
+    let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+
+    suspend_terminal(terminal)?;
+    let status_res = std::process::Command::new(&program)
+        .args(&args)
+        .arg(path)
+        .status();
+    let resume_res = resume_terminal(terminal);
+
+    let status = status_res?;
+    resume_res?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("{} exited with status {}", program, status));
+    }
+    Ok(())
+}
+
+/// Resolve `<dir>/<id>.toml`, creating `dir` and seeding the file when it
+/// doesn't exist yet — from the embedded default for a built-in block, or
+/// a commented skeleton for a new/custom one. An **existing** file is left
+/// untouched, so editing a default block creates an editable override copy
+/// on the first edit and preserves the user's edits on every edit after.
+/// Returns the path to open.
+fn ensure_block_file(
+    dir: &std::path::Path,
+    id: &str,
+    is_builtin: bool,
+) -> Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{id}.toml"));
+    if !path.exists() {
+        let seed = if is_builtin {
+            crate::statusline::default_block_source(id).map(str::to_string)
+        } else {
+            Some(crate::statusline::new_block_skeleton(id))
+        };
+        if let Some(contents) = seed {
+            std::fs::write(&path, contents)?;
+        }
+    }
+    Ok(path)
+}
+
+/// Resolve the `<id>.toml` path under the user's status-blocks dir,
+/// seeding it (from the embedded default for a built-in, or a commented
+/// skeleton for a new/custom block) if it doesn't exist yet, then open it
+/// in `$EDITOR`. Afterward, reloads `composer` from a fresh config so the
+/// edited content shows in the list + preview.
+fn edit_status_block_in_editor<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    view: &AccountsView,
+    id: &str,
+    is_builtin: bool,
+    composer: &mut Option<ComposerModal>,
+) {
+    let Some(account) = view.pick(None).cloned() else {
+        if let Some(m) = composer.as_mut() {
+            m.set_status("no account available for $EDITOR".into());
+        }
+        return;
+    };
+    let Some(dir) = view
+        .status_blocks_dir
+        .clone()
+        .or_else(accounts::default_status_blocks_dir)
+    else {
+        if let Some(m) = composer.as_mut() {
+            m.set_status("no status-blocks dir configured".into());
+        }
+        return;
+    };
+
+    let result = (|| -> Result<()> {
+        let path = ensure_block_file(&dir, id, is_builtin)?;
+        open_editor_for_path(terminal, &account, &path)
+    })();
+
+    // Reload from a fresh view so on-disk edits surface immediately.
+    if let Ok(fresh) = accounts::load_accounts() {
+        if let Some(m) = composer.as_mut() {
+            m.reload(crate::statusline::composer_rows(&fresh));
+        }
+    }
+    if let Some(m) = composer.as_mut() {
+        m.set_status(match result {
+            Ok(()) => format!("edited {id}.toml"),
+            Err(e) => format!("editor: {e}"),
+        });
+    }
+}
+
+#[cfg(test)]
+mod block_file_tests {
+    use super::ensure_block_file;
+
+    #[test]
+    fn editing_a_default_creates_a_copy_seeded_from_the_embedded_block() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = ensure_block_file(tmp.path(), "ctx", true).unwrap();
+        assert!(path.exists());
+        assert_eq!(path, tmp.path().join("ctx.toml"));
+        let written = std::fs::read_to_string(&path).unwrap();
+        let embedded = crate::statusline::default_block_source("ctx").unwrap();
+        assert_eq!(
+            written, embedded,
+            "the override copy must start as an exact copy of the embedded default"
+        );
+    }
+
+    #[test]
+    fn a_later_edit_preserves_user_changes_and_does_not_reseed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // First edit seeds the override copy from the default.
+        let path = ensure_block_file(tmp.path(), "ctx", true).unwrap();
+        // User edits + saves it.
+        std::fs::write(&path, "template = \"EDITED\"\n").unwrap();
+        // Editing again must reopen the SAME file untouched, not re-seed it.
+        let again = ensure_block_file(tmp.path(), "ctx", true).unwrap();
+        assert_eq!(path, again);
+        assert_eq!(
+            std::fs::read_to_string(&again).unwrap(),
+            "template = \"EDITED\"\n",
+            "an existing override must be left as the user saved it"
+        );
+    }
+
+    #[test]
+    fn a_new_block_is_seeded_with_a_skeleton_naming_the_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = ensure_block_file(tmp.path(), "mine", false).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("label = \"mine\""), "skeleton:\n{written}");
+        assert!(written.contains("template ="), "skeleton:\n{written}");
+    }
+
+    #[test]
+    fn the_blocks_dir_is_created_if_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let nested = tmp.path().join("does/not/exist/blocks");
+        let path = ensure_block_file(&nested, "model", true).unwrap();
+        assert!(nested.is_dir());
+        assert!(path.exists());
+    }
+}
+
 fn show_splash<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     duration: Duration,
@@ -1044,6 +1206,10 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut skill_picker: Option<SkillPickerModal> = None;
 
     let mut kill_confirm_modal: Option<KillConfirmModal> = None;
+
+    // Status-line composer modal (opened from the Config view). Owns
+    // every keystroke while open.
+    let mut composer_modal: Option<ComposerModal> = None;
 
     // Self-update: the background check was kicked in `run` the moment
     // the splash mascot appeared (see [`start_update_check`]), so by
@@ -1659,6 +1825,9 @@ fn run_loop<B: ratatui::backend::Backend>(
             if let Some(modal) = kill_confirm_modal.as_ref() {
                 modal.render(f, f.area());
             }
+            if let Some(modal) = composer_modal.as_ref() {
+                modal.render(f, f.area());
+            }
             if let Some(modal) = update_prompt_modal.as_ref() {
                 modal.render(f, f.area());
             }
@@ -2158,6 +2327,44 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 driver_status = Some((msg, Instant::now()));
                             }
                             KillConfirmOutcome::Stay => {}
+                        }
+                        continue;
+                    }
+                    // Status-line composer owns every keystroke while open.
+                    if let Some(modal) = composer_modal.as_mut() {
+                        let outcome = modal.handle_key(k);
+                        // `modal` is not used past this point, so the
+                        // borrow ends here and we can mutate composer_modal
+                        // (mirrors the model-picker pattern below).
+                        match outcome {
+                            ComposerOutcome::Stay => {}
+                            ComposerOutcome::Cancel => composer_modal = None,
+                            ComposerOutcome::Save(order) => {
+                                setup_message = Some(match accounts::set_status_blocks(&order) {
+                                    Ok(()) => "status line blocks saved".to_string(),
+                                    Err(e) => format!("failed to save status blocks: {e}"),
+                                });
+                                composer_modal = None;
+                            }
+                            ComposerOutcome::EditExternally { id, is_builtin } => {
+                                edit_status_block_in_editor(
+                                    terminal,
+                                    &view,
+                                    &id,
+                                    is_builtin,
+                                    &mut composer_modal,
+                                );
+                            }
+                            ComposerOutcome::NewBlock(id) => {
+                                // New block: always a fresh user file.
+                                edit_status_block_in_editor(
+                                    terminal,
+                                    &view,
+                                    &id,
+                                    false,
+                                    &mut composer_modal,
+                                );
+                            }
                         }
                         continue;
                     }
@@ -3302,6 +3509,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                         }
+                                    }
+                                    Some(view_setup::ConfigItem::StatusLineComposer) => {
+                                        composer_modal = Some(ComposerModal::new(
+                                            crate::statusline::composer_rows(&view),
+                                        ));
+                                        setup_message = None;
                                     }
                                     None => {}
                                 }
