@@ -61,7 +61,7 @@ pub fn render(
         f,
         rows[2],
         "1",
-        "↑/↓ Tab select · Enter open · n drive · Del kill",
+        "↑/↓ select · Enter open · n new · Del kill",
         true,
     );
 }

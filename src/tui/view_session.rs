@@ -135,7 +135,6 @@ pub fn render(
     chat_code_blocks_out: &mut Vec<CodeBlockRegion>,
     detail_copy_out: &mut Vec<DetailCopyRegion>,
     mouse_pos: Option<(u16, u16)>,
-    is_driven: bool,
     driver: Option<&mut DriverPane<'_>>,
     pending: Option<&PendingPane>,
 ) {
@@ -267,15 +266,15 @@ pub fn render(
         mouse_pos,
     );
     let default_hint =
-        "↑/↓ Tab switch · PgUp/PgDn chat · j/k actions · J/K detail · Del kill · Esc back";
+        "↑/↓ switch · PgUp/PgDn scroll · m model · Del kill · Esc back · j/k changes · J/K detail";
     let driver_flags = driver.as_ref().map(|d| (d.overlay_active, d.focused));
     let footer_hint = match driver_flags {
-        Some((true, _)) => "claude is asking — keys pass through  ·  F10 dismiss",
+        Some((true, _)) => "claude is asking — keys pass through · F10 dismiss",
         Some((false, true)) => {
-            "Enter send  Ctrl-E editor  Shift-Tab cycle mode  Esc unfocus  Ctrl-D end  Ctrl-C cancel"
+            "Enter send · Ctrl-E editor · Shift-Tab mode · Esc unfocus · Ctrl-D end · Ctrl-C cancel"
         }
         Some((false, false)) => {
-            "i type  m model  / skill  Shift-Tab cycle mode  Ctrl-C cancel  Ctrl-D end  Del kill"
+            "i type · m model · / skill · Shift-Tab mode · Ctrl-C cancel · Ctrl-D end · Del kill"
         }
         None => default_hint,
     };
@@ -285,11 +284,12 @@ pub fn render(
     if show_blank {
         row(); // spacer above the footer
     }
-    // Hide the `m mewxi` nav chip while a session is driven — there `m`
-    // opens the model picker, so the chip would advertise the wrong action.
-    // Key off `is_driven`, not the input pane: while claude's overlay is up
-    // the input pane collapses to `None`, but the session is still driven.
-    widgets::render_footer(f, row(), "2", footer_hint, !is_driven);
+    // Never show the `m mewxi` nav chip in the session view: `m` is
+    // reserved for the model picker here (driven sessions open it,
+    // observed ones get a nudge), so advertising it as the Mewxi
+    // shortcut would be wrong. The splash stays reachable via `m`
+    // from the other views.
+    widgets::render_footer(f, row(), "2", footer_hint, false);
 }
 
 fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &PendingPane) {

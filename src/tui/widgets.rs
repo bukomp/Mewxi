@@ -458,8 +458,9 @@ pub fn render_by_project(f: &mut Frame, area: Rect, agg: &Aggregate) {
 /// extra keys appended at the end (already styled dim).
 ///
 /// `show_mewxi` drops the `m mewxi` nav chip when false — the session
-/// view rebinds `m` to the model picker while a session is driven, so
-/// advertising it as the Mewxi shortcut there would be wrong.
+/// view reserves `m` for the model picker (driven sessions open it,
+/// observed ones get a nudge to drive first), so advertising it as the
+/// Mewxi shortcut there would be wrong.
 ///
 /// Width-aware: on narrow terminals the per-chip labels collapse,
 /// then the hint truncates with `…`, so the bar stays useful at any

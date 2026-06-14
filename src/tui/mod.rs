@@ -1626,7 +1626,6 @@ fn run_loop<B: ratatui::backend::Backend>(
                 default_view_pref,
                 &update_ui,
                 live_error,
-                is_driven,
                 driver_pane.as_mut(),
                 pending_pane.as_ref(),
             );
@@ -2856,9 +2855,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                             pinned_session = None;
                         }
                         KeyCode::Char('m') | KeyCode::Char('M') => {
-                            // In a driven session, `m` opens the model
-                            // picker. Elsewhere it stays the
-                            // shortcut to the Mewxi splash view.
+                            // In the session view `m` is reserved for the
+                            // model picker; only the other views use it as
+                            // the shortcut to the Mewxi splash. A driven
+                            // session opens the picker; an observed one
+                            // can't change model, so nudge toward `n`.
                             let driven = mode == ViewMode::SessionDetail
                                 && pinned_session
                                     .as_ref()
@@ -2905,6 +2906,15 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 model_picker = Some(ModelPickerModal::new(
                                     current.as_deref(),
                                     current_effort.as_deref(),
+                                ));
+                            } else if mode == ViewMode::SessionDetail {
+                                // Observed (un-driven) session: mewxi can
+                                // only change the model of a session it
+                                // drives, so point the user at `n` rather
+                                // than silently doing nothing.
+                                driver_status = Some((
+                                    "drive this session (n) to change its model".into(),
+                                    Instant::now(),
                                 ));
                             } else {
                                 mode = ViewMode::Mewxi;
@@ -3696,7 +3706,6 @@ fn render(
     default_view: view_setup::DefaultView,
     update_ui: &view_setup::UpdateUi,
     live_error: Option<&str>,
-    is_driven: bool,
     driver: Option<&mut view_session::DriverPane<'_>>,
     pending: Option<&view_session::PendingPane>,
 ) {
@@ -3764,7 +3773,6 @@ fn render(
             chat_code_blocks,
             detail_copy_blocks,
             mouse_pos,
-            is_driven,
             driver,
             pending,
         ),
