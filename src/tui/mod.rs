@@ -1626,6 +1626,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 default_view_pref,
                 &update_ui,
                 live_error,
+                is_driven,
                 driver_pane.as_mut(),
                 pending_pane.as_ref(),
             );
@@ -3695,6 +3696,7 @@ fn render(
     default_view: view_setup::DefaultView,
     update_ui: &view_setup::UpdateUi,
     live_error: Option<&str>,
+    is_driven: bool,
     driver: Option<&mut view_session::DriverPane<'_>>,
     pending: Option<&view_session::PendingPane>,
 ) {
@@ -3762,6 +3764,7 @@ fn render(
             chat_code_blocks,
             detail_copy_blocks,
             mouse_pos,
+            is_driven,
             driver,
             pending,
         ),

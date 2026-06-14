@@ -135,6 +135,7 @@ pub fn render(
     chat_code_blocks_out: &mut Vec<CodeBlockRegion>,
     detail_copy_out: &mut Vec<DetailCopyRegion>,
     mouse_pos: Option<(u16, u16)>,
+    is_driven: bool,
     driver: Option<&mut DriverPane<'_>>,
     pending: Option<&PendingPane>,
 ) {
@@ -286,7 +287,9 @@ pub fn render(
     }
     // Hide the `m mewxi` nav chip while a session is driven — there `m`
     // opens the model picker, so the chip would advertise the wrong action.
-    widgets::render_footer(f, row(), "2", footer_hint, driver_flags.is_none());
+    // Key off `is_driven`, not the input pane: while claude's overlay is up
+    // the input pane collapses to `None`, but the session is still driven.
+    widgets::render_footer(f, row(), "2", footer_hint, !is_driven);
 }
 
 fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &PendingPane) {
