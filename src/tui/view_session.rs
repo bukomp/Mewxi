@@ -284,7 +284,9 @@ pub fn render(
     if show_blank {
         row(); // spacer above the footer
     }
-    widgets::render_footer(f, row(), "2", footer_hint);
+    // Hide the `m mewxi` nav chip while a session is driven — there `m`
+    // opens the model picker, so the chip would advertise the wrong action.
+    widgets::render_footer(f, row(), "2", footer_hint, driver_flags.is_none());
 }
 
 fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &PendingPane) {
@@ -407,11 +409,14 @@ fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &Pendi
     f.render_widget(Paragraph::new(caption_lines), vrows[1]);
     let _ = p.last_output;
     idx += 1;
+    // A pending pane is always a session mewxi spawned (driven), so `m`
+    // is the model picker — drop the Mewxi nav chip here too.
     widgets::render_footer(
         f,
         chunks[idx],
         "2",
         "Esc cancel via K  ·  1 back to all sessions",
+        false,
     );
 }
 

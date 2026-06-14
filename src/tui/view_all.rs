@@ -62,6 +62,7 @@ pub fn render(
         rows[2],
         "1",
         "↑/↓ Tab select · Enter open · n drive · Del kill",
+        true,
     );
 }
 

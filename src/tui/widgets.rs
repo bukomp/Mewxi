@@ -457,10 +457,14 @@ pub fn render_by_project(f: &mut Frame, area: Rect, agg: &Aggregate) {
 /// user can see which view they're in. `hint` carries view-specific
 /// extra keys appended at the end (already styled dim).
 ///
+/// `show_mewxi` drops the `m mewxi` nav chip when false — the session
+/// view rebinds `m` to the model picker while a session is driven, so
+/// advertising it as the Mewxi shortcut there would be wrong.
+///
 /// Width-aware: on narrow terminals the per-chip labels collapse,
 /// then the hint truncates with `…`, so the bar stays useful at any
 /// size instead of clipping mid-word.
-pub fn render_footer(f: &mut Frame, area: Rect, active: &str, hint: &str) {
+pub fn render_footer(f: &mut Frame, area: Rect, active: &str, hint: &str, show_mewxi: bool) {
     let inactive = Style::default().fg(Color::Black).bg(Color::Gray);
     let active_style = Style::default()
         .fg(Color::Black)
@@ -476,14 +480,16 @@ pub fn render_footer(f: &mut Frame, area: Rect, active: &str, hint: &str) {
             inactive
         }
     };
-    let chips: [(&str, &str); 6] = [
+    let mut chips: Vec<(&str, &str)> = vec![
         ("1", "all"),
         ("2", "session"),
         ("3", "account"),
         ("4", "config"),
-        ("m", "mewxi"),
-        ("q", "quit"),
     ];
+    if show_mewxi {
+        chips.push(("m", "mewxi"));
+    }
+    chips.push(("q", "quit"));
 
     let total_w = area.width as usize;
     // Width with labels: sum of `" K " + " label  "` per chip.

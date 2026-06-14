@@ -162,6 +162,7 @@ pub fn render(
         rows[3],
         "4",
         "↑/↓ select · Enter action · a fix all · i ignore account · R rescan · Esc back",
+        true,
     );
 }
 
