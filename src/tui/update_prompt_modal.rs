@@ -47,9 +47,6 @@ impl UpdatePromptModal {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let modal_area = center_rect(area, 62, 9);
-        f.render_widget(Clear, modal_area);
-
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" Update available ")
@@ -90,6 +87,18 @@ impl UpdatePromptModal {
             )]),
         ];
 
+        // Size the box to its content: widest line plus borders and right
+        // padding mirroring the lines' 2-space indent; body plus a trailing
+        // blank line plus borders. Lines are never clipped this way (the
+        // detail text varies in length).
+        let title_width = " Update available ".len() as u16 + 2;
+        let content_width = body.iter().map(|l| l.width() as u16 + 4).max().unwrap_or(0);
+        let modal_area = center_rect(
+            area,
+            content_width.max(title_width),
+            body.len() as u16 + 3,
+        );
+        f.render_widget(Clear, modal_area);
         f.render_widget(Paragraph::new(body).block(block), modal_area);
     }
 }
