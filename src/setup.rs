@@ -109,7 +109,23 @@ impl SetupSnapshot {
 }
 
 pub fn current_binary() -> Result<PathBuf> {
-    std::env::current_exe().context("resolving current executable path")
+    let exe = std::env::current_exe().context("resolving current executable path")?;
+    Ok(strip_deleted_marker(exe))
+}
+
+/// On Linux, `current_exe` reads `/proc/self/exe`, which the kernel
+/// resolves to `"<path> (deleted)"` once the running binary's file has
+/// been replaced or removed — exactly what an in-place self-update does
+/// to its own binary. Baking that string into a wired statusLine/hook
+/// command produces a path that can never execute (and reads as "other
+/// command" in the config view). Strip the marker so we wire the real
+/// install path; a self-update writes the new binary to that same path,
+/// so it's valid by the time anything runs the command.
+fn strip_deleted_marker(exe: PathBuf) -> PathBuf {
+    match exe.to_string_lossy().strip_suffix(" (deleted)") {
+        Some(clean) => PathBuf::from(clean),
+        None => exe,
+    }
 }
 
 // `no_live` no longer affects inspection (statusLine detection is now
@@ -236,7 +252,12 @@ fn binary_token_is_mewxi(token: &str) -> bool {
         .and_then(|s| s.strip_suffix('\''))
         .or_else(|| token.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
         .unwrap_or(token);
-    let base = unquoted.rsplit(['/', '\\']).next().unwrap_or(unquoted);
+    // A self-update can bake a `<path> (deleted)` marker into the wired
+    // path (see `strip_deleted_marker`). Tolerate it so the entry is still
+    // recognized as ours and gets rewired to the live path in place rather
+    // than stranded as an un-upgradeable "other command".
+    let cleaned = unquoted.strip_suffix(" (deleted)").unwrap_or(unquoted);
+    let base = cleaned.rsplit(['/', '\\']).next().unwrap_or(cleaned);
     base == "mewxi" || base == "mewxi.exe"
 }
 
@@ -1206,6 +1227,19 @@ mod tests {
         assert!(is_mewxi_statusline_command("'/path with spaces/mewxi' status"));
         assert!(is_mewxi_statusline_command(r#""C:\Program Files\mewxi.exe" status"#));
         assert!(is_mewxi_statusline_command(r"C:\tools\mewxi.exe --no-live status"));
+        // A self-update can leave a `(deleted)` marker on the path; still
+        // recognized as ours so it heals to the live path in place.
+        assert!(is_mewxi_statusline_command(
+            "'/home/u/.cargo/bin/mewxi (deleted)' status"
+        ));
+        assert_eq!(
+            strip_deleted_marker(PathBuf::from("/home/u/.cargo/bin/mewxi (deleted)")),
+            PathBuf::from("/home/u/.cargo/bin/mewxi")
+        );
+        assert_eq!(
+            strip_deleted_marker(PathBuf::from("/home/u/.cargo/bin/mewxi")),
+            PathBuf::from("/home/u/.cargo/bin/mewxi")
+        );
         // Third-party `… status` commands must never match.
         assert!(!is_mewxi_statusline_command("git status"));
         assert!(!is_mewxi_statusline_command("/usr/bin/other-tool status"));
