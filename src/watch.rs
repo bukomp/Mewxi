@@ -57,11 +57,11 @@ fn fmt_tokens_compact(n: u64) -> String {
 
 /// Compact a model's `display_name` for the statusline. Claude Code now
 /// sends verbose labels like `Opus 4.8 (1M context)`; we shorten the
-/// extended-context parenthetical to a bare `1M` so the segment stays
-/// narrow (`Opus 4.8 1M`).
+/// extended-context parenthetical to a bracketed `[1M]` so the segment
+/// stays narrow (`Opus 4.8 [1M]`).
 fn compact_model_name(name: &str) -> String {
     if let Some(idx) = name.find(" (1M context)") {
-        format!("{} 1M{}", &name[..idx], &name[idx + " (1M context)".len()..])
+        format!("{} [1M]{}", &name[..idx], &name[idx + " (1M context)".len()..])
     } else {
         name.to_string()
     }

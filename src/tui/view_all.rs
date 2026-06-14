@@ -600,9 +600,9 @@ fn render_sessions_table(
     header_labels.push("cost");
     constraints.push(Constraint::Length(9));
     header_labels.push("model");
-    // Worst case is `sonnet[1M]:medium` (17 chars); size to fit so the
+    // Worst case is `sonnet-4.6[1M]:medium` (21 chars); size to fit so the
     // thinking-budget suffix never gets clipped.
-    constraints.push(Constraint::Length(17));
+    constraints.push(Constraint::Length(21));
     header_labels.push("state");
     constraints.push(Constraint::Length(7));
 
@@ -704,9 +704,10 @@ fn fmt_ctx(current: Option<u64>, cap: Option<u64>) -> String {
     }
 }
 
-/// Short model slug for the table, with the extended-context marker
-/// appended when the session is on the 1M tier so it reads `sonnet[1M]`
-/// rather than masquerading as the 200K variant (mirrors the statusline).
+/// Short model slug for the table, with the version (`opus-4.8`) and the
+/// extended-context marker appended when the session is on the 1M tier so
+/// it reads `sonnet-4.6[1M]` rather than masquerading as the 200K variant
+/// (mirrors the statusline).
 fn short_model(m: &str, extended_ctx: bool) -> String {
     let lower = m.to_ascii_lowercase();
     let base = if lower.contains("opus") {
@@ -718,10 +719,29 @@ fn short_model(m: &str, extended_ctx: bool) -> String {
     } else {
         return m.chars().take(8).collect();
     };
+    let mut label = match model_version(&lower) {
+        Some(ver) => format!("{base}-{ver}"),
+        None => base.to_string(),
+    };
     if extended_ctx {
-        format!("{base}[1M]")
-    } else {
-        base.to_string()
+        label.push_str("[1M]");
+    }
+    label
+}
+
+/// Extract the `major.minor` version from a model id (`claude-opus-4-8[1m]`
+/// → `4.8`). Joins the first two short numeric segments after the family
+/// name with a dot; the trailing date stamp (`…-4-5-20251001`) and the
+/// `[1m]` tier suffix are ignored. Returns `None` when no version is found.
+fn model_version(lower: &str) -> Option<String> {
+    let cleaned = lower.replace("[1m]", "");
+    let mut nums = cleaned
+        .split('-')
+        .filter(|seg| seg.len() <= 2 && seg.chars().all(|c| c.is_ascii_digit()) && !seg.is_empty());
+    let major = nums.next()?;
+    match nums.next() {
+        Some(minor) => Some(format!("{major}.{minor}")),
+        None => Some(major.to_string()),
     }
 }
 
@@ -739,5 +759,22 @@ fn fmt_age(secs: i64) -> String {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     } else {
         format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_model;
+
+    #[test]
+    fn short_model_includes_version() {
+        assert_eq!(short_model("claude-opus-4-8[1m]", true), "opus-4.8[1M]");
+        assert_eq!(short_model("claude-sonnet-4-6", false), "sonnet-4.6");
+        assert_eq!(short_model("claude-haiku-4-5-20251001", false), "haiku-4.5");
+    }
+
+    #[test]
+    fn short_model_unknown_family_truncates() {
+        assert_eq!(short_model("gpt-9-mega", false), "gpt-9-me");
     }
 }
