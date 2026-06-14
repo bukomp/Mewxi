@@ -415,14 +415,15 @@ fn render_sessions_table(
     }
 
     // Responsive columns — added in priority order as the screen widens.
-    // Base columns need ~57 chars (6 columns + 5 spacers + 2 borders);
-    // each extra column adds (length + 1 spacer). Thresholds include a
-    // small buffer so columns don't appear right at the edge of fitting.
+    // Base columns need ~61 chars (6 columns + 5 spacers + 2 borders, with
+    // the model column at 21); each extra column adds (length + 1 spacer).
+    // Thresholds include a small buffer so columns don't appear right at
+    // the edge of fitting and crop the rightmost `state` column.
     let w = area.width;
-    let show_ctx = w >= 68;
-    let show_status = w >= 80;
-    let show_io = w >= 94;
-    let show_cache = w >= 103;
+    let show_ctx = w >= 72;
+    let show_status = w >= 84;
+    let show_io = w >= 98;
+    let show_cache = w >= 107;
 
     // `sessions` is already grouped by project (alphabetical), with
     // pid ascending within each group — sort lives in flatten_sessions
