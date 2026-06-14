@@ -544,7 +544,7 @@ fn render_sessions_table(
                 cells.push(Cell::from(fmt_tokens_compact(s.totals.cache_read)));
             }
             cells.push(Cell::from(format!("${:.2}", s.cost_usd)));
-            // Model + thinking budget, e.g. `opus:xhigh` / `sonnet[1m]:medium`.
+            // Model + thinking budget, e.g. `opus:xhigh` / `sonnet[1M]:medium`.
             // The effort suffix is omitted when the model has no effort
             // support (Haiku) or nothing is configured, and coloured on the
             // same thermometer gradient as the session-detail badge.
@@ -600,7 +600,7 @@ fn render_sessions_table(
     header_labels.push("cost");
     constraints.push(Constraint::Length(9));
     header_labels.push("model");
-    // Worst case is `sonnet[1m]:medium` (17 chars); size to fit so the
+    // Worst case is `sonnet[1M]:medium` (17 chars); size to fit so the
     // thinking-budget suffix never gets clipped.
     constraints.push(Constraint::Length(17));
     header_labels.push("state");
@@ -705,7 +705,7 @@ fn fmt_ctx(current: Option<u64>, cap: Option<u64>) -> String {
 }
 
 /// Short model slug for the table, with the extended-context marker
-/// appended when the session is on the 1M tier so it reads `sonnet[1m]`
+/// appended when the session is on the 1M tier so it reads `sonnet[1M]`
 /// rather than masquerading as the 200K variant (mirrors the statusline).
 fn short_model(m: &str, extended_ctx: bool) -> String {
     let lower = m.to_ascii_lowercase();
@@ -719,7 +719,7 @@ fn short_model(m: &str, extended_ctx: bool) -> String {
         return m.chars().take(8).collect();
     };
     if extended_ctx {
-        format!("{base}[1m]")
+        format!("{base}[1M]")
     } else {
         base.to_string()
     }

@@ -734,8 +734,15 @@ fn models_match(primary: &str, active: &str) -> bool {
 /// Model names shown in badges drop the redundant `claude-` vendor
 /// prefix (`claude-sonnet-4-6` → `sonnet-4-6`) to save horizontal
 /// space; short slugs (`opus`, `default`) pass through untouched.
-fn trim_model(m: &str) -> &str {
-    m.strip_prefix("claude-").unwrap_or(m)
+fn trim_model(m: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = m.strip_prefix("claude-").unwrap_or(m);
+    // Capitalize the extended-context tier suffix (`[1m]` -> `[1M]`) so it
+    // reads consistently with the statusline's `1M` label.
+    if trimmed.contains("[1m]") {
+        std::borrow::Cow::Owned(trimmed.replace("[1m]", "[1M]"))
+    } else {
+        std::borrow::Cow::Borrowed(trimmed)
+    }
 }
 
 fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
@@ -778,7 +785,11 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
     // permission mode) read left-to-right in pick order.
     if let Some(eff) = s.effort.as_deref() {
         push_sep(&mut spans);
-        let model = if s.model.is_empty() { "default" } else { trim_model(&s.model) };
+        let model = if s.model.is_empty() {
+            std::borrow::Cow::Borrowed("default")
+        } else {
+            trim_model(&s.model)
+        };
         spans.push(Span::styled(
             format!("[{model}:{eff}]"),
             Style::default()
@@ -2472,6 +2483,7 @@ mod tests {
         assert_eq!(trim_model("claude-haiku-4-5-20251001"), "haiku-4-5-20251001");
         assert_eq!(trim_model("opus"), "opus");
         assert_eq!(trim_model("default"), "default");
+        assert_eq!(trim_model("claude-opus-4-8[1m]"), "opus-4-8[1M]");
     }
 
     #[test]

@@ -55,6 +55,18 @@ fn fmt_tokens_compact(n: u64) -> String {
     }
 }
 
+/// Compact a model's `display_name` for the statusline. Claude Code now
+/// sends verbose labels like `Opus 4.8 (1M context)`; we shorten the
+/// extended-context parenthetical to a bare `1M` so the segment stays
+/// narrow (`Opus 4.8 1M`).
+fn compact_model_name(name: &str) -> String {
+    if let Some(idx) = name.find(" (1M context)") {
+        format!("{} 1M{}", &name[..idx], &name[idx + " (1M context)".len()..])
+    } else {
+        name.to_string()
+    }
+}
+
 /// Optional per-session metadata Claude Code passes to `mewxi status`
 /// on stdin (the "Status" hook payload). Every field is absent when the
 /// line is rendered by the watcher (no stdin) or seeded during setup.
@@ -217,6 +229,7 @@ pub(crate) fn render_status_for_account(
     // stdin). Shows e.g. `Opus · think:high |` or just `Opus |`.
     let model_segment = match meta.model_display {
         Some(name) if !name.is_empty() => {
+            let name = compact_model_name(name);
             let think = if meta.thinking_enabled {
                 let lvl = meta.effort_level.filter(|s| !s.is_empty()).unwrap_or("on");
                 format!(" \x1b[90m·\x1b[0m \x1b[35mthink:{lvl}\x1b[0m")
