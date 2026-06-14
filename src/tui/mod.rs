@@ -110,6 +110,13 @@ pub struct SessionRef {
     /// when the model has no effort support (Haiku) or nothing's
     /// configured yet.
     pub effort: Option<String>,
+    /// True once the user has asked mewxi to close this agent. The row
+    /// renders a red `killing` status with every other column dashed
+    /// out, and is kept alive as a synthetic placeholder for a short
+    /// linger ([`KILLING_TTL`]) after the session marker disappears from
+    /// the scan, so the feedback doesn't blink out the instant the
+    /// process dies. See [`apply_killing_overlay`].
+    pub killing: bool,
 }
 
 /// Optimistic per-driver state for things mewxi just commanded but
@@ -1086,6 +1093,11 @@ fn run_loop<B: ratatui::backend::Backend>(
     // last_activity, so a raw index would silently jump to a different
     // session whenever another session's activity moves it ahead.
     let mut pinned_session: Option<(String, String)> = None;
+    // Sessions the user has just asked mewxi to close, keyed by
+    // (account, session_id). Drives the red `killing` overlay in view 1
+    // and keeps a placeholder row alive after the process marker
+    // disappears. Pruned by `apply_killing_overlay` after `KILLING_TTL`.
+    let mut killing_sessions: HashMap<(String, String), KillingEntry> = HashMap::new();
     // Last frame's `pinned_session`. Used to detect view-change so we can
     // drop a stale dismiss-signature (see `overlay_dismissed_sig`) when
     // the user navigates back to a session whose modal they dismissed —
@@ -1276,7 +1288,8 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut restart_after_update = false;
 
     loop {
-        let sessions = flatten_sessions(&per_account, &driver_optimistic);
+        let mut sessions = flatten_sessions(&per_account, &driver_optimistic);
+        apply_killing_overlay(&mut sessions, &mut killing_sessions);
         if selected_session >= sessions.len() && !sessions.is_empty() {
             selected_session = sessions.len() - 1;
         }
@@ -2329,6 +2342,23 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     }
                                 };
                                 driver_status = Some((msg, Instant::now()));
+                                mark_killing(
+                                    &mut killing_sessions,
+                                    &sessions,
+                                    &acct,
+                                    &sid,
+                                    pid,
+                                );
+                                // Leave the session view if it was showing
+                                // the agent we just closed — its pane is
+                                // about to go dead.
+                                if mode == ViewMode::SessionDetail
+                                    && pinned_session.as_ref() == Some(&key)
+                                {
+                                    mode = ViewMode::AllSessions;
+                                    pinned_session = None;
+                                    last_session_select = Instant::now();
+                                }
                             }
                             KillConfirmOutcome::Stay => {}
                         }
@@ -3634,6 +3664,25 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         format!("ending driven session {}", short_sid(&key.1)),
                                         Instant::now(),
                                     ));
+                                    let pid = sessions
+                                        .iter()
+                                        .find(|s| {
+                                            s.account_name == key.0 && s.session_id == key.1
+                                        })
+                                        .map(|s| s.pid)
+                                        .unwrap_or(0);
+                                    mark_killing(
+                                        &mut killing_sessions,
+                                        &sessions,
+                                        &key.0,
+                                        &key.1,
+                                        pid,
+                                    );
+                                    // Drop out of the now-dead session's
+                                    // view back to the overview.
+                                    mode = ViewMode::AllSessions;
+                                    pinned_session = None;
+                                    last_session_select = Instant::now();
                                 }
                             }
                         }
@@ -4220,6 +4269,118 @@ fn apply_all_action(no_live: bool) -> String {
     }
 }
 
+/// How long a `killing` row lingers after the user asks mewxi to close
+/// the agent. The session marker disappears from the very next scan once
+/// the process dies, so without a linger the red `killing` feedback would
+/// blink out within a refresh tick. After it elapses the synthetic
+/// placeholder is dropped and the (now dead) session is gone for good.
+const KILLING_TTL: Duration = Duration::from_secs(4);
+
+/// A session the user just asked mewxi to close. Snapshots enough to keep
+/// rendering a placeholder row after the process marker vanishes from the
+/// scan — see [`apply_killing_overlay`].
+struct KillingEntry {
+    since: Instant,
+    account_name: String,
+    project: String,
+    pid: u32,
+}
+
+/// Register a session as being closed by mewxi so view 1 shows the red
+/// `killing` overlay. Captures the project label from the current scan
+/// (while the row is still present) so a placeholder groups correctly
+/// after the marker disappears.
+fn mark_killing(
+    killing: &mut HashMap<(String, String), KillingEntry>,
+    sessions: &[SessionRef],
+    account: &str,
+    session_id: &str,
+    pid: u32,
+) {
+    let project = sessions
+        .iter()
+        .find(|s| s.account_name == account && s.session_id == session_id)
+        .map(|s| s.project.clone())
+        .unwrap_or_default();
+    killing.insert(
+        (account.to_string(), session_id.to_string()),
+        KillingEntry {
+            since: Instant::now(),
+            account_name: account.to_string(),
+            project,
+            pid,
+        },
+    );
+}
+
+/// Mark every session the user just asked mewxi to close: flag rows still
+/// present in the scan, and inject a synthetic placeholder for any whose
+/// marker has already disappeared so the row doesn't vanish mid-kill.
+/// Entries older than [`KILLING_TTL`] are pruned first.
+fn apply_killing_overlay(
+    sessions: &mut Vec<SessionRef>,
+    killing: &mut HashMap<(String, String), KillingEntry>,
+) {
+    killing.retain(|_, e| e.since.elapsed() < KILLING_TTL);
+    if killing.is_empty() {
+        return;
+    }
+    for s in sessions.iter_mut() {
+        if killing.contains_key(&(s.account_name.clone(), s.session_id.clone())) {
+            s.killing = true;
+        }
+    }
+    let mut injected = false;
+    for (key, entry) in killing.iter() {
+        let present = sessions
+            .iter()
+            .any(|s| s.account_name == key.0 && s.session_id == key.1);
+        if !present {
+            sessions.push(killing_placeholder(key, entry));
+            injected = true;
+        }
+    }
+    if injected {
+        // Re-sort so injected placeholders land in their project group —
+        // mirrors flatten_sessions' ordering so view 1's grouping holds.
+        sessions.sort_by(|a, b| {
+            a.project
+                .to_ascii_lowercase()
+                .cmp(&b.project.to_ascii_lowercase())
+                .then_with(|| a.pid.cmp(&b.pid))
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+    }
+}
+
+/// A bare [`SessionRef`] standing in for a killed session whose marker is
+/// already gone. Only the identifying fields carry real values; the rest
+/// are inert because the row renders as dashes anyway (`killing == true`).
+fn killing_placeholder(key: &(String, String), entry: &KillingEntry) -> SessionRef {
+    SessionRef {
+        account_name: entry.account_name.clone(),
+        session_id: key.1.clone(),
+        pid: entry.pid,
+        project: entry.project.clone(),
+        cwd: PathBuf::new(),
+        transcript_path: PathBuf::new(),
+        last_activity: chrono::Utc::now(),
+        state_since: chrono::Utc::now(),
+        model: String::new(),
+        active_model: String::new(),
+        tokens: 0,
+        cost_usd: 0.0,
+        totals: UsageTotals::default(),
+        current_context: None,
+        context_cap: None,
+        state: SessionState::Idle,
+        activity: crate::live_session::Activity::Waiting,
+        permission_mode: None,
+        effort: None,
+        killing: true,
+    }
+}
+
 fn flatten_sessions(
     accounts: &[PerAccount],
     optimistic: &HashMap<(String, String), DriverOptimistic>,
@@ -4294,6 +4455,7 @@ fn flatten_sessions(
                     activity: ls.activity.clone(),
                     permission_mode,
                     effort,
+                    killing: false,
                 }
             })
         })

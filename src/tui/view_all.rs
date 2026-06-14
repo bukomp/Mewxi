@@ -507,6 +507,39 @@ fn render_sessions_table(
                 });
             }
             let arrow = if is_selected { "▶ " } else { "  " };
+            // A session mewxi just asked to close: every column dashes
+            // out and the status reads a red `killing` so it's instantly
+            // clear the agent is going away. Built before the normal row
+            // so the dead session's stale token/model/state values never
+            // flash.
+            if s.killing {
+                let dash = || Cell::from(Span::styled("—", Style::default().fg(Color::DarkGray)));
+                let mut cells: Vec<Cell> = vec![
+                    Cell::from(format!("  {arrow}—")),
+                    dash(),
+                ];
+                if show_status {
+                    cells.push(Cell::from(Span::styled(
+                        "killing",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )));
+                }
+                if show_ctx { cells.push(dash()); }
+                cells.push(dash()); // tokens
+                if show_io { cells.push(dash()); }
+                if show_cache { cells.push(dash()); }
+                cells.push(dash()); // cost
+                cells.push(dash()); // model
+                cells.push(dash()); // state
+                let style = if is_selected {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                session_rows.push(rows.len());
+                rows.push(Row::new(cells).style(style));
+                continue;
+            }
             let state_label = match s.state {
                 SessionState::Active => "active",
                 SessionState::Idle => "idle",
