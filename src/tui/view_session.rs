@@ -736,12 +736,16 @@ fn models_match(primary: &str, active: &str) -> bool {
 /// space; short slugs (`opus`, `default`) pass through untouched.
 fn trim_model(m: &str) -> std::borrow::Cow<'_, str> {
     let trimmed = m.strip_prefix("claude-").unwrap_or(m);
-    // Capitalize the extended-context tier suffix (`[1m]` -> `[1M]`) so it
-    // reads consistently with the statusline's `1M` label.
-    if trimmed.contains("[1m]") {
-        std::borrow::Cow::Owned(trimmed.replace("[1m]", "[1M]"))
+    if !trimmed.contains("[1m]") {
+        return std::borrow::Cow::Borrowed(trimmed);
+    }
+    // Families that are natively 1M (Fable, Opus 4.8+) drop the tier suffix
+    // entirely — it's redundant. Others capitalize it (`[1m]` -> `[1M]`) so
+    // it reads consistently with the statusline's `1M` label.
+    if crate::stats::native_1m_context(trimmed) {
+        std::borrow::Cow::Owned(trimmed.replace("[1m]", ""))
     } else {
-        std::borrow::Cow::Borrowed(trimmed)
+        std::borrow::Cow::Owned(trimmed.replace("[1m]", "[1M]"))
     }
 }
 
@@ -2483,7 +2487,10 @@ mod tests {
         assert_eq!(trim_model("claude-haiku-4-5-20251001"), "haiku-4-5-20251001");
         assert_eq!(trim_model("opus"), "opus");
         assert_eq!(trim_model("default"), "default");
-        assert_eq!(trim_model("claude-opus-4-8[1m]"), "opus-4-8[1M]");
+        // Opus 4.8 is natively 1M, so the tier suffix is dropped entirely;
+        // a 200K family on the opt-in tier keeps the capitalized badge.
+        assert_eq!(trim_model("claude-opus-4-8[1m]"), "opus-4-8");
+        assert_eq!(trim_model("claude-sonnet-4-6[1m]"), "sonnet-4-6[1M]");
     }
 
     #[test]

@@ -573,6 +573,33 @@ pub fn extended_context_from_settings(account: &Account) -> bool {
     false
 }
 
+/// True for model families whose native context window is already 1M,
+/// which makes an explicit `[1M]` tier badge redundant (Fable, Opus 4.8+).
+/// Accepts either an api id (`claude-opus-4-8`) or a display name
+/// (`Opus 4.8 (1M context)`) — version digits are read regardless of the
+/// separator. Sonnet/Haiku default to 200K, so they keep the badge.
+pub fn native_1m_context(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("fable") {
+        return true;
+    }
+    if lower.contains("opus") {
+        let (major, minor) = leading_version(&lower);
+        return major > 4 || (major == 4 && minor >= 8);
+    }
+    false
+}
+
+/// First two digit runs of a string as `(major, minor)` — tolerant of any
+/// separator so it reads `claude-opus-4-8`, `Opus 4.8 (…)`, and
+/// `opus-4-8[1m]` alike. Missing components default to 0.
+fn leading_version(lower: &str) -> (u32, u32) {
+    let mut nums = lower
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|s| s.parse::<u32>().ok());
+    (nums.next().unwrap_or(0), nums.next().unwrap_or(0))
+}
+
 /// Decide a model's context cap. The heuristics, in order of confidence:
 ///  1. stdin alias from Claude Code containing `[1m]` → 1M
 ///  2. A prior statusline call for this session saw `[1m]` (marker file) → 1M
@@ -694,4 +721,25 @@ pub fn fmt_num(n: u64) -> String {
         out.push(c);
     }
     out.chars().rev().collect()
+}
+
+#[cfg(test)]
+mod native_1m_tests {
+    use super::native_1m_context;
+
+    #[test]
+    fn fable_and_opus_48_are_native_1m() {
+        assert!(native_1m_context("claude-fable-5"));
+        assert!(native_1m_context("Fable 5 (1M context)"));
+        assert!(native_1m_context("claude-opus-4-8[1m]"));
+        assert!(native_1m_context("Opus 4.8 (1M context)"));
+        assert!(native_1m_context("claude-opus-5-0"));
+    }
+
+    #[test]
+    fn older_opus_and_other_families_are_not() {
+        assert!(!native_1m_context("claude-opus-4-7[1m]"));
+        assert!(!native_1m_context("claude-sonnet-4-6"));
+        assert!(!native_1m_context("claude-haiku-4-5-20251001"));
+    }
 }

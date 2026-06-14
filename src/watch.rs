@@ -58,12 +58,17 @@ fn fmt_tokens_compact(n: u64) -> String {
 /// Compact a model's `display_name` for the statusline. Claude Code now
 /// sends verbose labels like `Opus 4.8 (1M context)`; we shorten the
 /// extended-context parenthetical to a bracketed `[1M]` so the segment
-/// stays narrow (`Opus 4.8 [1M]`).
+/// stays narrow (`Opus 4.8 [1M]`). Families that are natively 1M (Fable,
+/// Opus 4.8+) drop the parenthetical entirely — the badge would be noise.
 fn compact_model_name(name: &str) -> String {
-    if let Some(idx) = name.find(" (1M context)") {
-        format!("{} [1M]{}", &name[..idx], &name[idx + " (1M context)".len()..])
+    let Some(idx) = name.find(" (1M context)") else {
+        return name.to_string();
+    };
+    let rest = &name[idx + " (1M context)".len()..];
+    if crate::stats::native_1m_context(name) {
+        format!("{}{rest}", &name[..idx])
     } else {
-        name.to_string()
+        format!("{} [1M]{rest}", &name[..idx])
     }
 }
 

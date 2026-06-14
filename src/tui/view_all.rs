@@ -723,7 +723,9 @@ fn short_model(m: &str, extended_ctx: bool) -> String {
         Some(ver) => format!("{base}-{ver}"),
         None => base.to_string(),
     };
-    if extended_ctx {
+    // Skip the badge for families that are natively 1M (Fable, Opus 4.8+) —
+    // it only carries meaning for the 200K models on the opt-in 1M tier.
+    if extended_ctx && !crate::stats::native_1m_context(&lower) {
         label.push_str("[1M]");
     }
     label
@@ -768,7 +770,10 @@ mod tests {
 
     #[test]
     fn short_model_includes_version() {
-        assert_eq!(short_model("claude-opus-4-8[1m]", true), "opus-4.8[1M]");
+        // Opus 4.8 is natively 1M, so the badge is suppressed even on the
+        // extended tier; Sonnet keeps it.
+        assert_eq!(short_model("claude-opus-4-8[1m]", true), "opus-4.8");
+        assert_eq!(short_model("claude-sonnet-4-6", true), "sonnet-4.6[1M]");
         assert_eq!(short_model("claude-sonnet-4-6", false), "sonnet-4.6");
         assert_eq!(short_model("claude-haiku-4-5-20251001", false), "haiku-4.5");
     }
