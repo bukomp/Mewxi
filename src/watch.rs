@@ -221,6 +221,8 @@ pub(crate) fn render_status_for_account(
 
     // Small "mewxi has an update" notice, fed from the cached update
     // check — surfaces inside every Claude Code session's statusline.
+    // Rendered as a leading segment (right after any setup-incomplete
+    // hint) so the update nudge survives narrow-terminal truncation.
     let update_segment = crate::update::statusline_segment().unwrap_or_default();
 
     // Nudge to open the TUI when setup looks incomplete (an account
@@ -235,9 +237,9 @@ pub(crate) fn render_status_for_account(
     };
 
     if billing_extra {
-        format!("{hint_segment}{prefix}{model_segment}{extra_segment}{reset_segment}{ctx_segment}{update_segment}")
+        format!("{hint_segment}{update_segment}{prefix}{model_segment}{extra_segment}{reset_segment}{ctx_segment}")
     } else {
-        format!("{hint_segment}{prefix}{model_segment}{five_h_segment}{reset_segment}{ctx_segment}{update_segment}")
+        format!("{hint_segment}{update_segment}{prefix}{model_segment}{five_h_segment}{reset_segment}{ctx_segment}")
     }
 }
 

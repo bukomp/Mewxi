@@ -686,8 +686,11 @@ pub fn statusline_segment() -> Option<String> {
     } else {
         format!("update {}", c.latest)
     };
+    // Leading-style segment (trailing separator) so it can sit at the
+    // front of the statusline and stay visible when narrow terminals
+    // truncate the tail. Mirrors the setup-incomplete hint's shape.
     Some(format!(
-        " \x1b[90m|\x1b[0m \x1b[35m⬆ mewxi {what}\x1b[0m"
+        "\x1b[35m⬆ mewxi {what}\x1b[0m \x1b[90m|\x1b[0m "
     ))
 }
 
