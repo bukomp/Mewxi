@@ -712,11 +712,13 @@ mod tests {
         terminal
             .draw(|f| {
                 let mut rect = None;
+                let mut scroll = 0usize;
                 render(
                     f,
                     f.area(),
                     Some(&snap),
                     selected,
+                    &mut scroll,
                     Some("did a thing"),
                     true,
                     DefaultView::All,
