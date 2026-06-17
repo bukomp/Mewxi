@@ -458,6 +458,11 @@ fn render_sessions_table(
     // Visual row index of every session row (blank/header rows excluded)
     // so the off-screen counter counts agents, not table rows.
     let mut session_rows: Vec<usize> = Vec::with_capacity(ordered.len());
+    // Project-header rows carry no column data, so they're repainted as
+    // one full-width line after the table renders (see overlay below).
+    // ratatui would otherwise clip the "▾ project  x/y active" text to the
+    // account column. Collect (row index, line) for each header here.
+    let mut project_headers: Vec<(usize, Line)> = Vec::new();
     let mut group_start = 0usize;
     while group_start < ordered.len() {
         let project = &ordered[group_start].project;
@@ -481,15 +486,17 @@ fn render_sessions_table(
         for _ in 0..col_count { blank.push(Cell::from("")); }
         rows.push(Row::new(blank));
 
-        let mut header_cells: Vec<Cell> = Vec::with_capacity(col_count);
-        header_cells.push(Cell::from(Line::from(vec![
+        let header_line = Line::from(vec![
             Span::styled(
                 format!("▾ {label}"),
                 Style::default().fg(project_color).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" ".repeat(label_pad + 2)),
             Span::styled(count_text, Style::default().fg(Color::DarkGray)),
-        ])));
+        ]);
+        project_headers.push((rows.len(), header_line.clone()));
+        let mut header_cells: Vec<Cell> = Vec::with_capacity(col_count);
+        header_cells.push(Cell::from(header_line));
         for _ in 1..col_count {
             header_cells.push(Cell::from(""));
         }
@@ -706,6 +713,25 @@ fn render_sessions_table(
         .block(block);
 
     f.render_stateful_widget(table, area, table_state);
+
+    // Repaint each visible project header as one full-width line. The table
+    // clipped it to the account column (header rows have no column data), so
+    // draw the full "▾ project  x/y active" line over the top, spanning the
+    // inner width. `final_offset`/`viewport` mirror the window the table
+    // actually drew — the same values the off-screen counter relies on — so
+    // the y positions line up. Header text is a prefix of the full line, so
+    // overwriting from the same x fully covers the clipped remnant.
+    let inner_x = area.x + 1;
+    let inner_y = area.y + 1;
+    let inner_w = area.width.saturating_sub(2);
+    let buf = f.buffer_mut();
+    for (hr, line) in &project_headers {
+        if *hr < final_offset || *hr >= final_offset + viewport {
+            continue;
+        }
+        let y = inner_y + 1 + (*hr - final_offset) as u16;
+        buf.set_line(inner_x, y, line, inner_w);
+    }
 }
 
 fn activity_display(a: &Activity) -> (String, Color) {
