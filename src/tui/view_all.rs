@@ -604,6 +604,17 @@ fn render_sessions_table(
             cells.push(Cell::from(Span::styled(state_label, Style::default().fg(state_color))));
             session_rows.push(rows.len());
             rows.push(Row::new(cells).style(base_style));
+
+            // Indented child rows for the sub-agents this session is
+            // running right now. They are display-only: excluded from
+            // `session_rows` so the off-screen counter keeps counting
+            // sessions, and never assigned a selection index so ↑/↓
+            // navigation continues to step session-to-session.
+            for sub in &s.subagents {
+                rows.push(subagent_row(
+                    sub, now, show_status, show_ctx, show_io, show_cache,
+                ));
+            }
         }
 
         group_start = group_end;
@@ -732,6 +743,78 @@ fn render_sessions_table(
         let y = inner_y + 1 + (*hr - final_offset) as u16;
         buf.set_line(inner_x, y, line, inner_w);
     }
+}
+
+/// One indented child row beneath a session for a sub-agent it is
+/// currently running. These rows only exist while the delegation is live
+/// (it's dropped the moment the parent records its result), so the row is
+/// styled to read as *active* — readable text, a coloured live-activity
+/// column, and a green `active` state — rather than reusing the dim style
+/// idle sessions wear. Cost and the in/out/cache columns dash out: a
+/// sub-agent's tokens already roll up into the parent session's totals, so
+/// re-billing them here would double-count.
+fn subagent_row(
+    sub: &crate::subagents::SubAgent,
+    now: chrono::DateTime<chrono::Utc>,
+    show_status: bool,
+    show_ctx: bool,
+    show_io: bool,
+    show_cache: bool,
+) -> Row<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let text = Style::default().fg(Color::Gray);
+    // Indent two further than the session's "  ▶ name" so the tree nests:
+    //   ▾ project
+    //     ▶ account        (session)
+    //       ↳ Explore · …  (sub-agent)
+    let mut label = vec![Span::styled("      ↳ ", Style::default().fg(Color::Cyan))];
+    match &sub.agent_type {
+        Some(t) => {
+            label.push(Span::styled(
+                t.clone(),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ));
+            label.push(Span::styled(format!(" · {}", sub.description), text));
+        }
+        None => label.push(Span::styled(sub.description.clone(), text)),
+    }
+    let age = (now - sub.last_activity).num_seconds().max(0);
+    let mut cells: Vec<Cell> = vec![
+        Cell::from(Line::from(label)),
+        Cell::from(Span::styled(fmt_age(age), dim)),
+    ];
+    if show_status {
+        let (lbl, color) = activity_display(&sub.activity);
+        cells.push(Cell::from(Span::styled(lbl, Style::default().fg(color))));
+    }
+    if show_ctx {
+        cells.push(Cell::from(Span::styled("—", dim)));
+    }
+    cells.push(Cell::from(Span::styled(fmt_tokens_compact(sub.tokens), text)));
+    // in/out and cache mirror a session row so the cache-heavy split is
+    // visible (a sub-agent's tokens are mostly cache reads). The figures
+    // come from the sub-agent's own transcript and don't overlap the
+    // parent session's totals.
+    if show_io {
+        cells.push(Cell::from(Span::styled(
+            format!(
+                "{}/{}",
+                fmt_tokens_compact(sub.totals.input),
+                fmt_tokens_compact(sub.totals.output),
+            ),
+            text,
+        )));
+    }
+    if show_cache {
+        cells.push(Cell::from(Span::styled(
+            fmt_tokens_compact(sub.totals.cache_read),
+            text,
+        )));
+    }
+    cells.push(Cell::from(Span::styled("—", dim))); // cost — rolled into the account aggregate
+    cells.push(Cell::from(Span::styled(short_model(&sub.model, false), text)));
+    cells.push(Cell::from(Span::styled("active", Style::default().fg(Color::Green))));
+    Row::new(cells)
 }
 
 fn activity_display(a: &Activity) -> (String, Color) {

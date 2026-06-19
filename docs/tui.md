@@ -89,3 +89,11 @@ A row appears for every Claude Code instance that has a marker file at
 `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json`. Status (`busy` / `idle` /
 `awaiting permission`) is read from the marker, not guessed from JSONL
 mtimes. See `src/live_session.rs` for the gory details.
+
+When a session delegates work with the Agent/Task tool, each sub-agent it
+is **currently running** shows up as a dimmed, indented `↳` child row
+beneath its session — labelled with the agent type and task, plus the
+sub-agent's own model and live activity (it often runs a different model
+than the main agent). The rows are display-only: `↑ ↓` still steps
+session-to-session, and a sub-agent disappears once its delegation
+returns. Detection lives in `src/subagents.rs`.

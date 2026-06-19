@@ -103,7 +103,7 @@ impl Activity {
 /// Claude Code writes it either as a plain string or as an array of
 /// `{type:"text",text:"..."}` blocks; both forms collapse to a single
 /// string for substring matching.
-fn user_text(content: &serde_json::Value) -> Option<String> {
+pub(crate) fn user_text(content: &serde_json::Value) -> Option<String> {
     if let Some(s) = content.as_str() {
         return Some(s.to_string());
     }
@@ -261,7 +261,7 @@ const TOOL_RESULT_CARRY_WINDOW: chrono::Duration = chrono::Duration::millisecond
 /// Walk the tail of a transcript backwards looking for the most recent
 /// record that implies an activity. Returns None if nothing meaningful
 /// is found in the inspected window.
-fn tail_activity(path: &Path) -> Option<TailKind> {
+pub(crate) fn tail_activity(path: &Path) -> Option<TailKind> {
     let tail = read_tail(path, 256 * 1024)?;
     classify_tail(&tail, Utc::now())
 }
@@ -456,6 +456,11 @@ pub struct LiveSession {
     /// has been seen yet. The raw transcript value — display layer maps
     /// `default` → `manual`.
     pub permission_mode: Option<String>,
+    /// Sub-agents this session is running right now (Agent/Task
+    /// delegations whose transcripts are still being appended to). Empty
+    /// for the common case of a session not delegating. See
+    /// [`crate::subagents::scan_running`].
+    pub subagents: Vec<crate::subagents::SubAgent>,
 }
 
 #[derive(Clone, Debug)]
@@ -782,6 +787,12 @@ pub fn scan(
             (None, None) => Some(account.default_permission_mode()),
         };
 
+        // Sub-agents this session is delegating to right now. Only the
+        // currently-running ones (fresh transcript, not yet returned) —
+        // see [`crate::subagents::scan_running`]. Cheap when the session
+        // isn't delegating: it early-outs on a missing `subagents/` dir.
+        let subagents = crate::subagents::scan_running(&transcript, &marker.session_id);
+
         out.push(LiveSession {
             account_name: account.name.clone(),
             session_id: marker.session_id.clone(),
@@ -800,6 +811,7 @@ pub fn scan(
             activity,
             bridge_session_id: marker.bridge_session_id.clone(),
             permission_mode,
+            subagents,
         });
     }
 

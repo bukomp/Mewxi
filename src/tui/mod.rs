@@ -117,6 +117,10 @@ pub struct SessionRef {
     /// the scan, so the feedback doesn't blink out the instant the
     /// process dies. See [`apply_killing_overlay`].
     pub killing: bool,
+    /// Sub-agents this session is running right now, rendered as indented
+    /// child rows under the session in view 1. Empty unless the session
+    /// is actively delegating. See [`crate::subagents::scan_running`].
+    pub subagents: Vec<crate::subagents::SubAgent>,
 }
 
 /// Optimistic per-driver state for things mewxi just commanded but
@@ -4378,6 +4382,7 @@ fn killing_placeholder(key: &(String, String), entry: &KillingEntry) -> SessionR
         permission_mode: None,
         effort: None,
         killing: true,
+        subagents: Vec::new(),
     }
 }
 
@@ -4456,6 +4461,7 @@ fn flatten_sessions(
                     permission_mode,
                     effort,
                     killing: false,
+                    subagents: ls.subagents.clone(),
                 }
             })
         })

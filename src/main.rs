@@ -30,6 +30,7 @@ mod setup;
 mod skills;
 mod statusline;
 mod stats;
+mod subagents;
 mod tui;
 mod update;
 mod watch;
