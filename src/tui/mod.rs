@@ -25,6 +25,7 @@ mod new_session_modal;
 mod skill_picker_modal;
 mod terminal_overlay;
 mod text_input;
+mod under_construction;
 mod update_prompt_modal;
 mod view_account;
 mod view_all;

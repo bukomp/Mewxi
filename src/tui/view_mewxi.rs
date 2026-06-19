@@ -190,6 +190,11 @@ pub fn render(
         .count();
     render_logo(f, cols[0], active);
     render_side_panel(f, cols[1], accounts, sessions);
+
+    // Cosmetic "under construction" hazard band. Drawn last so it sits
+    // on top of the logo + panels, but it's render-only — the view
+    // underneath keeps updating and stays fully interactive.
+    super::under_construction::render(f, area);
 }
 
 fn render_logo(f: &mut Frame, area: Rect, active_agents: usize) {
