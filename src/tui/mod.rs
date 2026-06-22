@@ -25,6 +25,7 @@ mod new_session_modal;
 mod skill_picker_modal;
 mod terminal_overlay;
 mod text_input;
+mod toast;
 mod under_construction;
 mod update_prompt_modal;
 mod view_account;
@@ -941,17 +942,19 @@ enum LiveCmd {
     Refresh,
 }
 
-/// Tracks an in-flight manual refresh (the `r` key) so the footer can show a
-/// single aggregate notification once every account's poller has reported.
+/// Tracks an in-flight manual refresh (the `r` key) so a single aggregate
+/// toast can report the result once every account's poller has reported.
 struct RefreshTally {
     /// How many poller `RefreshResult`s we still expect.
     pending: usize,
+    /// How many accounts were asked to refresh (for the "X/N" progress text).
+    total: usize,
     /// Accounts whose web fetch succeeded.
     ok: usize,
     /// `(account_name, reason)` for accounts whose fetch failed.
     failures: Vec<(String, String)>,
     /// When the refresh was kicked off, used to give up if a poller never
-    /// answers (dead thread) so the "refreshing…" status can't hang forever.
+    /// answers (dead thread) so the "refreshing…" toast can't hang forever.
     started: Instant,
 }
 
@@ -959,6 +962,10 @@ struct RefreshTally {
 /// reporting whatever results arrived. Comfortably above the 15s HTTP
 /// timeout in `live_usage::fetch_live`.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Tag for the manual-refresh toast so its progress updates and final result
+/// replace one box in place instead of stacking.
+const REFRESH_TOAST_TAG: &str = "refresh";
 
 /// Poll cadence for the in-TUI live updater. Much shorter than the
 /// underlying `REFRESH_INTERVAL` because `fetch_or_cached` is cheap on
@@ -1186,9 +1193,6 @@ fn run_loop<B: ratatui::backend::Backend>(
     // event including hover (motion with no button). The chat view uses
     // it to highlight the code block under the cursor.
     let mut mouse_pos: Option<(u16, u16)> = None;
-    // Short-lived "copied!" toast, shown as a small floating box after a
-    // code block or text selection lands on the clipboard.
-    let mut copy_toast: Option<(String, Instant)> = None;
     // `None` means follow tail (selection tracks the latest change row);
     // `Some(i)` pins to a concrete index. j/k transitions out of follow
     // mode; G / End re-enters it. The render function writes the row
@@ -1243,9 +1247,13 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut default_view_pref =
         view_setup::DefaultView::from_config(view.default_view.as_deref());
     let mut driver_status: Option<(String, Instant)> = None;
+    // View-agnostic toast notifications, drawn over the whole frame after the
+    // active view renders so feedback shows in every view (unlike
+    // `driver_status`, which only surfaces in the Setup view).
+    let mut toasts = toast::Toasts::default();
     // Set when the user presses `r`; cleared once every poller has reported
     // its outcome (or the timeout elapses), at which point a success/failure
-    // notification replaces the "refreshing…" status.
+    // notification replaces the "refreshing…" toast.
     let mut refresh_tally: Option<RefreshTally> = None;
     let mut driver_optimistic: HashMap<(String, String), DriverOptimistic> = HashMap::new();
     // Self-learning Shift-Tab cycle. Seeded empty; the reconcile pass
@@ -1885,14 +1893,6 @@ fn run_loop<B: ratatui::backend::Backend>(
                 driver_pane.as_mut(),
                 pending_pane.as_ref(),
             );
-            // Copy confirmation toast: a small floating box in the chat
-            // pane's top-right, shown briefly after a clipboard write.
-            // Drawn over the base view but under modals/overlays.
-            if let (Some((msg, t)), Some(anchor)) = (&copy_toast, chat_inner) {
-                if t.elapsed() < COPY_TOAST_TTL {
-                    render_copy_toast(f, anchor, msg);
-                }
-            }
             // Terminal overlay (claude's PTY screen) renders before the
             // mewxi modals so an open modal still wins, but after the
             // base view so it visibly sits on top of the chat-log. The
@@ -1921,6 +1921,10 @@ fn run_loop<B: ratatui::backend::Backend>(
             if let Some(modal) = update_prompt_modal.as_ref() {
                 modal.render(f, f.area());
             }
+            // Toasts sit on top of everything (including modals) so transient
+            // feedback is always visible in the top-right, whatever the view.
+            toasts.prune();
+            toasts.render(f, f.area());
         })?;
 
         // Capture the spawn inputs we'd need on `n` into owned values
@@ -1960,6 +1964,18 @@ fn run_loop<B: ratatui::backend::Backend>(
                             } else {
                                 t.failures.push((account_name, detail));
                             }
+                            // Live progress: slow accounts (up to the 15s HTTP
+                            // timeout) no longer leave the toast frozen — the
+                            // user watches "done X/N" climb as each lands.
+                            if t.pending > 0 {
+                                let done = t.total - t.pending;
+                                toasts.push_tagged(
+                                    REFRESH_TOAST_TAG,
+                                    toast::ToastKind::Info,
+                                    format!("refreshing limits… {done}/{} done", t.total),
+                                    REFRESH_TIMEOUT + Duration::from_secs(3),
+                                );
+                            }
                         }
                     }
                 }
@@ -1967,23 +1983,32 @@ fn run_loop<B: ratatui::backend::Backend>(
         }
 
         // Finalize a manual `r` refresh once every poller has reported (or it
-        // timed out waiting on a stuck one), turning "refreshing…" into a
-        // concrete success/failure notification in the footer.
+        // timed out waiting on a stuck one), turning the progress toast into a
+        // concrete success/failure result.
         if let Some(t) = refresh_tally.as_ref() {
             if t.pending == 0 || t.started.elapsed() >= REFRESH_TIMEOUT {
                 let t = refresh_tally.take().expect("checked Some above");
                 let failed = t.failures.len();
-                let msg = if failed == 0 {
-                    format!("✓ refreshed limits for {} account(s)", t.ok)
+                let (kind, msg) = if failed == 0 {
+                    (
+                        toast::ToastKind::Success,
+                        format!("refreshed limits for {} account(s)", t.ok),
+                    )
                 } else if t.ok == 0 {
                     // Reasons are usually identical across accounts; show the
-                    // first so the footer stays one line.
+                    // first so the toast stays one line.
                     let reason = &t.failures[0].1;
-                    format!("✗ refresh failed for {failed} account(s): {reason}")
+                    (
+                        toast::ToastKind::Error,
+                        format!("refresh failed for {failed} account(s): {reason}"),
+                    )
                 } else {
-                    format!("refreshed {} account(s), {failed} failed", t.ok)
+                    (
+                        toast::ToastKind::Error,
+                        format!("refreshed {} account(s), {failed} failed", t.ok),
+                    )
                 };
-                driver_status = Some((msg, Instant::now()));
+                toasts.push_tagged(REFRESH_TOAST_TAG, kind, msg, Duration::from_millis(6000));
             }
         }
 
@@ -2181,19 +2206,13 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         .and_then(|mut c| c.set_text(src))
                                     {
                                         Ok(()) => {
-                                            let msg = format!(
+                                            toasts.success(format!(
                                                 "copied code block ({lines} line{})",
                                                 if lines == 1 { "" } else { "s" }
-                                            );
-                                            copy_toast =
-                                                Some((msg.clone(), Instant::now()));
-                                            driver_status = Some((msg, Instant::now()));
+                                            ));
                                         }
                                         Err(e) => {
-                                            driver_status = Some((
-                                                format!("clipboard error: {e}"),
-                                                Instant::now(),
-                                            ));
+                                            toasts.error(format!("clipboard error: {e}"));
                                         }
                                     }
                                 } else if in_chat {
@@ -2231,21 +2250,14 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 .and_then(|mut c| c.set_text(text.clone()))
                                             {
                                                 Ok(()) => {
-                                                    let msg = format!(
+                                                    toasts.success(format!(
                                                         "copied {} chars",
                                                         text.chars().count()
-                                                    );
-                                                    copy_toast = Some((
-                                                        msg.clone(),
-                                                        Instant::now(),
                                                     ));
-                                                    driver_status =
-                                                        Some((msg, Instant::now()));
                                                 }
                                                 Err(e) => {
-                                                    driver_status = Some((
-                                                        format!("clipboard error: {e}"),
-                                                        Instant::now(),
+                                                    toasts.error(format!(
+                                                        "clipboard error: {e}"
                                                     ));
                                                 }
                                             }
@@ -2275,16 +2287,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     .and_then(|mut c| c.set_text(src))
                                 {
                                     Ok(()) => {
-                                        let msg =
-                                            format!("copied command part ({chars} chars)");
-                                        copy_toast = Some((msg.clone(), Instant::now()));
-                                        driver_status = Some((msg, Instant::now()));
+                                        toasts.success(format!(
+                                            "copied command part ({chars} chars)"
+                                        ));
                                     }
                                     Err(e) => {
-                                        driver_status = Some((
-                                            format!("clipboard error: {e}"),
-                                            Instant::now(),
-                                        ));
+                                        toasts.error(format!("clipboard error: {e}"));
                                     }
                                 }
                             }
@@ -3338,21 +3346,33 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                             if refreshed == 0 {
                                 refresh_tally = None;
-                                driver_status =
-                                    Some(("no accounts to refresh".into(), Instant::now()));
+                                toasts.push(
+                                    toast::ToastKind::Info,
+                                    "no accounts to refresh",
+                                    toast::DEFAULT_TTL,
+                                );
                             } else {
-                                // Arm the tally; the drain loop finalizes the
-                                // notification once all pollers have answered.
+                                // Arm the tally; the drain loop updates the
+                                // progress toast and finalizes it once every
+                                // poller has answered.
                                 refresh_tally = Some(RefreshTally {
                                     pending: refreshed,
+                                    total: refreshed,
                                     ok: 0,
                                     failures: Vec::new(),
                                     started: Instant::now(),
                                 });
-                                driver_status = Some((
+                                // Tagged so the per-account progress updates
+                                // and the final result replace it in place
+                                // rather than stacking new boxes. TTL outlives
+                                // the worst-case wait so it never vanishes
+                                // before the result lands.
+                                toasts.push_tagged(
+                                    REFRESH_TOAST_TAG,
+                                    toast::ToastKind::Info,
                                     format!("refreshing limits for {refreshed} account(s)…"),
-                                    Instant::now(),
-                                ));
+                                    REFRESH_TIMEOUT + Duration::from_secs(3),
+                                );
                             }
                         }
                         KeyCode::Char('s') if mode == ViewMode::Setup => {
@@ -4220,48 +4240,6 @@ fn render_top_header(f: &mut Frame, area: ratatui::layout::Rect) {
         Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
     )]);
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
-}
-
-/// How long the copy-confirmation toast stays on screen after a
-/// clipboard write before fading out.
-const COPY_TOAST_TTL: Duration = Duration::from_millis(1800);
-
-/// Draw a small "✓ <msg>" toast in the top-right corner of `area`
-/// (typically the chat pane's inner rect). Sized to the message, capped
-/// to the area width, with a green border so a successful copy reads at
-/// a glance. Clears its own cells first so it sits cleanly over chat.
-fn render_copy_toast(f: &mut Frame, area: ratatui::layout::Rect, msg: &str) {
-    use ratatui::layout::Rect;
-    use ratatui::style::{Color, Modifier, Style};
-    use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-
-    let label = format!("✓ {msg}");
-    let label_w = label.chars().count() as u16;
-    // Box width: content + 2 border cols + 2 inner padding, clamped to
-    // the available width.
-    let box_w = (label_w + 4).min(area.width.max(1));
-    let box_h: u16 = 3;
-    if area.height < box_h || area.width < 6 {
-        return;
-    }
-    // Top-right, one cell in from the right edge so it doesn't kiss the
-    // chat border.
-    let x = area
-        .x
-        .saturating_add(area.width.saturating_sub(box_w).saturating_sub(1));
-    let y = area.y;
-    let rect = Rect { x, y, width: box_w, height: box_h };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
-    let para = Paragraph::new(Line::from(Span::styled(
-        format!(" {label} "),
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-    )))
-    .block(block);
-    f.render_widget(Clear, rect);
-    f.render_widget(para, rect);
 }
 
 fn render_error_footer(f: &mut Frame, area: ratatui::layout::Rect, msg: &str) {
