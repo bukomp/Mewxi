@@ -925,10 +925,40 @@ enum LiveMsg {
         account_name: String,
         live: Option<LiveUsage>,
     },
+    /// Result of a user-initiated `LiveCmd::Refresh`. `ok` is true only when
+    /// fresh data was actually pulled from the web; `detail` carries the
+    /// failure reason otherwise. Sent alongside the matching `Update`.
+    RefreshResult {
+        account_name: String,
+        ok: bool,
+        detail: String,
+    },
 }
 enum LiveCmd {
     Stop,
+    /// Force an immediate HTTP fetch, bypassing `REFRESH_INTERVAL`.
+    /// Triggered by the user pressing `r` to manually refresh limits.
+    Refresh,
 }
+
+/// Tracks an in-flight manual refresh (the `r` key) so the footer can show a
+/// single aggregate notification once every account's poller has reported.
+struct RefreshTally {
+    /// How many poller `RefreshResult`s we still expect.
+    pending: usize,
+    /// Accounts whose web fetch succeeded.
+    ok: usize,
+    /// `(account_name, reason)` for accounts whose fetch failed.
+    failures: Vec<(String, String)>,
+    /// When the refresh was kicked off, used to give up if a poller never
+    /// answers (dead thread) so the "refreshing…" status can't hang forever.
+    started: Instant,
+}
+
+/// How long to wait for all pollers to answer a manual refresh before
+/// reporting whatever results arrived. Comfortably above the 15s HTTP
+/// timeout in `live_usage::fetch_live`.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Poll cadence for the in-TUI live updater. Much shorter than the
 /// underlying `REFRESH_INTERVAL` because `fetch_or_cached` is cheap on
@@ -976,6 +1006,40 @@ fn spawn_live_poller(
         loop {
             match in_rx.recv_timeout(POLLER_TICK) {
                 Ok(LiveCmd::Stop) => break,
+                // A manual refresh bypasses `REFRESH_INTERVAL` so the user
+                // gets fresh numbers from the web on demand; the periodic
+                // tick below stays on the cheap cached path. We report the
+                // outcome back so the TUI can notify success/failure.
+                Ok(LiveCmd::Refresh) => {
+                    let outcome = live_usage::fetch_force_outcome(&account, no_live);
+                    let (ok, detail) = match &outcome {
+                        live_usage::FetchOutcome::Fetched(_) => (true, String::new()),
+                        live_usage::FetchOutcome::RateLimited(_) => {
+                            (false, "rate limited (429)".to_string())
+                        }
+                        live_usage::FetchOutcome::Failed { reason, .. } => (false, reason.clone()),
+                        live_usage::FetchOutcome::Cached(_) => {
+                            (false, "live disabled".to_string())
+                        }
+                    };
+                    let live = outcome.into_usage();
+                    let update_ok = out_tx
+                        .send(LiveMsg::Update {
+                            account_name: account.name.clone(),
+                            live,
+                        })
+                        .is_ok();
+                    let result_ok = out_tx
+                        .send(LiveMsg::RefreshResult {
+                            account_name: account.name.clone(),
+                            ok,
+                            detail,
+                        })
+                        .is_ok();
+                    if !(update_ok && result_ok) {
+                        break;
+                    }
+                }
                 Err(_) => {
                     let live = live_usage::fetch_or_cached(&account, no_live);
                     if out_tx
@@ -1179,6 +1243,10 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut default_view_pref =
         view_setup::DefaultView::from_config(view.default_view.as_deref());
     let mut driver_status: Option<(String, Instant)> = None;
+    // Set when the user presses `r`; cleared once every poller has reported
+    // its outcome (or the timeout elapses), at which point a success/failure
+    // notification replaces the "refreshing…" status.
+    let mut refresh_tally: Option<RefreshTally> = None;
     let mut driver_optimistic: HashMap<(String, String), DriverOptimistic> = HashMap::new();
     // Self-learning Shift-Tab cycle. Seeded empty; the reconcile pass
     // populates it the first time each `(prev_mode, auto_available)`
@@ -1871,10 +1939,51 @@ fn run_loop<B: ratatui::backend::Backend>(
 
         // Drain live updates from every poller.
         for (rx, _) in &live_pollers {
-            while let Ok(LiveMsg::Update { account_name, live }) = rx.try_recv() {
-                if let Some(pa) = per_account.iter_mut().find(|p| p.account.name == account_name) {
-                    pa.live = live;
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    LiveMsg::Update { account_name, live } => {
+                        if let Some(pa) =
+                            per_account.iter_mut().find(|p| p.account.name == account_name)
+                        {
+                            pa.live = live;
+                        }
+                    }
+                    LiveMsg::RefreshResult {
+                        account_name,
+                        ok,
+                        detail,
+                    } => {
+                        if let Some(t) = refresh_tally.as_mut() {
+                            t.pending = t.pending.saturating_sub(1);
+                            if ok {
+                                t.ok += 1;
+                            } else {
+                                t.failures.push((account_name, detail));
+                            }
+                        }
+                    }
                 }
+            }
+        }
+
+        // Finalize a manual `r` refresh once every poller has reported (or it
+        // timed out waiting on a stuck one), turning "refreshing…" into a
+        // concrete success/failure notification in the footer.
+        if let Some(t) = refresh_tally.as_ref() {
+            if t.pending == 0 || t.started.elapsed() >= REFRESH_TIMEOUT {
+                let t = refresh_tally.take().expect("checked Some above");
+                let failed = t.failures.len();
+                let msg = if failed == 0 {
+                    format!("✓ refreshed limits for {} account(s)", t.ok)
+                } else if t.ok == 0 {
+                    // Reasons are usually identical across accounts; show the
+                    // first so the footer stays one line.
+                    let reason = &t.failures[0].1;
+                    format!("✗ refresh failed for {failed} account(s): {reason}")
+                } else {
+                    format!("refreshed {} account(s), {failed} failed", t.ok)
+                };
+                driver_status = Some((msg, Instant::now()));
             }
         }
 
@@ -3213,6 +3322,38 @@ fn run_loop<B: ratatui::backend::Backend>(
                         KeyCode::Char('R') if mode == ViewMode::Setup => {
                             setup_snapshot = setup::inspect(no_live).ok();
                             setup_message = Some("rescanned setup state".to_string());
+                        }
+                        // `r` force-fetches usage limits from the web for
+                        // every linked account, bypassing the per-account
+                        // REFRESH_INTERVAL. The HTTP work happens on the
+                        // poller threads (via LiveCmd::Refresh) so the UI
+                        // stays responsive; results flow back through the
+                        // same LiveMsg::Update channel the periodic tick uses.
+                        KeyCode::Char('r') => {
+                            let mut refreshed = 0usize;
+                            for (_, cmd_tx) in &live_pollers {
+                                if cmd_tx.send(LiveCmd::Refresh).is_ok() {
+                                    refreshed += 1;
+                                }
+                            }
+                            if refreshed == 0 {
+                                refresh_tally = None;
+                                driver_status =
+                                    Some(("no accounts to refresh".into(), Instant::now()));
+                            } else {
+                                // Arm the tally; the drain loop finalizes the
+                                // notification once all pollers have answered.
+                                refresh_tally = Some(RefreshTally {
+                                    pending: refreshed,
+                                    ok: 0,
+                                    failures: Vec::new(),
+                                    started: Instant::now(),
+                                });
+                                driver_status = Some((
+                                    format!("refreshing limits for {refreshed} account(s)…"),
+                                    Instant::now(),
+                                ));
+                            }
                         }
                         KeyCode::Char('s') if mode == ViewMode::Setup => {
                             if let Some(view_setup::ConfigItem::Account(i)) =

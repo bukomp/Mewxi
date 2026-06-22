@@ -57,7 +57,7 @@ fn render_wide(f: &mut Frame, area: Rect, pa: &PerAccount, m: &Metrics) {
     widgets::render_efficiency_panel(f, stats_row[2], &pa.agg, m);
 
     widgets::render_by_project(f, rows[3], &pa.agg);
-    widgets::render_footer(f, rows[4], "3", "↑/↓ next account · Esc back · live via api.anthropic.com/api/oauth/usage", true);
+    widgets::render_footer(f, rows[4], "3", "↑/↓ next account · r refresh limits · Esc back · live via api.anthropic.com/api/oauth/usage", true);
 }
 
 fn render_narrow(f: &mut Frame, area: Rect, pa: &PerAccount, m: &Metrics) {

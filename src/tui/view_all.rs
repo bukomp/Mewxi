@@ -61,7 +61,7 @@ pub fn render(
         f,
         rows[2],
         "1",
-        "↑/↓ select · Enter open · n new · Del kill",
+        "↑/↓ select · Enter open · n new · Del kill · r refresh limits",
         true,
     );
 }

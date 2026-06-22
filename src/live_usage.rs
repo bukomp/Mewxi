@@ -189,12 +189,44 @@ pub fn save_cached(account: &Account, u: &LiveUsage) {
     }
 }
 
+/// What a fetch attempt actually did. Carries the usage value to display
+/// (fresh or a cached fallback) plus enough detail for the TUI to tell the
+/// user whether a manual refresh genuinely reached the web.
+pub enum FetchOutcome {
+    /// Fresh data pulled from the endpoint.
+    Fetched(LiveUsage),
+    /// A cached value was returned without hitting the network — either it
+    /// was still fresh (`fetch_or_cached`) or `no_live` is set.
+    Cached(Option<LiveUsage>),
+    /// The endpoint asked us to back off (429), or a prior 429 backoff is
+    /// still in effect. The carried value is the cached fallback, if any.
+    RateLimited(Option<LiveUsage>),
+    /// The fetch failed (no token, transport error, bad status). Carries the
+    /// human-readable reason and the cached fallback, if any.
+    Failed {
+        reason: String,
+        cached: Option<LiveUsage>,
+    },
+}
+
+impl FetchOutcome {
+    /// The usage value to display, regardless of how it was obtained.
+    pub fn into_usage(self) -> Option<LiveUsage> {
+        match self {
+            FetchOutcome::Fetched(u) => Some(u),
+            FetchOutcome::Cached(c)
+            | FetchOutcome::RateLimited(c)
+            | FetchOutcome::Failed { cached: c, .. } => c,
+        }
+    }
+}
+
 /// High-level helper: return cached value if fresh enough; otherwise fetch.
 /// If a fetch fails, return the stale cached value (if any) rather than nothing.
 ///
 /// `no_live=true` short-circuits to cache only and never hits the network.
 pub fn fetch_or_cached(account: &Account, no_live: bool) -> Option<LiveUsage> {
-    fetch_or_cached_inner(account, no_live, false)
+    fetch_or_cached_inner(account, no_live, false).into_usage()
 }
 
 /// Like [`fetch_or_cached`] but bypass the `REFRESH_INTERVAL` freshness
@@ -202,14 +234,21 @@ pub fn fetch_or_cached(account: &Account, no_live: bool) -> Option<LiveUsage> {
 /// initial poller bootstrap so a cold open never trusts a poisoned
 /// cache from a stale background daemon. 429 backoff is still honored.
 pub fn fetch_force(account: &Account, no_live: bool) -> Option<LiveUsage> {
+    fetch_or_cached_inner(account, no_live, true).into_usage()
+}
+
+/// Like [`fetch_force`] but reports the [`FetchOutcome`] instead of
+/// collapsing it to an `Option`. Used by the TUI's manual `r` refresh so it
+/// can tell the user whether the web fetch actually succeeded.
+pub fn fetch_force_outcome(account: &Account, no_live: bool) -> FetchOutcome {
     fetch_or_cached_inner(account, no_live, true)
 }
 
-fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Option<LiveUsage> {
+fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> FetchOutcome {
     let cached = load_cached(account);
 
     if no_live {
-        return cached;
+        return FetchOutcome::Cached(cached);
     }
 
     let now = Utc::now();
@@ -219,13 +258,13 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Optio
         if is_recent_429(&account.name) {
             if let Ok(delta) = chrono::Duration::from_std(BACKOFF_AFTER_429) {
                 if now - c.fetched_at < delta {
-                    return Some(c.clone());
+                    return FetchOutcome::RateLimited(cached);
                 }
             }
         } else if !force {
             if let Ok(delta) = chrono::Duration::from_std(REFRESH_INTERVAL) {
                 if now - c.fetched_at < delta {
-                    return Some(c.clone());
+                    return FetchOutcome::Cached(cached);
                 }
             }
         }
@@ -238,7 +277,10 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Optio
                 &account.name,
                 format!("mewxi: oauth token unavailable for '{}': {e}", account.name),
             );
-            return cached;
+            return FetchOutcome::Failed {
+                reason: format!("token unavailable: {e}"),
+                cached,
+            };
         }
     };
 
@@ -247,18 +289,21 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Optio
             save_cached(account, &fresh);
             clear_429_flag(&account.name);
             clear_error_entry(&account.name);
-            Some(fresh)
+            FetchOutcome::Fetched(fresh)
         }
         Err(FetchError::RateLimited) => {
             mark_429(&account.name);
-            cached
+            FetchOutcome::RateLimited(cached)
         }
         Err(e) => {
             log_once(
                 &account.name,
                 format!("mewxi: live fetch failed for '{}': {e}", account.name),
             );
-            cached
+            FetchOutcome::Failed {
+                reason: e.to_string(),
+                cached,
+            }
         }
     }
 }
