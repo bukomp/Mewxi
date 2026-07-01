@@ -284,9 +284,9 @@ fn render_side_panel(
     accounts: &[&PerAccount],
     sessions: &[&SessionRef],
 ) {
-    // Each account block: 1 header + 3 gauge rows = 4 lines. Cap so we
+    // Each account block: 1 header + 4 gauge rows = 5 lines. Cap so we
     // always leave room for the agents panel below.
-    let acct_block_lines: u16 = 4;
+    let acct_block_lines: u16 = 5;
     let want_acct = (acct_block_lines * accounts.len().max(1) as u16) + 2;
     let max_acct = area.height.saturating_sub(6);
     let acct_h = want_acct.min(max_acct).max(5);
@@ -323,7 +323,7 @@ fn render_accounts(f: &mut Frame, area: Rect, accounts: &[&PerAccount]) {
 
     let constraints: Vec<Constraint> = accounts
         .iter()
-        .map(|_| Constraint::Length(4))
+        .map(|_| Constraint::Length(5))
         .collect();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -342,6 +342,7 @@ fn render_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -379,10 +380,12 @@ fn render_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
         .and_then(|l| l.extra_usage.as_ref())
         .filter(|e| e.is_enabled)
         .and_then(|e| e.utilization);
+    let fable = live.and_then(|l| l.fable_limit()).map(|w| w.percent);
 
     render_mini_gauge(f, rows[1], "5h", five_h);
     render_mini_gauge(f, rows[2], "wk", weekly);
     render_mini_gauge(f, rows[3], "ex", extra);
+    render_mini_gauge(f, rows[4], "fb", fable);
 }
 
 fn render_mini_gauge(f: &mut Frame, area: Rect, label: &str, pct: Option<f64>) {

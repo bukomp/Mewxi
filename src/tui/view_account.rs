@@ -35,14 +35,16 @@ fn render_wide(f: &mut Frame, area: Rect, pa: &PerAccount, m: &Metrics) {
     let gauge_row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
         ])
         .split(rows[1]);
     widgets::render_5h_gauge(f, gauge_row[0], &pa.agg, pa.live.as_ref());
     widgets::render_7d_gauge(f, gauge_row[1], pa.live.as_ref());
     widgets::render_extra_gauge(f, gauge_row[2], pa.live.as_ref());
+    widgets::render_fable_gauge(f, gauge_row[3], pa.live.as_ref());
 
     let stats_row = Layout::default()
         .direction(Direction::Horizontal)
@@ -67,9 +69,10 @@ fn render_narrow(f: &mut Frame, area: Rect, pa: &PerAccount, m: &Metrics) {
         Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Length(3),
+        Constraint::Length(3),
         Constraint::Length(5),
     ];
-    let mut keys = vec!["header", "5h", "7d", "extra", "burn"];
+    let mut keys = vec!["header", "5h", "7d", "extra", "fable", "burn"];
     if h >= 24 {
         constraints.push(Constraint::Length(4));
         keys.push("sparkline");
@@ -90,6 +93,7 @@ fn render_narrow(f: &mut Frame, area: Rect, pa: &PerAccount, m: &Metrics) {
             "5h" => widgets::render_5h_gauge(f, *rect, &pa.agg, pa.live.as_ref()),
             "7d" => widgets::render_7d_gauge(f, *rect, pa.live.as_ref()),
             "extra" => widgets::render_extra_gauge(f, *rect, pa.live.as_ref()),
+            "fable" => widgets::render_fable_gauge(f, *rect, pa.live.as_ref()),
             "burn" => widgets::render_burn_and_efficiency_narrow(f, *rect, &pa.agg, m),
             "sparkline" => widgets::render_sparkline_panel(f, *rect, m),
             "projects" => widgets::render_by_project(f, *rect, &pa.agg),

@@ -505,6 +505,7 @@ mod golden_tests {
             five_hour: five,
             seven_day: None,
             extra_usage: extra,
+            limits: Vec::new(),
             fetched_at: Utc::now(),
             cache_schema_version: crate::live_usage::CACHE_SCHEMA_VERSION,
         }

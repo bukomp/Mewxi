@@ -38,6 +38,37 @@ pub struct WindowUsage {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+/// One entry from the `limits` array — a generalized replacement for the
+/// old per-model top-level fields (`seven_day_opus`, `seven_day_sonnet`,
+/// etc., all of which the endpoint now sends back as `null`). Each model
+/// or surface with its own cap shows up here instead, e.g. `kind:
+/// "weekly_scoped"` with `scope.model.display_name: "Fable"`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LimitEntry {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub percent: f64,
+    #[serde(default)]
+    pub resets_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub is_active: bool,
+    #[serde(default)]
+    pub scope: Option<LimitScope>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LimitScope {
+    #[serde(default)]
+    pub model: Option<LimitModel>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LimitModel {
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ExtraUsage {
     #[serde(default)]
@@ -69,6 +100,9 @@ pub struct LiveUsage {
     pub seven_day: Option<WindowUsage>,
     #[serde(default)]
     pub extra_usage: Option<ExtraUsage>,
+    /// Per-model/per-surface scoped caps (see [`LimitEntry`]).
+    #[serde(default)]
+    pub limits: Vec<LimitEntry>,
     /// When we fetched this — set by us, not the server.
     pub fetched_at: DateTime<Utc>,
     /// Set when written; absent on caches from pre-`CACHE_SCHEMA_VERSION`
@@ -89,6 +123,23 @@ impl LiveUsage {
     /// within REFRESH_INTERVAL by design.
     pub fn is_stale(&self) -> bool {
         self.age_seconds() > (REFRESH_INTERVAL.as_secs() as i64 + BACKOFF_AFTER_429.as_secs() as i64)
+    }
+
+    /// The scoped weekly limit entry for a given model display name
+    /// (case-insensitive), e.g. `"Fable"`.
+    pub fn model_weekly_limit(&self, model_name: &str) -> Option<&LimitEntry> {
+        self.limits.iter().find(|l| {
+            l.kind == "weekly_scoped"
+                && l.scope
+                    .as_ref()
+                    .and_then(|s| s.model.as_ref())
+                    .and_then(|m| m.display_name.as_deref())
+                    .is_some_and(|n| n.eq_ignore_ascii_case(model_name))
+        })
+    }
+
+    pub fn fable_limit(&self) -> Option<&LimitEntry> {
+        self.model_weekly_limit("Fable")
     }
 }
 
@@ -132,6 +183,7 @@ pub fn fetch_live(token: &str) -> Result<LiveUsage, FetchError> {
                 five_hour: parsed.five_hour,
                 seven_day: parsed.seven_day,
                 extra_usage: parsed.extra_usage,
+                limits: parsed.limits,
                 fetched_at: Utc::now(),
                 cache_schema_version: CACHE_SCHEMA_VERSION,
             })
@@ -154,6 +206,8 @@ struct RawLive {
     seven_day: Option<WindowUsage>,
     #[serde(default)]
     extra_usage: Option<ExtraUsage>,
+    #[serde(default)]
+    limits: Vec<LimitEntry>,
 }
 
 pub fn cache_path(account: &Account) -> Option<PathBuf> {

@@ -229,14 +229,16 @@ pub fn render(
             let gauge_row = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Percentage(34),
-                    Constraint::Percentage(33),
-                    Constraint::Percentage(33),
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(25),
                 ])
                 .split(gauge_area);
             widgets::render_5h_gauge(f, gauge_row[0], &pa.agg, pa.live.as_ref());
             widgets::render_7d_gauge(f, gauge_row[1], pa.live.as_ref());
             widgets::render_extra_gauge(f, gauge_row[2], pa.live.as_ref());
+            widgets::render_fable_gauge(f, gauge_row[3], pa.live.as_ref());
         }
     }
 
@@ -327,14 +329,16 @@ fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &Pendi
         let gauge_row = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-                Constraint::Percentage(33),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
             ])
             .split(chunks[idx]);
         widgets::render_5h_gauge(f, gauge_row[0], &pa.agg, pa.live.as_ref());
         widgets::render_7d_gauge(f, gauge_row[1], pa.live.as_ref());
         widgets::render_extra_gauge(f, gauge_row[2], pa.live.as_ref());
+        widgets::render_fable_gauge(f, gauge_row[3], pa.live.as_ref());
         idx += 1;
     }
 
@@ -734,7 +738,12 @@ fn models_match(primary: &str, active: &str) -> bool {
 /// Model names shown in badges drop the redundant `claude-` vendor
 /// prefix (`claude-sonnet-4-6` → `sonnet-4-6`) to save horizontal
 /// space; short slugs (`opus`, `default`) pass through untouched.
-fn trim_model(m: &str) -> std::borrow::Cow<'_, str> {
+///
+/// Shared across every view that renders a model name so they all agree
+/// on formatting — a per-view reimplementation previously truncated
+/// unrecognized families (e.g. `claude-fable-5` → `claude-f`) instead of
+/// just stripping the vendor prefix.
+pub(crate) fn trim_model(m: &str) -> std::borrow::Cow<'_, str> {
     let trimmed = m.strip_prefix("claude-").unwrap_or(m);
     if !trimmed.contains("[1m]") {
         return std::borrow::Cow::Borrowed(trimmed);

@@ -256,6 +256,33 @@ pub fn render_7d_gauge(f: &mut Frame, area: Rect, live: Option<&LiveUsage>) {
     }
 }
 
+pub fn render_fable_gauge(f: &mut Frame, area: Rect, live: Option<&LiveUsage>) {
+    match live.and_then(|l| l.fable_limit()) {
+        Some(w) => {
+            let reset = w
+                .resets_at
+                .map(|t| format!("  reset {}", t.with_timezone(&Local).format("%a %H:%M")))
+                .unwrap_or_default();
+            let ratio = (w.percent / 100.0).clamp(0.0, 1.0);
+            let gauge = Gauge::default()
+                .block(Block::default().borders(Borders::ALL).title("Fable weekly"))
+                .gauge_style(Style::default().fg(gauge_color(w.percent)).bg(Color::Black))
+                .ratio(ratio)
+                .label(format!("{:.1}%{}", w.percent, reset));
+            f.render_widget(gauge, area);
+        }
+        None => {
+            let p = Paragraph::new(Line::from(Span::styled(
+                "no live data",
+                Style::default().fg(Color::DarkGray),
+            )))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title("Fable weekly"));
+            f.render_widget(p, area);
+        }
+    }
+}
+
 pub fn render_extra_gauge(f: &mut Frame, area: Rect, live: Option<&LiveUsage>) {
     let extra = live.and_then(|l| l.extra_usage.as_ref());
     match extra {
