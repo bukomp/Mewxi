@@ -30,6 +30,24 @@
 //!
 //! The parent transcript is read only when at least one fresh sub-agent
 //! file exists.
+//!
+//! A `Workflow` run — Claude orchestrating many agents from a script via
+//! `agent()`/`parallel()`/`pipeline()` — fans out through a second,
+//! parallel layout instead of the parent transcript's tool-call loop:
+//!
+//! ```text
+//! <project>/<sessionId>/workflows/<runId>.json                          ← run summary (name, phases, live progress)
+//! <project>/<sessionId>/subagents/workflows/<runId>/agent-<agentId>.jsonl       ← per-agent transcript (same shape as above)
+//! <project>/<sessionId>/subagents/workflows/<runId>/agent-<agentId>.meta.json   ← sidecar: {agentType, spawnDepth} — no toolUseId
+//! <project>/<sessionId>/subagents/workflows/<runId>/journal.jsonl               ← one {type: started|result, agentId} line per agent event
+//! ```
+//!
+//! There is no launching tool call to resolve, so liveness is read from
+//! `journal.jsonl` instead of the parent: an agent is finished once it has
+//! any journal record other than `started`. The same [`FRESH_WINDOW`] mtime
+//! gate bounds the IO, and the run summary supplies the concise per-agent
+//! `label` (e.g. `verify:resolve_asset_names drops the combined query`)
+//! that the sidecar — missing a `description` field here — can't.
 
 use crate::live_session::{self, Activity, TailKind};
 use chrono::{DateTime, Utc};
@@ -76,13 +94,34 @@ pub struct SubAgent {
     /// transcript (zero sidechain records land in the parent), so these
     /// never double-count the parent session's totals.
     pub totals: crate::stats::UsageTotals,
+    /// Name of the Workflow run this agent was spawned from, when it comes
+    /// from a Workflow's internal fan-out rather than a plain Agent/Task
+    /// delegation. `None` for the latter.
+    pub workflow: Option<String>,
 }
 
 /// Running sub-agents for the session whose transcript is `transcript_path`
-/// and id is `session_id`, ordered most-recently-active first. Returns an
-/// empty vec — cheaply, without reading the parent — when the session has
-/// no `subagents/` dir or nothing fresh in it.
+/// and id is `session_id`, ordered most-recently-active first — both plain
+/// Agent/Task delegations and agents a Workflow run has spawned
+/// internally. Cheap when the session has neither: each source early-outs
+/// on its own missing directory without reading the parent.
 pub fn scan_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> {
+    let mut out = scan_flat_running(transcript_path, session_id);
+    out.extend(scan_workflow_running(transcript_path, session_id));
+    // Stable order: by launch time, oldest first, so a row never moves
+    // when its agent's activity or token count changes. agent_id breaks
+    // ties (e.g. agents launched in the same millisecond) deterministically.
+    out.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.agent_id.cmp(&b.agent_id))
+    });
+    out
+}
+
+/// The plain Agent/Task half of [`scan_running`] — delegations launched by
+/// a tool call in the parent transcript, resolved via its `tool_result`.
+fn scan_flat_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> {
     let Some(dir) = subagents_dir(transcript_path, session_id) else {
         return Vec::new();
     };
@@ -155,17 +194,204 @@ pub fn scan_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> {
             started_at: detail.started_at,
             tokens: detail.totals.total_tokens(),
             totals: detail.totals,
+            workflow: None,
         });
     }
-    // Stable order: by launch time, oldest first, so a row never moves
-    // when its agent's activity or token count changes. agent_id breaks
-    // ties (e.g. agents launched in the same millisecond) deterministically.
-    out.sort_by(|a, b| {
-        a.started_at
-            .cmp(&b.started_at)
-            .then_with(|| a.agent_id.cmp(&b.agent_id))
-    });
     out
+}
+
+/// Agents currently running inside a Workflow's internal fan-out —
+/// `agent()` calls a workflow script made itself, as opposed to a plain
+/// Agent/Task delegation. See the module docs for the on-disk layout;
+/// this mirrors [`scan_running`]'s two-pass shape (mtime gate, then a
+/// cheap read for the terminal signal) with `journal.jsonl` standing in
+/// for the parent transcript.
+fn scan_workflow_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> {
+    let Some(root) = workflow_subagents_root(transcript_path, session_id) else {
+        return Vec::new();
+    };
+    let Ok(run_dirs) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+
+    let now = SystemTime::now();
+    let mut out = Vec::new();
+    for run_dir in run_dirs.flatten() {
+        let dir = run_dir.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(run_id) = dir.file_name().and_then(|s| s.to_str()).map(String::from) else {
+            continue;
+        };
+
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut fresh: Vec<(PathBuf, String)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(agent_id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("agent-"))
+                .map(String::from)
+            else {
+                continue; // `journal.jsonl` itself
+            };
+            let fresh_enough = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|m| now.duration_since(m).ok())
+                .is_some_and(|age| age <= FRESH_WINDOW);
+            if fresh_enough {
+                fresh.push((path, agent_id));
+            }
+        }
+        if fresh.is_empty() {
+            continue;
+        }
+
+        let finished = finished_workflow_agents(&dir.join("journal.jsonl"));
+        let run_meta = read_workflow_run(transcript_path, session_id, &run_id);
+
+        for (path, agent_id) in fresh {
+            if finished.contains(&agent_id) {
+                continue;
+            }
+            let Some(detail) = read_subagent(&path) else { continue };
+            let meta = read_meta(&path);
+            let progress = run_meta.as_ref().and_then(|r| r.agents.get(&agent_id));
+            let agent_type = progress
+                .and_then(|p| p.agent_type.clone())
+                .or_else(|| meta.as_ref().and_then(|m| m.agent_type.clone()));
+            let description = progress
+                .map(|p| p.label.clone())
+                .or_else(|| meta.as_ref().and_then(|m| m.description.clone()))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| first_line(&detail.prompt));
+            out.push(SubAgent {
+                agent_id,
+                agent_type,
+                description,
+                model: detail.model,
+                activity: detail.activity,
+                last_activity: detail.last_activity,
+                started_at: detail.started_at,
+                tokens: detail.totals.total_tokens(),
+                totals: detail.totals,
+                workflow: Some(
+                    run_meta
+                        .as_ref()
+                        .map(|r| r.name.clone())
+                        .unwrap_or_else(|| run_id.clone()),
+                ),
+            });
+        }
+    }
+    out
+}
+
+/// `<project>/<sessionId>/subagents/workflows` — one subdirectory per
+/// active Workflow run, each laid out like the flat `subagents/` dir.
+fn workflow_subagents_root(transcript_path: &Path, session_id: &str) -> Option<PathBuf> {
+    Some(
+        transcript_path
+            .parent()?
+            .join(session_id)
+            .join("subagents")
+            .join("workflows"),
+    )
+}
+
+/// AgentIds a Workflow run's journal has already resolved — any record
+/// besides `started` (`result`, and `error` should Claude Code ever emit
+/// it) closes out that agent, mirroring `finished_delegations`' terminal
+/// `tool_result` check.
+fn finished_workflow_agents(journal_path: &Path) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let Ok(content) = std::fs::read_to_string(journal_path) else {
+        return out;
+    };
+    for line in content.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let is_started = v.get("type").and_then(|x| x.as_str()) == Some("started");
+        if is_started {
+            continue;
+        }
+        if let Some(id) = v.get("agentId").and_then(|x| x.as_str()) {
+            out.insert(id.to_string());
+        }
+    }
+    out
+}
+
+/// The concise per-agent `label` (and agent type) a Workflow run's summary
+/// carries, keyed by `agentId` — a much better row description than the
+/// sidecar (which has no `description` field for workflow agents) or the
+/// agent's own, often-huge prompt.
+struct WorkflowRun {
+    name: String,
+    agents: std::collections::HashMap<String, WorkflowAgentProgress>,
+}
+
+struct WorkflowAgentProgress {
+    label: String,
+    agent_type: Option<String>,
+}
+
+/// Read `<project>/<sessionId>/workflows/<runId>.json`. Best-effort: a
+/// resumed session can keep appending to an older session's
+/// `subagents/workflows/<runId>/` directory while its own `workflows/`
+/// folder holds a fresh run summary under the same id, so a miss here
+/// just falls back to the sidecar/prompt for the label.
+fn read_workflow_run(
+    transcript_path: &Path,
+    session_id: &str,
+    run_id: &str,
+) -> Option<WorkflowRun> {
+    let path = transcript_path
+        .parent()?
+        .join(session_id)
+        .join("workflows")
+        .join(format!("{run_id}.json"));
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let name = v.get("workflowName").and_then(|x| x.as_str())?.to_string();
+    let mut agents = std::collections::HashMap::new();
+    if let Some(items) = v.get("workflowProgress").and_then(|x| x.as_array()) {
+        for item in items {
+            if item.get("type").and_then(|x| x.as_str()) != Some("workflow_agent") {
+                continue;
+            }
+            let Some(agent_id) = item.get("agentId").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let Some(label) = item.get("label").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            agents.insert(
+                agent_id.to_string(),
+                WorkflowAgentProgress {
+                    label: label.to_string(),
+                    agent_type: item
+                        .get("agentType")
+                        .and_then(|x| x.as_str())
+                        .map(String::from),
+                },
+            );
+        }
+    }
+    Some(WorkflowRun { name, agents })
 }
 
 /// `<project>/<sessionId>/subagents` — the directory Claude Code writes a
@@ -474,5 +700,85 @@ mod tests {
         assert_eq!(a.tokens, 15);
         assert_eq!(a.totals.input, 10);
         assert_eq!(a.totals.output, 5);
+    }
+
+    #[test]
+    fn finished_workflow_agents_reads_journal_terminal_records() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"type":"started","agentId":"aLIVE"}}"#).unwrap();
+        writeln!(f, r#"{{"type":"started","agentId":"aDONE"}}"#).unwrap();
+        writeln!(f, r#"{{"type":"result","agentId":"aDONE"}}"#).unwrap();
+        let fin = finished_workflow_agents(f.path());
+        assert!(fin.contains("aDONE"));
+        assert!(!fin.contains("aLIVE"));
+    }
+
+    #[test]
+    fn scan_running_surfaces_live_workflow_agents_with_run_label() {
+        let proj = tempfile::tempdir().unwrap();
+        let sid = "sess1";
+        let parent_path = proj.path().join(format!("{sid}.jsonl"));
+        fs::write(&parent_path, "").unwrap();
+
+        let run_id = "wf_abc123";
+        let write_agent = |id: &str, launched: &str| {
+            let dir = proj
+                .path()
+                .join(sid)
+                .join("subagents")
+                .join("workflows")
+                .join(run_id);
+            fs::create_dir_all(&dir).unwrap();
+            let body = format!(
+                "{}\n{}\n",
+                format!(
+                    r#"{{"type":"user","timestamp":"{launched}","message":{{"content":"do the work"}}}}"#
+                ),
+                r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":20,"output_tokens":8}}}"#,
+            );
+            fs::write(dir.join(format!("agent-{id}.jsonl")), body).unwrap();
+            fs::write(
+                dir.join(format!("agent-{id}.meta.json")),
+                r#"{"agentType":"Explore","spawnDepth":1}"#,
+            )
+            .unwrap();
+        };
+        write_agent("aLIVE", "2026-06-19T00:00:05Z");
+        write_agent("aDONE", "2026-06-19T00:00:03Z");
+        fs::write(
+            proj.path()
+                .join(sid)
+                .join("subagents")
+                .join("workflows")
+                .join(run_id)
+                .join("journal.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                r#"{"type":"started","agentId":"aLIVE"}"#,
+                r#"{"type":"started","agentId":"aDONE"}"#,
+                r#"{"type":"result","agentId":"aDONE"}"#,
+            ),
+        )
+        .unwrap();
+
+        // Run summary supplies the concise label the sidecar can't.
+        let run_dir = proj.path().join(sid).join("workflows");
+        fs::create_dir_all(&run_dir).unwrap();
+        let run_json = serde_json::json!({
+            "workflowName": "review-things",
+            "workflowProgress": [
+                {"type": "workflow_agent", "agentId": "aLIVE", "label": "review:pipeline", "agentType": "Explore"},
+            ],
+        });
+        fs::write(run_dir.join(format!("{run_id}.json")), run_json.to_string()).unwrap();
+
+        let subs = scan_running(&parent_path, sid);
+        let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(ids, vec!["aLIVE"], "resolved workflow agent hidden");
+        let a = &subs[0];
+        assert_eq!(a.workflow.as_deref(), Some("review-things"));
+        assert_eq!(a.description, "review:pipeline");
+        assert_eq!(a.agent_type.as_deref(), Some("Explore"));
+        assert_eq!(a.tokens, 28);
     }
 }

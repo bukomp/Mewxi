@@ -759,13 +759,16 @@ fn render_sessions_table(
 }
 
 /// One indented child row beneath a session for a sub-agent it is
-/// currently running. These rows only exist while the delegation is live
-/// (it's dropped the moment the parent records its result), so the row is
-/// styled to read as *active* — readable text, a coloured live-activity
-/// column, and a green `active` state — rather than reusing the dim style
-/// idle sessions wear. Cost and the in/out/cache columns dash out: a
-/// sub-agent's tokens already roll up into the parent session's totals, so
-/// re-billing them here would double-count.
+/// currently running — either a plain Agent/Task delegation, or one of a
+/// Workflow's internal `agent()` calls (tagged with a `⚙ <workflow name>`
+/// prefix so the two aren't confused). These rows only exist while the
+/// delegation is live (it's dropped the moment its completion is
+/// detected), so the row is styled to read as *active* — readable text, a
+/// coloured live-activity column, and a green `active` state — rather
+/// than reusing the dim style idle sessions wear. Cost and the
+/// in/out/cache columns dash out: a sub-agent's tokens already roll up
+/// into the parent session's totals, so re-billing them here would
+/// double-count.
 fn subagent_row(
     sub: &crate::subagents::SubAgent,
     now: chrono::DateTime<chrono::Utc>,
@@ -780,7 +783,14 @@ fn subagent_row(
     //   ▾ project
     //     ▶ account        (session)
     //       ↳ Explore · …  (sub-agent)
+    //       ↳ ⚙ my-workflow › Explore · …  (workflow-spawned agent)
     let mut label = vec![Span::styled("      ↳ ", Style::default().fg(Color::Cyan))];
+    if let Some(name) = &sub.workflow {
+        label.push(Span::styled(
+            format!("⚙ {name} › "),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
     match &sub.agent_type {
         Some(t) => {
             label.push(Span::styled(
