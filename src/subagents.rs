@@ -69,6 +69,10 @@ const FRESH_WINDOW: Duration = Duration::from_secs(90);
 #[derive(Clone, Debug, Serialize)]
 pub struct SubAgent {
     pub agent_id: String,
+    /// The sub-agent's own transcript (`…/subagents/agent-<id>.jsonl`).
+    /// Lets the TUI open the agent in the session-detail view exactly
+    /// like a top-level session.
+    pub transcript_path: PathBuf,
     /// Agent kind from the sidecar (`Explore`, `general-purpose`, …).
     /// `None` only when the sidecar is missing (older Claude Code).
     pub agent_type: Option<String>,
@@ -98,6 +102,14 @@ pub struct SubAgent {
     /// from a Workflow's internal fan-out rather than a plain Agent/Task
     /// delegation. `None` for the latter.
     pub workflow: Option<String>,
+    /// Context currently in the sub-agent's window — the latest usage
+    /// record's input + cache tokens, same math as the parent session's
+    /// ctx column. `None` until the first usage record lands.
+    pub current_context: Option<u64>,
+    /// Context cap for the sub-agent's model: 1M for natively-1M
+    /// families (Fable, Opus 4.8+) or once >200K has been observed,
+    /// 200K otherwise.
+    pub context_cap: Option<u64>,
 }
 
 /// Running sub-agents for the session whose transcript is `transcript_path`
@@ -186,6 +198,7 @@ fn scan_flat_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> 
             .unwrap_or_else(|| first_line(&detail.prompt));
         out.push(SubAgent {
             agent_id,
+            transcript_path: path,
             agent_type,
             description,
             model: detail.model,
@@ -195,6 +208,8 @@ fn scan_flat_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> 
             tokens: detail.totals.total_tokens(),
             totals: detail.totals,
             workflow: None,
+            current_context: detail.current_context,
+            context_cap: detail.context_cap,
         });
     }
     out
@@ -276,6 +291,7 @@ fn scan_workflow_running(transcript_path: &Path, session_id: &str) -> Vec<SubAge
                 .unwrap_or_else(|| first_line(&detail.prompt));
             out.push(SubAgent {
                 agent_id,
+                transcript_path: path,
                 agent_type,
                 description,
                 model: detail.model,
@@ -290,6 +306,8 @@ fn scan_workflow_running(transcript_path: &Path, session_id: &str) -> Vec<SubAge
                         .map(|r| r.name.clone())
                         .unwrap_or_else(|| run_id.clone()),
                 ),
+                current_context: detail.current_context,
+                context_cap: detail.context_cap,
             });
         }
     }
@@ -501,6 +519,8 @@ struct SubDetail {
     totals: crate::stats::UsageTotals,
     activity: Activity,
     last_activity: DateTime<Utc>,
+    current_context: Option<u64>,
+    context_cap: Option<u64>,
 }
 
 fn read_subagent(path: &Path) -> Option<SubDetail> {
@@ -510,13 +530,31 @@ fn read_subagent(path: &Path) -> Option<SubDetail> {
     let mut totals = crate::stats::UsageTotals::default();
     let mut model = String::new();
     let mut last_activity = DateTime::<Utc>::MIN_UTC;
+    // Context tracking mirrors `stats::current_context_from_transcript`:
+    // the newest record's input + cache tokens is what currently fills
+    // the window; the max ever observed reveals the 1M tier. Records
+    // are in file (append) order, so the last non-zero one wins.
+    let mut current_context: Option<u64> = None;
+    let mut max_context: u64 = 0;
     for r in &records {
         totals.add(r);
         if r.timestamp >= last_activity {
             last_activity = r.timestamp;
             model = r.model.clone();
         }
+        let ctx = r.input + r.cache_read + r.cache_write_5m + r.cache_write_1h;
+        if ctx > 0 {
+            current_context = Some(ctx);
+            max_context = max_context.max(ctx);
+        }
     }
+    let context_cap = current_context.map(|_| {
+        if max_context > 200_000 || crate::stats::native_1m_context(&model) {
+            1_000_000
+        } else {
+            200_000
+        }
+    });
 
     let (prompt, first_ts) = first_user_record(path).unwrap_or_default();
     // Launch time: the first record's own timestamp is the most stable
@@ -548,6 +586,8 @@ fn read_subagent(path: &Path) -> Option<SubDetail> {
         totals,
         activity,
         last_activity,
+        current_context,
+        context_cap,
     })
 }
 
@@ -700,6 +740,11 @@ mod tests {
         assert_eq!(a.tokens, 15);
         assert_eq!(a.totals.input, 10);
         assert_eq!(a.totals.output, 5);
+        assert_eq!(a.transcript_path, subdir.join("agent-aaa.jsonl"));
+        // ctx = input + cache tokens of the newest usage record; haiku
+        // with <200K observed sits on the 200K cap.
+        assert_eq!(a.current_context, Some(10));
+        assert_eq!(a.context_cap, Some(200_000));
     }
 
     #[test]

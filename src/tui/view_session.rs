@@ -759,16 +759,44 @@ pub(crate) fn trim_model(m: &str) -> std::borrow::Cow<'_, str> {
 }
 
 fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
-    let spans = vec![
+    let mut spans = vec![
         Span::styled(
             format!("[{}]", s.account_name),
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(s.project.clone(), Style::default().fg(Color::Cyan)),
-        Span::raw("  session "),
-        Span::styled(s.session_id.clone(), Style::default().fg(Color::Yellow)),
     ];
+    match &s.subagent {
+        Some(tag) => {
+            // Sub-agent row: label the id as an agent and point back at
+            // the delegating session so it's obvious this isn't a
+            // top-level session.
+            spans.push(Span::raw("  agent "));
+            spans.push(Span::styled(
+                s.session_id.clone(),
+                Style::default().fg(Color::Yellow),
+            ));
+            spans.push(Span::styled(
+                format!("  ↳ {}", tag.agent_type.as_deref().unwrap_or("sub-agent")),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!(
+                    " of session {}",
+                    tag.parent_session_id.chars().take(8).collect::<String>()
+                ),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        None => {
+            spans.push(Span::raw("  session "));
+            spans.push(Span::styled(
+                s.session_id.clone(),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+    }
     f.render_widget(
         Paragraph::new(Line::from(spans))
             .block(Block::default().borders(Borders::ALL).title("Session detail")),

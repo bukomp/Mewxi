@@ -184,12 +184,19 @@ pub fn render(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(inner);
 
+    // Top-level sessions only — sub-agent rows in the flattened list
+    // belong to view 1's tree and would inflate the counts here.
+    let sessions: Vec<&SessionRef> = sessions
+        .iter()
+        .filter(|s| s.subagent.is_none())
+        .copied()
+        .collect();
     let active = sessions
         .iter()
         .filter(|s| s.state == SessionState::Active)
         .count();
     render_logo(f, cols[0], active);
-    render_side_panel(f, cols[1], accounts, sessions);
+    render_side_panel(f, cols[1], accounts, &sessions);
 
     // Cosmetic "under construction" hazard band. Drawn last so it sits
     // on top of the logo + panels, but it's render-only — the view

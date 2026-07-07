@@ -403,11 +403,15 @@ fn render_sessions_table(
     selected: Option<usize>,
     table_state: &mut TableState,
 ) {
+    // Sub-agent rows are excluded from the session tallies — the title
+    // and group headers keep counting sessions, exactly as before they
+    // became selectable rows.
+    let parent_count = sessions.iter().filter(|s| s.subagent.is_none()).count();
     let active_count = sessions
         .iter()
-        .filter(|s| s.state == SessionState::Active)
+        .filter(|s| s.subagent.is_none() && s.state == SessionState::Active)
         .count();
-    let idle_count = sessions.len() - active_count;
+    let idle_count = parent_count - active_count;
     let title = if idle_count == 0 {
         format!("Sessions — {active_count} active")
     } else {
@@ -484,8 +488,11 @@ fn render_sessions_table(
             group_end += 1;
         }
         let group = &ordered[group_start..group_end];
-        let active_in_group = group.iter().filter(|s| s.state == SessionState::Active).count();
-        let total_in_group = group.len();
+        let active_in_group = group
+            .iter()
+            .filter(|s| s.subagent.is_none() && s.state == SessionState::Active)
+            .count();
+        let total_in_group = group.iter().filter(|s| s.subagent.is_none()).count();
         let label = if project.is_empty() { "(unknown)" } else { project.as_str() };
         let label_pad = max_project_len.saturating_sub(label.chars().count());
         let count_text = format!("{active_in_group}/{total_in_group} active");
@@ -527,6 +534,16 @@ fn render_sessions_table(
                 });
             }
             let arrow = if is_selected { "▶ " } else { "  " };
+            // Sub-agent child row — same indented ↳ look as before, but
+            // now a first-class selectable row: ↑/↓ steps onto it and
+            // Enter opens its transcript in the session-detail view.
+            if s.subagent.is_some() {
+                session_rows.push(rows.len());
+                rows.push(subagent_row(
+                    s, now, is_selected, show_status, show_ctx, show_io, show_cache,
+                ));
+                continue;
+            }
             // A session mewxi just asked to close: every column dashes
             // out and the status reads a red `killing` so it's instantly
             // clear the agent is going away. Built before the normal row
@@ -617,17 +634,6 @@ fn render_sessions_table(
             cells.push(Cell::from(Span::styled(state_label, Style::default().fg(state_color))));
             session_rows.push(rows.len());
             rows.push(Row::new(cells).style(base_style));
-
-            // Indented child rows for the sub-agents this session is
-            // running right now. They are display-only: excluded from
-            // `session_rows` so the off-screen counter keeps counting
-            // sessions, and never assigned a selection index so ↑/↓
-            // navigation continues to step session-to-session.
-            for sub in &s.subagents {
-                rows.push(subagent_row(
-                    sub, now, show_status, show_ctx, show_io, show_cache,
-                ));
-            }
         }
 
         group_start = group_end;
@@ -759,61 +765,78 @@ fn render_sessions_table(
 }
 
 /// One indented child row beneath a session for a sub-agent it is
-/// currently running — either a plain Agent/Task delegation, or one of a
-/// Workflow's internal `agent()` calls (tagged with a `⚙ <workflow name>`
-/// prefix so the two aren't confused). These rows only exist while the
-/// delegation is live (it's dropped the moment its completion is
-/// detected), so the row is styled to read as *active* — readable text, a
-/// coloured live-activity column, and a green `active` state — rather
-/// than reusing the dim style idle sessions wear. Cost and the
-/// in/out/cache columns dash out: a sub-agent's tokens already roll up
-/// into the parent session's totals, so re-billing them here would
-/// double-count.
+/// currently running (`s.subagent` is `Some`) — either a plain Agent/Task
+/// delegation, or one of a Workflow's internal `agent()` calls (tagged
+/// with a `⚙ <workflow name>` prefix so the two aren't confused). These
+/// rows only exist while the delegation is live (dropped the moment its
+/// completion is detected), so the row is styled to read as *active* —
+/// readable text, a coloured live-activity column, and a green `active`
+/// state — rather than reusing the dim style idle sessions wear. When
+/// selected, the row wears the same arrow + yellow-bold chrome as a
+/// session row. Cost dashes out: a sub-agent's spend already rolls up
+/// into the account aggregate, so re-billing it here would double-count.
 fn subagent_row(
-    sub: &crate::subagents::SubAgent,
+    s: &SessionRef,
     now: chrono::DateTime<chrono::Utc>,
+    is_selected: bool,
     show_status: bool,
     show_ctx: bool,
     show_io: bool,
     show_cache: bool,
 ) -> Row<'static> {
-    let dim = Style::default().fg(Color::DarkGray);
-    let text = Style::default().fg(Color::Gray);
+    let (dim, text) = if is_selected {
+        let sel = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        (sel, sel)
+    } else {
+        (
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
+        )
+    };
     // Indent two further than the session's "  ▶ name" so the tree nests:
     //   ▾ project
     //     ▶ account        (session)
     //       ↳ Explore · …  (sub-agent)
     //       ↳ ⚙ my-workflow › Explore · …  (workflow-spawned agent)
-    let mut label = vec![Span::styled("      ↳ ", Style::default().fg(Color::Cyan))];
-    if let Some(name) = &sub.workflow {
+    // The selection arrow slots into the indent so the ↳ stays put.
+    let lead = if is_selected { "    ▶ ↳ " } else { "      ↳ " };
+    let lead_style = if is_selected { text } else { Style::default().fg(Color::Cyan) };
+    let mut label = vec![Span::styled(lead, lead_style)];
+    let tag = s.subagent.as_ref();
+    if let Some(name) = tag.and_then(|t| t.workflow.as_ref()) {
         label.push(Span::styled(
             format!("⚙ {name} › "),
             Style::default().fg(Color::Yellow),
         ));
     }
-    match &sub.agent_type {
+    let agent_type = tag.and_then(|t| t.agent_type.clone());
+    let description = tag.map(|t| t.description.clone()).unwrap_or_default();
+    match agent_type {
         Some(t) => {
             label.push(Span::styled(
-                t.clone(),
+                t,
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
             ));
-            label.push(Span::styled(format!(" · {}", sub.description), text));
+            label.push(Span::styled(format!(" · {description}"), text));
         }
-        None => label.push(Span::styled(sub.description.clone(), text)),
+        None => label.push(Span::styled(description, text)),
     }
-    let age = (now - sub.last_activity).num_seconds().max(0);
+    let age = (now - s.last_activity).num_seconds().max(0);
     let mut cells: Vec<Cell> = vec![
         Cell::from(Line::from(label)),
         Cell::from(Span::styled(fmt_age(age), dim)),
     ];
     if show_status {
-        let (lbl, color) = activity_display(&sub.activity);
+        let (lbl, color) = activity_display(&s.activity);
         cells.push(Cell::from(Span::styled(lbl, Style::default().fg(color))));
     }
     if show_ctx {
-        cells.push(Cell::from(Span::styled("—", dim)));
+        cells.push(Cell::from(Span::styled(
+            fmt_ctx(s.current_context, s.context_cap),
+            text,
+        )));
     }
-    cells.push(Cell::from(Span::styled(fmt_tokens_compact(sub.tokens), text)));
+    cells.push(Cell::from(Span::styled(fmt_tokens_compact(s.tokens), text)));
     // in/out and cache mirror a session row so the cache-heavy split is
     // visible (a sub-agent's tokens are mostly cache reads). The figures
     // come from the sub-agent's own transcript and don't overlap the
@@ -822,21 +845,21 @@ fn subagent_row(
         cells.push(Cell::from(Span::styled(
             format!(
                 "{}/{}",
-                fmt_tokens_compact(sub.totals.input),
-                fmt_tokens_compact(sub.totals.output),
+                fmt_tokens_compact(s.totals.input),
+                fmt_tokens_compact(s.totals.output),
             ),
             text,
         )));
     }
     if show_cache {
         cells.push(Cell::from(Span::styled(
-            fmt_tokens_compact(sub.totals.cache_read),
+            fmt_tokens_compact(s.totals.cache_read),
             text,
         )));
     }
     cells.push(Cell::from(Span::styled("—", dim))); // cost — rolled into the account aggregate
     cells.push(Cell::from(Span::styled(
-        super::view_session::trim_model(&sub.model).into_owned(),
+        super::view_session::trim_model(&s.model).into_owned(),
         text,
     )));
     cells.push(Cell::from(Span::styled("active", Style::default().fg(Color::Green))));

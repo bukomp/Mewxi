@@ -119,10 +119,29 @@ pub struct SessionRef {
     /// the scan, so the feedback doesn't blink out the instant the
     /// process dies. See [`apply_killing_overlay`].
     pub killing: bool,
-    /// Sub-agents this session is running right now, rendered as indented
-    /// child rows under the session in view 1. Empty unless the session
-    /// is actively delegating. See [`crate::subagents::scan_running`].
-    pub subagents: Vec<crate::subagents::SubAgent>,
+    /// `Some` when this row is a sub-agent a session is running right
+    /// now, not a top-level session. Sub-agent rows are full members of
+    /// the flattened list — selectable, inspectable in view 2 (their
+    /// `transcript_path` points at the agent's own JSONL) — and are kept
+    /// glued directly under their parent by [`regroup_sessions`]. For
+    /// these rows `session_id` holds the agent id and `pid` mirrors the
+    /// parent's (sort key only — a sub-agent has no process of its own,
+    /// which is why the kill path refuses them).
+    pub subagent: Option<SubAgentTag>,
+}
+
+/// Identity + label data for a sub-agent row. See [`SessionRef::subagent`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct SubAgentTag {
+    /// `session_id` of the session that delegated to this agent.
+    pub parent_session_id: String,
+    /// Agent kind from the sidecar (`Explore`, `general-purpose`, …).
+    pub agent_type: Option<String>,
+    /// Short task label for the row.
+    pub description: String,
+    /// Name of the Workflow run this agent was spawned from, `None` for
+    /// a plain Agent/Task delegation. Rendered as a `⚙ <name> ›` prefix.
+    pub workflow: Option<String>,
 }
 
 /// Optimistic per-driver state for things mewxi just commanded but
@@ -3879,23 +3898,34 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                         }
                         KeyCode::Delete => {
-                            let target: Option<(String, String, u32)> = match mode {
+                            let target: Option<&&SessionRef> = match mode {
                                 ViewMode::SessionDetail => pinned_session
                                     .as_ref()
                                     .and_then(|(acct, sid)| {
                                         visible_sessions
                                             .iter()
                                             .find(|s| s.account_name == *acct && s.session_id == *sid)
-                                            .map(|s| (s.account_name.clone(), s.session_id.clone(), s.pid))
                                     }),
                                 ViewMode::AllSessions => visible_sessions
-                                    .get(selected_session)
-                                    .map(|s| (s.account_name.clone(), s.session_id.clone(), s.pid)),
+                                    .get(selected_session),
                                 _ => None,
                             };
                             match target {
-                                Some((acct, sid, pid)) => {
-                                    kill_confirm_modal = Some(KillConfirmModal::new(acct, sid, pid));
+                                // A sub-agent has no process of its own —
+                                // its `pid` mirrors the parent's, so the
+                                // kill would take down the whole session.
+                                Some(s) if s.subagent.is_some() => {
+                                    driver_status = Some((
+                                        "sub-agents can't be killed — kill the parent session".into(),
+                                        Instant::now(),
+                                    ));
+                                }
+                                Some(s) => {
+                                    kill_confirm_modal = Some(KillConfirmModal::new(
+                                        s.account_name.clone(),
+                                        s.session_id.clone(),
+                                        s.pid,
+                                    ));
                                 }
                                 None => {
                                     driver_status = Some((
@@ -4454,6 +4484,15 @@ fn apply_killing_overlay(
             s.killing = true;
         }
     }
+    // Drop sub-agent rows under a killing session — the whole tree goes
+    // away with the parent process, so live-looking child rows beneath
+    // the red `killing` placeholder would be a lie (and were hidden
+    // before sub-agents became selectable rows).
+    sessions.retain(|s| {
+        s.subagent.as_ref().is_none_or(|t| {
+            !killing.contains_key(&(s.account_name.clone(), t.parent_session_id.clone()))
+        })
+    });
     let mut injected = false;
     for (key, entry) in killing.iter() {
         let present = sessions
@@ -4467,13 +4506,7 @@ fn apply_killing_overlay(
     if injected {
         // Re-sort so injected placeholders land in their project group —
         // mirrors flatten_sessions' ordering so view 1's grouping holds.
-        sessions.sort_by(|a, b| {
-            a.project
-                .to_ascii_lowercase()
-                .cmp(&b.project.to_ascii_lowercase())
-                .then_with(|| a.pid.cmp(&b.pid))
-                .then_with(|| a.session_id.cmp(&b.session_id))
-        });
+        regroup_sessions(sessions);
     }
 }
 
@@ -4502,7 +4535,7 @@ fn killing_placeholder(key: &(String, String), entry: &KillingEntry) -> SessionR
         permission_mode: None,
         effort: None,
         killing: true,
-        subagents: Vec::new(),
+        subagent: None,
     }
 }
 
@@ -4513,7 +4546,7 @@ fn flatten_sessions(
     let mut out: Vec<SessionRef> = accounts
         .iter()
         .flat_map(|pa| {
-            pa.live_sessions.iter().map(move |ls| {
+            pa.live_sessions.iter().flat_map(move |ls| {
                 let key = (ls.account_name.clone(), ls.session_id.clone());
                 let opt = optimistic.get(&key);
                 let model = opt
@@ -4560,7 +4593,7 @@ fn flatten_sessions(
                 let effort = effort.filter(|_| {
                     !model_picker_modal::effort_levels_for(&model).is_empty()
                 });
-                SessionRef {
+                let parent = SessionRef {
                     account_name: ls.account_name.clone(),
                     session_id: ls.session_id.clone(),
                     pid: ls.pid,
@@ -4581,32 +4614,170 @@ fn flatten_sessions(
                     permission_mode,
                     effort,
                     killing: false,
-                    subagents: ls.subagents.clone(),
-                }
+                    subagent: None,
+                };
+                // Sub-agents follow their parent as first-class rows so
+                // they're selectable and inspectable like sessions. They
+                // borrow the parent's project/pid (grouping + sort keys)
+                // and carry their own transcript, tokens and context.
+                let mut rows = Vec::with_capacity(1 + ls.subagents.len());
+                rows.push(parent);
+                rows.extend(ls.subagents.iter().map(|sub| SessionRef {
+                    account_name: ls.account_name.clone(),
+                    session_id: sub.agent_id.clone(),
+                    pid: ls.pid,
+                    project: ls.project.clone(),
+                    cwd: ls.cwd.clone(),
+                    transcript_path: sub.transcript_path.clone(),
+                    last_activity: sub.last_activity,
+                    state_since: sub.started_at,
+                    model: sub.model.clone(),
+                    active_model: sub.model.clone(),
+                    tokens: sub.tokens,
+                    // Cost is rolled into the account aggregate via the
+                    // parent's project; view 1 dashes it out on these rows.
+                    cost_usd: sub.totals.cost_usd,
+                    totals: sub.totals.clone(),
+                    current_context: sub.current_context,
+                    context_cap: sub.context_cap,
+                    state: SessionState::Active,
+                    activity: sub.activity.clone(),
+                    permission_mode: None,
+                    effort: None,
+                    killing: false,
+                    subagent: Some(SubAgentTag {
+                        parent_session_id: ls.session_id.clone(),
+                        agent_type: sub.agent_type.clone(),
+                        description: sub.description.clone(),
+                        workflow: sub.workflow.clone(),
+                    }),
+                }));
+                rows
             })
         })
         .collect();
-    // Group by project (alphabetical, case-insensitive); within each
-    // project, order by pid ascending — stable for the lifetime of a
-    // session, so rows don't shuffle when a session's state flips or
-    // its last_activity updates. session_id is a tiebreak for the
-    // unlikely pid collision (wraparound on long-running boxes). View
-    // 1 renders project headers above each group, and j/k navigation
-    // walks this same order so the selection cursor tracks the
-    // visible row order rather than jumping around.
-    out.sort_by(|a, b| {
+    regroup_sessions(&mut out);
+    out
+}
+
+/// Order the flat row list for view 1: parents grouped by project
+/// (alphabetical, case-insensitive) and pid ascending within each group —
+/// stable for the lifetime of a session, so rows don't shuffle when a
+/// session's state flips or its last_activity updates; session_id breaks
+/// the unlikely pid tie. Each parent's sub-agent rows are then spliced
+/// directly beneath it, preserving their scan order (launch time). j/k
+/// navigation walks this same order so the selection cursor tracks the
+/// visible row order rather than jumping around.
+fn regroup_sessions(sessions: &mut Vec<SessionRef>) {
+    let mut parents: Vec<SessionRef> = Vec::new();
+    let mut children: Vec<SessionRef> = Vec::new();
+    for s in sessions.drain(..) {
+        if s.subagent.is_some() {
+            children.push(s);
+        } else {
+            parents.push(s);
+        }
+    }
+    parents.sort_by(|a, b| {
         a.project
             .to_ascii_lowercase()
             .cmp(&b.project.to_ascii_lowercase())
             .then_with(|| a.pid.cmp(&b.pid))
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
-    out
+    let mut out = Vec::with_capacity(parents.len() + children.len());
+    for p in parents {
+        let key = (p.account_name.clone(), p.session_id.clone());
+        out.push(p);
+        let mut i = 0;
+        while i < children.len() {
+            let mine = children[i].account_name == key.0
+                && children[i]
+                    .subagent
+                    .as_ref()
+                    .is_some_and(|t| t.parent_session_id == key.1);
+            if mine {
+                out.push(children.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+    }
+    // Orphans (parent vanished between scans) — keep them visible at the
+    // tail rather than dropping rows the selection index may sit on.
+    out.append(&mut children);
+    *sessions = out;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cycle_mode, model_supports_auto, ModeCycle, ViewMode};
+    use super::{
+        cycle_mode, model_supports_auto, regroup_sessions, ModeCycle, SessionRef, SubAgentTag,
+        ViewMode,
+    };
+
+    /// Minimal row for regroup tests — only the sort/grouping keys carry
+    /// meaning.
+    fn row(project: &str, pid: u32, sid: &str, parent: Option<&str>) -> SessionRef {
+        SessionRef {
+            account_name: "acct".into(),
+            session_id: sid.into(),
+            pid,
+            project: project.into(),
+            cwd: std::path::PathBuf::new(),
+            transcript_path: std::path::PathBuf::new(),
+            last_activity: chrono::Utc::now(),
+            state_since: chrono::Utc::now(),
+            model: String::new(),
+            active_model: String::new(),
+            tokens: 0,
+            cost_usd: 0.0,
+            totals: crate::stats::UsageTotals::default(),
+            current_context: None,
+            context_cap: None,
+            state: crate::live_session::SessionState::Active,
+            activity: crate::live_session::Activity::Waiting,
+            permission_mode: None,
+            effort: None,
+            killing: false,
+            subagent: parent.map(|p| SubAgentTag {
+                parent_session_id: p.into(),
+                agent_type: None,
+                description: String::new(),
+                workflow: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn regroup_sorts_parents_and_splices_children_beneath_them() {
+        // Deliberately scrambled: children first, parents out of order.
+        let mut sessions = vec![
+            row("beta", 2, "agent-2", Some("s-beta")),
+            row("alpha", 1, "agent-1", Some("s-alpha")),
+            row("beta", 2, "s-beta", None),
+            row("alpha", 1, "s-alpha", None),
+            row("beta", 2, "agent-3", Some("s-beta")),
+        ];
+        regroup_sessions(&mut sessions);
+        let order: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["s-alpha", "agent-1", "s-beta", "agent-2", "agent-3"],
+            "parents sorted by project, children glued beneath their parent in original order"
+        );
+    }
+
+    #[test]
+    fn regroup_keeps_orphan_children_at_the_tail() {
+        let mut sessions = vec![
+            row("alpha", 1, "agent-x", Some("gone")),
+            row("alpha", 1, "s-alpha", None),
+        ];
+        regroup_sessions(&mut sessions);
+        let order: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(order, vec!["s-alpha", "agent-x"]);
+    }
 
     #[test]
     fn view_mode_from_config_accepts_names_and_keys() {
