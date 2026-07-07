@@ -48,6 +48,14 @@
 //! gate bounds the IO, and the run summary supplies the concise per-agent
 //! `label` (e.g. `verify:resolve_asset_names drops the combined query`)
 //! that the sidecar — missing a `description` field here — can't.
+//!
+//! A third, higher-fidelity label source sits on top of both layouts: the
+//! `subagentStatusLine` feed (see [`crate::agent_status`]) mewxi wires into
+//! the account settings, which Claude Code refreshes every few seconds with
+//! the exact caption its own agent panel shows for each running agent. When
+//! present it is matched by agent id, falling back to the launch
+//! `description`, and wins over both the sidecar description and the
+//! transcript-derived `narration` — see [`SubAgent::status_label`].
 
 use crate::live_session::{self, Activity, TailKind};
 use chrono::{DateTime, Utc};
@@ -83,6 +91,26 @@ pub struct SubAgent {
     /// main agent — e.g. an Explore agent on Haiku under an Opus session).
     pub model: String,
     pub activity: Activity,
+    /// Detailed caption of the tool call the agent is on right now (e.g.
+    /// `Read(view_all.rs)`), refreshed every scan from the transcript
+    /// tail — the live counterpart to the static `description` above.
+    /// `None` when the agent is thinking/responding rather than in a tool
+    /// call.
+    pub current_action: Option<String>,
+    /// The agent's most recent narration line — the last assistant text
+    /// block in its transcript ("Now checking the rendering code…").
+    /// This is what the row shows *instead of* `description` once the
+    /// agent starts talking: the launch description goes stale the moment
+    /// work begins, the narration tracks it. `None` until the first text
+    /// block lands.
+    pub narration: Option<String>,
+    /// The exact live summary Claude Code's own agent panel shows for this
+    /// agent, read from the `subagentStatusLine` feed mewxi wires into the
+    /// account settings ("Reading errorHandler.ts response mapping") — the
+    /// highest-fidelity caption available. `None` whenever the feed isn't
+    /// wired, hasn't fired yet, or has gone stale; consumers then fall back
+    /// to `narration`/`description`.
+    pub status_label: Option<String>,
     pub last_activity: DateTime<Utc>,
     /// When the sub-agent was launched (its first transcript record).
     /// Immutable for the life of the agent, so it gives the rows a stable
@@ -117,9 +145,14 @@ pub struct SubAgent {
 /// Agent/Task delegations and agents a Workflow run has spawned
 /// internally. Cheap when the session has neither: each source early-outs
 /// on its own missing directory without reading the parent.
-pub fn scan_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> {
-    let mut out = scan_flat_running(transcript_path, session_id);
-    out.extend(scan_workflow_running(transcript_path, session_id));
+pub fn scan_running(
+    transcript_path: &Path,
+    session_id: &str,
+    account_dir: Option<&Path>,
+) -> Vec<SubAgent> {
+    let feed = account_dir.and_then(|d| crate::agent_status::read_feed(d, session_id));
+    let mut out = scan_flat_running(transcript_path, session_id, feed.as_ref());
+    out.extend(scan_workflow_running(transcript_path, session_id, feed.as_ref()));
     // Stable order: by launch time, oldest first, so a row never moves
     // when its agent's activity or token count changes. agent_id breaks
     // ties (e.g. agents launched in the same millisecond) deterministically.
@@ -133,7 +166,11 @@ pub fn scan_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> {
 
 /// The plain Agent/Task half of [`scan_running`] — delegations launched by
 /// a tool call in the parent transcript, resolved via its `tool_result`.
-fn scan_flat_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> {
+fn scan_flat_running(
+    transcript_path: &Path,
+    session_id: &str,
+    feed: Option<&crate::agent_status::AgentStatusFeed>,
+) -> Vec<SubAgent> {
     let Some(dir) = subagents_dir(transcript_path, session_id) else {
         return Vec::new();
     };
@@ -196,6 +233,12 @@ fn scan_flat_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> 
             .and_then(|m| m.description.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| first_line(&detail.prompt));
+        let status_label = feed.and_then(|f| {
+            f.labels_by_id
+                .get(&agent_id)
+                .or_else(|| f.labels_by_description.get(&description))
+                .cloned()
+        });
         out.push(SubAgent {
             agent_id,
             transcript_path: path,
@@ -203,6 +246,9 @@ fn scan_flat_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> 
             description,
             model: detail.model,
             activity: detail.activity,
+            current_action: detail.current_action,
+            narration: detail.narration,
+            status_label,
             last_activity: detail.last_activity,
             started_at: detail.started_at,
             tokens: detail.totals.total_tokens(),
@@ -221,7 +267,11 @@ fn scan_flat_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> 
 /// this mirrors [`scan_running`]'s two-pass shape (mtime gate, then a
 /// cheap read for the terminal signal) with `journal.jsonl` standing in
 /// for the parent transcript.
-fn scan_workflow_running(transcript_path: &Path, session_id: &str) -> Vec<SubAgent> {
+fn scan_workflow_running(
+    transcript_path: &Path,
+    session_id: &str,
+    feed: Option<&crate::agent_status::AgentStatusFeed>,
+) -> Vec<SubAgent> {
     let Some(root) = workflow_subagents_root(transcript_path, session_id) else {
         return Vec::new();
     };
@@ -289,6 +339,12 @@ fn scan_workflow_running(transcript_path: &Path, session_id: &str) -> Vec<SubAge
                 .or_else(|| meta.as_ref().and_then(|m| m.description.clone()))
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| first_line(&detail.prompt));
+            let status_label = feed.and_then(|f| {
+                f.labels_by_id
+                    .get(&agent_id)
+                    .or_else(|| f.labels_by_description.get(&description))
+                    .cloned()
+            });
             out.push(SubAgent {
                 agent_id,
                 transcript_path: path,
@@ -296,6 +352,9 @@ fn scan_workflow_running(transcript_path: &Path, session_id: &str) -> Vec<SubAge
                 description,
                 model: detail.model,
                 activity: detail.activity,
+                current_action: detail.current_action,
+                narration: detail.narration,
+                status_label,
                 last_activity: detail.last_activity,
                 started_at: detail.started_at,
                 tokens: detail.totals.total_tokens(),
@@ -518,6 +577,10 @@ struct SubDetail {
     model: String,
     totals: crate::stats::UsageTotals,
     activity: Activity,
+    /// See [`SubAgent::current_action`].
+    current_action: Option<String>,
+    /// See [`SubAgent::narration`].
+    narration: Option<String>,
     last_activity: DateTime<Utc>,
     current_context: Option<u64>,
     context_cap: Option<u64>,
@@ -574,9 +637,14 @@ fn read_subagent(path: &Path) -> Option<SubDetail> {
         last_activity = started_at;
     }
 
-    let activity = match live_session::tail_activity(path) {
-        Some(TailKind::PendingTool(a)) | Some(TailKind::Completed(a)) => a,
+    let status = live_session::tail_status(path);
+    let activity = match status.as_ref().map(|s| &s.kind) {
+        Some(TailKind::PendingTool(a)) | Some(TailKind::Completed(a)) => a.clone(),
         None => Activity::Starting,
+    };
+    let (current_action, narration) = match status {
+        Some(s) => (s.action, s.narration),
+        None => (None, None),
     };
 
     Some(SubDetail {
@@ -585,6 +653,8 @@ fn read_subagent(path: &Path) -> Option<SubDetail> {
         model,
         totals,
         activity,
+        current_action,
+        narration,
         last_activity,
         current_context,
         context_cap,
@@ -685,7 +755,7 @@ mod tests {
     #[test]
     fn scan_running_empty_when_no_dir() {
         let t = Path::new("/nonexistent/proj/zzz.jsonl");
-        assert!(scan_running(t, "zzz").is_empty());
+        assert!(scan_running(t, "zzz", None).is_empty());
     }
 
     #[test]
@@ -706,12 +776,13 @@ mod tests {
         fs::create_dir_all(&subdir).unwrap();
         let write_agent = |id: &str, tool_use_id: &str, desc: &str, launched: &str| {
             let body = format!(
-                "{}\n{}\n{}\n",
+                "{}\n{}\n{}\n{}\n",
                 format!(
                     r#"{{"type":"user","timestamp":"{launched}","message":{{"content":"do the work"}}}}"#
                 ),
                 r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":5}}}"#,
-                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Scanning the fixtures now"}]}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/x/y/lib.rs"}}]}}"#,
             );
             fs::write(subdir.join(format!("agent-{id}.jsonl")), body).unwrap();
             let meta = format!(
@@ -725,7 +796,7 @@ mod tests {
         write_agent("bbb", "tB", "Done B", "2026-06-19T00:00:03Z"); // tB resolved → hidden
         write_agent("ccc", "tC", "Background C", "2026-06-19T00:00:02Z"); // live, earliest
 
-        let subs = scan_running(&parent_path, sid);
+        let subs = scan_running(&parent_path, sid, None);
         let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -737,6 +808,10 @@ mod tests {
         assert_eq!(a.description, "Running A");
         assert_eq!(a.model, "claude-haiku-4-5");
         assert_eq!(a.activity, Activity::Reading);
+        assert_eq!(a.current_action, Some("Read(lib.rs)".to_string()));
+        // The live caption: the agent's latest narration, found past the
+        // pending tool_use record.
+        assert_eq!(a.narration.as_deref(), Some("Scanning the fixtures now"));
         assert_eq!(a.tokens, 15);
         assert_eq!(a.totals.input, 10);
         assert_eq!(a.totals.output, 5);
@@ -745,6 +820,51 @@ mod tests {
         // with <200K observed sits on the 200K cap.
         assert_eq!(a.current_context, Some(10));
         assert_eq!(a.context_cap, Some(200_000));
+    }
+
+    #[test]
+    fn scan_running_matches_status_label_from_agent_status_feed() {
+        let proj = tempfile::tempdir().unwrap();
+        let sid = "sess1";
+        let parent_path = proj.path().join(format!("{sid}.jsonl"));
+        fs::write(&parent_path, "").unwrap();
+
+        let subdir = proj.path().join(sid).join("subagents");
+        fs::create_dir_all(&subdir).unwrap();
+        let write_agent = |id: &str, desc: &str, launched: &str| {
+            let body = format!(
+                "{}\n{}\n",
+                format!(
+                    r#"{{"type":"user","timestamp":"{launched}","message":{{"content":"do the work"}}}}"#
+                ),
+                r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            );
+            fs::write(subdir.join(format!("agent-{id}.jsonl")), body).unwrap();
+            let meta =
+                format!(r#"{{"agentType":"Explore","description":"{desc}","toolUseId":"t{id}"}}"#);
+            fs::write(subdir.join(format!("agent-{id}.meta.json")), meta).unwrap();
+        };
+        write_agent("aaa", "Running A", "2026-06-19T00:00:05Z");
+        write_agent("bbb", "Running B", "2026-06-19T00:00:06Z");
+
+        // Account dir is a separate tree from the project dir in real life.
+        let account = tempfile::tempdir().unwrap();
+        let sessions_dir = account.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join(format!("{sid}.agent-status.json")),
+            r#"{"session_id":"sess1","tasks":[{"id":"aaa","description":"Running A","label":"Reading lib.rs for conversion"}]}"#,
+        )
+        .unwrap();
+
+        let subs = scan_running(&parent_path, sid, Some(account.path()));
+        let a = subs.iter().find(|s| s.agent_id == "aaa").unwrap();
+        assert_eq!(
+            a.status_label.as_deref(),
+            Some("Reading lib.rs for conversion")
+        );
+        let b = subs.iter().find(|s| s.agent_id == "bbb").unwrap();
+        assert_eq!(b.status_label, None);
     }
 
     #[test]
@@ -817,7 +937,7 @@ mod tests {
         });
         fs::write(run_dir.join(format!("{run_id}.json")), run_json.to_string()).unwrap();
 
-        let subs = scan_running(&parent_path, sid);
+        let subs = scan_running(&parent_path, sid, None);
         let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
         assert_eq!(ids, vec!["aLIVE"], "resolved workflow agent hidden");
         let a = &subs[0];
@@ -825,5 +945,9 @@ mod tests {
         assert_eq!(a.description, "review:pipeline");
         assert_eq!(a.agent_type.as_deref(), Some("Explore"));
         assert_eq!(a.tokens, 28);
+        // Tail is a usage record with no tool_use content — nothing to
+        // caption, so the live action and narration stay unset.
+        assert_eq!(a.current_action, None);
+        assert_eq!(a.narration, None);
     }
 }

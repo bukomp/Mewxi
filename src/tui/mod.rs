@@ -142,6 +142,22 @@ pub struct SubAgentTag {
     /// Name of the Workflow run this agent was spawned from, `None` for
     /// a plain Agent/Task delegation. Rendered as a `⚙ <name> ›` prefix.
     pub workflow: Option<String>,
+    /// Live caption of the tool call the agent is on right now (e.g.
+    /// `Read(view_all.rs)`) — the dynamic counterpart to the static
+    /// `description`. `None` while the agent is thinking/responding rather
+    /// than on a tool.
+    pub current_action: Option<String>,
+    /// The agent's latest narration line ("Now checking the rendering
+    /// code…"). Shown in place of `description` once present — the launch
+    /// description goes stale the moment work begins, the narration
+    /// tracks it. `None` until the agent's first text block.
+    pub narration: Option<String>,
+    /// The live summary Claude Code's own agent panel shows for this
+    /// agent (e.g. "Reading errorHandler.ts response mapping"), sourced
+    /// from the `subagentStatusLine` feed. The preferred caption when
+    /// present — `narration`/`description` are the fallbacks for when
+    /// the feed isn't wired up or has gone stale.
+    pub status_label: Option<String>,
 }
 
 /// Optimistic per-driver state for things mewxi just commanded but
@@ -4660,6 +4676,9 @@ fn flatten_sessions(
                         agent_type: sub.agent_type.clone(),
                         description: sub.description.clone(),
                         workflow: sub.workflow.clone(),
+                        current_action: sub.current_action.clone(),
+                        narration: sub.narration.clone(),
+                        status_label: sub.status_label.clone(),
                     }),
                 }));
                 rows
@@ -4755,6 +4774,9 @@ mod tests {
                 agent_type: None,
                 description: String::new(),
                 workflow: None,
+                current_action: None,
+                narration: None,
+                status_label: None,
             }),
         }
     }
