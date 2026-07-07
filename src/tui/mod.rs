@@ -4593,6 +4593,13 @@ fn flatten_sessions(
                 let effort = effort.filter(|_| {
                     !model_picker_modal::effort_levels_for(&model).is_empty()
                 });
+                // Sub-agents inherit the session's reasoning effort by
+                // default (Claude Code only diverges on an explicit
+                // per-call override, which never reaches the transcript),
+                // so the parent's resolved level is the honest best guess
+                // for the child rows — suppressed per-child when the
+                // agent's own model has no effort support (Haiku).
+                let parent_effort = effort.clone();
                 let parent = SessionRef {
                     account_name: ls.account_name.clone(),
                     session_id: ls.session_id.clone(),
@@ -4643,7 +4650,10 @@ fn flatten_sessions(
                     state: SessionState::Active,
                     activity: sub.activity.clone(),
                     permission_mode: None,
-                    effort: None,
+                    effort: parent_effort.clone().filter(|_| {
+                        !sub.model.is_empty()
+                            && !model_picker_modal::effort_levels_for(&sub.model).is_empty()
+                    }),
                     killing: false,
                     subagent: Some(SubAgentTag {
                         parent_session_id: ls.session_id.clone(),

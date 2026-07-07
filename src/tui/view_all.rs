@@ -773,8 +773,8 @@ fn render_sessions_table(
 /// readable text, a coloured live-activity column, and a green `active`
 /// state — rather than reusing the dim style idle sessions wear. When
 /// selected, the row wears the same arrow + yellow-bold chrome as a
-/// session row. Cost dashes out: a sub-agent's spend already rolls up
-/// into the account aggregate, so re-billing it here would double-count.
+/// session row. Cost, tokens and context all come from the sub-agent's
+/// own transcript, which never overlaps the parent session row's figures.
 fn subagent_row(
     s: &SessionRef,
     now: chrono::DateTime<chrono::Utc>,
@@ -857,11 +857,25 @@ fn subagent_row(
             text,
         )));
     }
-    cells.push(Cell::from(Span::styled("—", dim))); // cost — rolled into the account aggregate
-    cells.push(Cell::from(Span::styled(
-        super::view_session::trim_model(&s.model).into_owned(),
-        text,
-    )));
+    // Cost of the sub-agent's own transcript. Doesn't overlap the parent
+    // session row's figure (zero sidechain records land in the parent),
+    // so showing both never double-counts within the table.
+    cells.push(Cell::from(Span::styled(format!("${:.2}", s.cost_usd), text)));
+    // Model + thinking budget (`haiku-4.5` / `sonnet-4.6:high`), same shape
+    // as a session row. The effort is the parent's level the agent inherits;
+    // absent when the agent's model has no effort support.
+    let model_label = super::view_session::trim_model(&s.model).into_owned();
+    let model_cell = match s.effort.as_deref() {
+        Some(eff) => Cell::from(Line::from(vec![
+            Span::styled(model_label, text),
+            Span::styled(
+                format!(":{eff}"),
+                Style::default().fg(super::view_session::effort_color(eff)),
+            ),
+        ])),
+        None => Cell::from(Span::styled(model_label, text)),
+    };
+    cells.push(model_cell);
     cells.push(Cell::from(Span::styled("active", Style::default().fg(Color::Green))));
     Row::new(cells)
 }

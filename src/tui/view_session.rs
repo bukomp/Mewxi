@@ -837,6 +837,15 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
                 .fg(effort_color(eff))
                 .add_modifier(Modifier::BOLD),
         ));
+    } else if s.subagent.is_some() && !s.model.is_empty() {
+        // Sub-agent on an effort-less model (Haiku): the effort badge
+        // above never fires, but the model the agent runs on still has
+        // to be visible in this view — show it bare.
+        push_sep(&mut spans);
+        spans.push(Span::styled(
+            format!("[{}]", trim_model(&s.model)),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
     }
     if let Some(mode_raw) = s.permission_mode.as_deref() {
         let (label, color) = mode_badge(mode_raw);
@@ -909,6 +918,10 @@ fn build_status_reserve_width(s: &SessionRef) -> usize {
         };
         // "[model:effort]"
         w += 2 + model_w + 1 + eff.chars().count();
+    } else if s.subagent.is_some() && !s.model.is_empty() {
+        // "[model]" — the bare sub-agent model badge.
+        push_sep(&mut w);
+        w += 2 + trim_model(&s.model).chars().count();
     }
     if s.permission_mode.is_some() {
         push_sep(&mut w);
