@@ -386,6 +386,13 @@ struct AccountsConfig {
     /// Windows). `~` expands.
     #[serde(default)]
     update_build_dir: Option<String>,
+    /// When true, sub-agent rows suffix their caption with the agent's
+    /// in-flight tool call (`— Bash(cargo test)`). Off by default: the
+    /// caption itself (Claude Code's panel label, or the agent's own
+    /// narration) already says what the agent is doing, and the suffix
+    /// costs caption width.
+    #[serde(default)]
+    subagent_tool_action: Option<bool>,
     /// Folder of user statusline blocks. Files here (override built-in
     /// blocks by id, or add new ones) feed the composable status line.
     /// `~` expands. Default: `<dir(accounts.toml)>/blocks/`
@@ -459,6 +466,10 @@ pub struct AccountsView {
     /// Where self-update clones + builds before installing. `None` =
     /// the OS temp dir.
     pub update_build_dir: Option<PathBuf>,
+    /// Suffix sub-agent captions with the in-flight tool call
+    /// (`— Bash(cargo test)`). `subagent_tool_action` in accounts.toml;
+    /// defaults to false.
+    pub subagent_tool_action: bool,
     /// User statusline blocks folder (tilde-expanded). `None` falls back
     /// to [`default_status_blocks_dir`].
     pub status_blocks_dir: Option<PathBuf>,
@@ -534,6 +545,7 @@ pub fn load_accounts() -> Result<AccountsView> {
     let mut update_build_dir: Option<PathBuf> = None;
     let mut status_blocks_dir: Option<PathBuf> = None;
     let mut status_blocks: Option<Vec<(String, bool)>> = None;
+    let mut subagent_tool_action: bool = false;
 
     if let Some(cfg_path) = config_path() {
         if cfg_path.exists() {
@@ -572,6 +584,9 @@ pub fn load_accounts() -> Result<AccountsView> {
             status_blocks = cfg.status_blocks.map(|rows| {
                 rows.into_iter().map(|r| (r.id, r.enabled)).collect()
             });
+            if let Some(v) = cfg.subagent_tool_action {
+                subagent_tool_action = v;
+            }
             for entry in cfg.accounts {
                 accounts.push(Account {
                     name: entry.name,
@@ -633,6 +648,7 @@ pub fn load_accounts() -> Result<AccountsView> {
         update_prompt,
         update_repo_dir,
         update_build_dir,
+        subagent_tool_action,
         status_blocks_dir,
         status_blocks,
     })

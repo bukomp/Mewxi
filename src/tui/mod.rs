@@ -1279,6 +1279,10 @@ fn run_loop<B: ratatui::backend::Backend>(
     // hits an edge.
     let mut driver_input_scroll: usize = 0;
     let mut defocus_input_after_send: bool = view.defocus_input_after_send;
+    // Config-file-only toggle (no TUI setter): whether sub-agent rows
+    // suffix their caption with the in-flight tool call. Read once at
+    // startup like the rest of accounts.toml.
+    let subagent_tool_action: bool = view.subagent_tool_action;
     let mut default_view_pref =
         view_setup::DefaultView::from_config(view.default_view.as_deref());
     let mut driver_status: Option<(String, Instant)> = None;
@@ -1404,7 +1408,8 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut restart_after_update = false;
 
     loop {
-        let mut sessions = flatten_sessions(&per_account, &driver_optimistic);
+        let mut sessions =
+            flatten_sessions(&per_account, &driver_optimistic, subagent_tool_action);
         apply_killing_overlay(&mut sessions, &mut killing_sessions);
         if selected_session >= sessions.len() && !sessions.is_empty() {
             selected_session = sessions.len() - 1;
@@ -4558,6 +4563,11 @@ fn killing_placeholder(key: &(String, String), entry: &KillingEntry) -> SessionR
 fn flatten_sessions(
     accounts: &[PerAccount],
     optimistic: &HashMap<(String, String), DriverOptimistic>,
+    // When false (the accounts.toml `subagent_tool_action` default),
+    // sub-agent rows drop the `— Tool(arg)` caption suffix at the
+    // source — the row renderer then also skips its make-room
+    // truncation of the caption.
+    show_tool_action: bool,
 ) -> Vec<SessionRef> {
     let mut out: Vec<SessionRef> = accounts
         .iter()
@@ -4676,7 +4686,10 @@ fn flatten_sessions(
                         agent_type: sub.agent_type.clone(),
                         description: sub.description.clone(),
                         workflow: sub.workflow.clone(),
-                        current_action: sub.current_action.clone(),
+                        current_action: sub
+                            .current_action
+                            .clone()
+                            .filter(|_| show_tool_action),
                         narration: sub.narration.clone(),
                         status_label: sub.status_label.clone(),
                     }),

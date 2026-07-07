@@ -366,6 +366,7 @@ mod tests {
             update_prompt: true,
             update_repo_dir: None,
             update_build_dir: None,
+            subagent_tool_action: false,
             status_blocks_dir: Some(dir),
             status_blocks,
         }
