@@ -745,16 +745,29 @@ fn models_match(primary: &str, active: &str) -> bool {
 /// just stripping the vendor prefix.
 pub(crate) fn trim_model(m: &str) -> std::borrow::Cow<'_, str> {
     let trimmed = m.strip_prefix("claude-").unwrap_or(m);
-    if !trimmed.contains("[1m]") {
-        return std::borrow::Cow::Borrowed(trimmed);
+    // Split off a `[1m]` tier suffix so the date check below still fires
+    // on `…-20251001[1m]`-shaped ids.
+    let (base, has_tier) = match trimmed.find("[1m]") {
+        Some(i) => (&trimmed[..i], true),
+        None => (trimmed, false),
+    };
+    // Drop the trailing release-date stamp — model ids read from transcript
+    // records carry it (`haiku-4-5-20251001`), and it's noise in a label.
+    let base = base
+        .rsplit_once('-')
+        .filter(|(_, tail)| tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()))
+        .map(|(head, _)| head)
+        .unwrap_or(base);
+    if !has_tier {
+        return std::borrow::Cow::Borrowed(base);
     }
     // Families that are natively 1M (Fable, Opus 4.8+) drop the tier suffix
     // entirely — it's redundant. Others capitalize it (`[1m]` -> `[1M]`) so
     // it reads consistently with the statusline's `1M` label.
-    if crate::stats::native_1m_context(trimmed) {
-        std::borrow::Cow::Owned(trimmed.replace("[1m]", ""))
+    if crate::stats::native_1m_context(base) {
+        std::borrow::Cow::Borrowed(base)
     } else {
-        std::borrow::Cow::Owned(trimmed.replace("[1m]", "[1M]"))
+        std::borrow::Cow::Owned(format!("{base}[1M]"))
     }
 }
 
@@ -2532,15 +2545,20 @@ mod tests {
     use super::{models_match, trim_model};
 
     #[test]
-    fn trim_model_drops_vendor_prefix() {
+    fn trim_model_drops_vendor_prefix_and_date_stamp() {
         assert_eq!(trim_model("claude-sonnet-4-6"), "sonnet-4-6");
-        assert_eq!(trim_model("claude-haiku-4-5-20251001"), "haiku-4-5-20251001");
+        assert_eq!(trim_model("claude-haiku-4-5-20251001"), "haiku-4-5");
         assert_eq!(trim_model("opus"), "opus");
         assert_eq!(trim_model("default"), "default");
+        // Only an 8-digit trailing segment is a date stamp — version
+        // segments stay.
+        assert_eq!(trim_model("claude-fable-5"), "fable-5");
         // Opus 4.8 is natively 1M, so the tier suffix is dropped entirely;
-        // a 200K family on the opt-in tier keeps the capitalized badge.
+        // a 200K family on the opt-in tier keeps the capitalized badge —
+        // with the date stamp gone in both cases.
         assert_eq!(trim_model("claude-opus-4-8[1m]"), "opus-4-8");
         assert_eq!(trim_model("claude-sonnet-4-6[1m]"), "sonnet-4-6[1M]");
+        assert_eq!(trim_model("claude-haiku-4-5-20251001[1m]"), "haiku-4-5[1M]");
     }
 
     #[test]
