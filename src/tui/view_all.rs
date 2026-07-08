@@ -775,6 +775,15 @@ fn render_sessions_table(
 /// selected, the row wears the same arrow + yellow-bold chrome as a
 /// session row. Cost, tokens and context all come from the sub-agent's
 /// own transcript, which never overlaps the parent session row's figures.
+/// The caption is live: Claude Code's own agent panel label (the
+/// `subagentStatusLine` feed) is shown when fresh, else once the agent has
+/// narrated ("Now checking the rendering code…") that narration replaces
+/// the launch description, which goes stale the moment work begins. When
+/// the transcript tail
+/// additionally shows the agent mid-tool-call, a live action (e.g.
+/// `Read(view_all.rs)`) is appended — the caption is truncated in that
+/// case to keep the action visible on typical widths; with no action it
+/// renders in full.
 fn subagent_row(
     s: &SessionRef,
     now: chrono::DateTime<chrono::Utc>,
@@ -810,7 +819,27 @@ fn subagent_row(
         ));
     }
     let agent_type = tag.and_then(|t| t.agent_type.clone());
-    let description = tag.map(|t| t.description.clone()).unwrap_or_default();
+    let action = tag.and_then(|t| t.current_action.clone());
+    // Precedence is fidelity order: Claude Code's own panel label (fed by
+    // `subagentStatusLine`) beats the agent's own narration, which beats
+    // the static launch description — each is a fallback for the one
+    // before it going stale or never having arrived.
+    let description = tag
+        .and_then(|t| t.status_label.clone())
+        .or_else(|| tag.and_then(|t| t.narration.clone()))
+        .or_else(|| tag.map(|t| t.description.clone()))
+        .unwrap_or_default();
+    // A live action competes with the caption for row width, so shrink
+    // the caption to make room; with no action it's shown in full.
+    let description = if action.is_some() {
+        let mut truncated: String = description.chars().take(32).collect();
+        if description.chars().count() > 32 {
+            truncated.push('…');
+        }
+        truncated
+    } else {
+        description
+    };
     match agent_type {
         Some(t) => {
             label.push(Span::styled(
@@ -820,6 +849,18 @@ fn subagent_row(
             label.push(Span::styled(format!(" · {description}"), text));
         }
         None => label.push(Span::styled(description, text)),
+    }
+    // Appended after the match so it lands in both branches: the live
+    // caption of whatever tool call the agent is currently on, styled
+    // cyan (matching the `↳` lead) to read as the "live" part of the row,
+    // or the uniform selection color when the row is selected.
+    if let Some(action) = action {
+        let action_style = if is_selected {
+            text
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        label.push(Span::styled(format!(" — {action}"), action_style));
     }
     let age = (now - s.last_activity).num_seconds().max(0);
     let mut cells: Vec<Cell> = vec![

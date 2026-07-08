@@ -303,6 +303,30 @@ fn hook_command_clear(binary: &Path, account_dir: &Path) -> String {
     )
 }
 
+/// Command for the undocumented `subagentStatusLine` setting (same block
+/// shape as `statusLine`). Claude Code v2.1.x spawns it every ~5s while
+/// agents run and pipes a JSON payload on stdin whose `tasks[].label` is
+/// the live per-agent status string. No `refreshInterval` here — unlike
+/// `statusLine`, this feed's cadence is fixed inside Claude Code itself.
+fn subagent_status_command(binary: &Path, account_dir: &Path) -> String {
+    format!(
+        "{} hook subagent-status --dir {}",
+        shell_quote(binary),
+        shell_quote(account_dir)
+    )
+}
+
+/// True when `cmd` is our `subagentStatusLine` invocation — `<binary>
+/// hook subagent-status --dir <dir>` — no matter where the binary lived
+/// when it was wired. Mirrors `is_mewxi_hook_command`'s subcommand-based
+/// matching so a binary-path change (or move into ~/.cargo/bin) doesn't
+/// strand the old wiring as unrecognized.
+fn is_mewxi_subagent_status_command(cmd: &str) -> bool {
+    cmd.split_once("hook subagent-status").is_some_and(|(pre, post)| {
+        pre.ends_with(' ') && (post.is_empty() || post.starts_with(' '))
+    })
+}
+
 /// Write a `statusLine` block into `<settings_path>`, preserving any other
 /// keys. Creates parent dirs if missing. Idempotent when already at the
 /// desired shape; returns Ok(false) in that case. If the existing block
@@ -425,6 +449,62 @@ pub fn wire_awaiting_hooks(settings_path: &Path, binary: &Path, account_dir: &Pa
     if !changed {
         return Ok(false);
     }
+    let serialized = serde_json::to_string_pretty(&root)? + "\n";
+    atomic_write(settings_path, serialized.as_bytes())?;
+    Ok(true)
+}
+
+/// Install (or refresh) the `subagentStatusLine` setting in
+/// `<settings_path>` — undocumented `settings.json` key, same block
+/// shape as `statusLine`, that feeds mewxi live per-agent status text
+/// (see `subagent_status_command`). Returns Ok(true) if anything
+/// changed.
+///
+/// Unlike `wire_statusline`, a foreign existing value is left alone
+/// *without* returning an error: this rides along the hook-install path
+/// (`wire_awaiting_hooks`'s call sites), and a hard error there would
+/// abort the whole setup step over an optional, best-effort feature.
+pub fn wire_subagent_statusline(settings_path: &Path, binary: &Path, account_dir: &Path) -> Result<bool> {
+    let desired_cmd = subagent_status_command(binary, account_dir);
+    let desired = serde_json::json!({
+        "type": "command",
+        "command": desired_cmd,
+    });
+
+    let mut root: serde_json::Value = if settings_path.exists() {
+        let s = fs::read_to_string(settings_path)
+            .with_context(|| format!("reading {}", settings_path.display()))?;
+        if s.trim().is_empty() { serde_json::json!({}) } else {
+            serde_json::from_str(&s).with_context(|| format!("parsing {}", settings_path.display()))?
+        }
+    } else {
+        if let Some(parent) = settings_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        serde_json::json!({})
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("{} is not a JSON object", settings_path.display()))?;
+
+    match obj.get("subagentStatusLine") {
+        Some(v) if v == &desired => return Ok(false),
+        Some(v) => {
+            let is_ours = v
+                .get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(is_mewxi_subagent_status_command);
+            if !is_ours {
+                // Foreign value — never overwrite, and never error (see
+                // doc comment above).
+                return Ok(false);
+            }
+            // Same subcommand, different binary/dir → safe to overwrite.
+        }
+        None => {}
+    }
+
+    obj.insert("subagentStatusLine".to_string(), desired);
     let serialized = serde_json::to_string_pretty(&root)? + "\n";
     atomic_write(settings_path, serialized.as_bytes())?;
     Ok(true)
@@ -566,6 +646,38 @@ pub fn unwire_awaiting_hooks(settings_path: &Path) -> Result<bool> {
         atomic_write(settings_path, serialized.as_bytes())?;
     }
     Ok(changed)
+}
+
+/// Remove our `subagentStatusLine` setting from `<settings_path>` —
+/// matched by the mewxi-specific subcommand signature (see
+/// `is_mewxi_subagent_status_command`), so entries wired by an
+/// installation at any past binary path are removed too. A foreign
+/// value is left untouched. No-op if absent. Returns Ok(true) if a
+/// change was made.
+#[allow(dead_code)]
+pub fn unwire_subagent_statusline(settings_path: &Path) -> Result<bool> {
+    if !settings_path.exists() {
+        return Ok(false);
+    }
+    let s = fs::read_to_string(settings_path)?;
+    if s.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut root: serde_json::Value = serde_json::from_str(&s)
+        .with_context(|| format!("parsing {}", settings_path.display()))?;
+    let Some(obj) = root.as_object_mut() else { return Ok(false) };
+    let is_ours = obj
+        .get("subagentStatusLine")
+        .and_then(|v| v.get("command"))
+        .and_then(|c| c.as_str())
+        .is_some_and(is_mewxi_subagent_status_command);
+    if !is_ours {
+        return Ok(false);
+    }
+    obj.remove("subagentStatusLine");
+    let serialized = serde_json::to_string_pretty(&root)? + "\n";
+    atomic_write(settings_path, serialized.as_bytes())?;
+    Ok(true)
 }
 
 /// Remove the `statusLine` block from `<settings_path>`. No-op if the
@@ -1029,6 +1141,11 @@ pub fn apply_all(force: bool, no_live: bool) -> Result<ApplyOutcome> {
             if let Err(e) = wire_awaiting_hooks(&acct.settings_path, &snap.binary, &acct_full.dir) {
                 out.errors.push(format!("{} hooks: {e}", acct.account_name));
             }
+            // Best-effort: wire_subagent_statusline never errors (foreign
+            // values are left alone), but keep the same fall-through shape.
+            if let Err(e) = wire_subagent_statusline(&acct.settings_path, &snap.binary, &acct_full.dir) {
+                out.errors.push(format!("{} subagent statusLine: {e}", acct.account_name));
+            }
         }
     }
     if !snap.watcher.is_ok() {
@@ -1072,6 +1189,11 @@ pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
                 Ok(true) => println!("  [{}] installed awaiting-permission hooks", acct.account_name),
                 Ok(false) => {}
                 Err(e) => println!("  [{}] hooks FAILED: {e}", acct.account_name),
+            }
+            match wire_subagent_statusline(&acct.settings_path, &snap.binary, &acct_full.dir) {
+                Ok(true) => println!("  [{}] installed subagent statusLine", acct.account_name),
+                Ok(false) => {}
+                Err(e) => println!("  [{}] subagent statusLine FAILED: {e}", acct.account_name),
             }
         }
     }
@@ -1349,5 +1471,90 @@ mod tests {
             hooks["SessionStart"][0]["hooks"][0]["command"],
             "foreign-init"
         );
+    }
+
+    #[test]
+    fn subagent_statusline_wires_into_empty_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let changed =
+            wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap();
+        assert!(changed);
+        let s = fs::read_to_string(&settings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            v["subagentStatusLine"]["command"],
+            "/new/mewxi hook subagent-status --dir /acct"
+        );
+        assert_eq!(v["subagentStatusLine"]["type"], "command");
+    }
+
+    #[test]
+    fn subagent_statusline_rewire_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        assert!(
+            wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap()
+        );
+        // Second call with identical args should be a no-op.
+        assert!(
+            !wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap()
+        );
+        // Rewiring with a different binary path (e.g. after a relocate)
+        // still upgrades in place, since the old value is recognized as
+        // ours by subcommand signature.
+        assert!(
+            wire_subagent_statusline(&settings, Path::new("/newer/mewxi"), Path::new("/acct")).unwrap()
+        );
+        let s = fs::read_to_string(&settings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            v["subagentStatusLine"]["command"],
+            "/newer/mewxi hook subagent-status --dir /acct"
+        );
+    }
+
+    #[test]
+    fn subagent_statusline_foreign_value_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let root = serde_json::json!({
+            "subagentStatusLine": {"type": "command", "command": "/usr/bin/other-tool status"}
+        });
+        fs::write(&settings, serde_json::to_string_pretty(&root).unwrap()).unwrap();
+
+        let changed =
+            wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap();
+        assert!(!changed);
+        let s = fs::read_to_string(&settings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["subagentStatusLine"]["command"], "/usr/bin/other-tool status");
+    }
+
+    #[test]
+    fn unwire_subagent_statusline_removes_ours_keeps_foreign() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+
+        // Foreign value: unwire is a no-op.
+        let root = serde_json::json!({
+            "subagentStatusLine": {"type": "command", "command": "/usr/bin/other-tool status"}
+        });
+        fs::write(&settings, serde_json::to_string_pretty(&root).unwrap()).unwrap();
+        assert!(!unwire_subagent_statusline(&settings).unwrap());
+        let s = fs::read_to_string(&settings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["subagentStatusLine"]["command"], "/usr/bin/other-tool status");
+
+        // Our value: gets removed. Start from clean settings — wiring
+        // over the foreign value above is deliberately a no-op.
+        fs::write(&settings, "{}").unwrap();
+        wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap();
+        assert!(unwire_subagent_statusline(&settings).unwrap());
+        let s = fs::read_to_string(&settings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert!(v.get("subagentStatusLine").is_none());
+        // Second unwire is a no-op.
+        assert!(!unwire_subagent_statusline(&settings).unwrap());
     }
 }

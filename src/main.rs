@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 
 mod accounts;
 mod agent_control;
+mod agent_status;
 mod auth;
 mod chat_log;
 mod debug_log;
@@ -107,7 +108,8 @@ enum Cmd {
     /// Internal: hook handler invoked by Claude Code's settings.json hooks.
     /// Reads the hook payload JSON from stdin, extracts session_id, and
     /// touches or removes `<dir>/sessions/<session_id>.awaiting` so the
-    /// TUI knows a permission dialog is up.
+    /// TUI knows a permission dialog is up; also receives the
+    /// `subagentStatusLine` feed so the TUI can label sub-agent rows.
     #[command(hide = true)]
     Hook {
         #[command(subcommand)]
@@ -125,6 +127,14 @@ enum HookAction {
     },
     /// Clear the awaiting-permission marker for the calling session.
     AwaitingClear {
+        /// `CLAUDE_CONFIG_DIR` of the account that installed the hook.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+    },
+    /// Receive one `subagentStatusLine` payload from Claude Code and
+    /// persist it so the TUI can label sub-agent rows with the same live
+    /// summaries Claude Code's agent panel shows.
+    SubagentStatus {
         /// `CLAUDE_CONFIG_DIR` of the account that installed the hook.
         #[arg(long)]
         dir: std::path::PathBuf,
@@ -405,9 +415,20 @@ fn read_hook_payload_from_stdin() -> Option<(String, Option<String>)> {
 fn run_hook(action: HookAction) -> Result<()> {
     // Hooks must never fail Claude Code — silently no-op on bad input.
     // Claude Code waits for the hook to exit; we want it back fast.
+    if let HookAction::SubagentStatus { dir } = action {
+        // `subagentStatusLine` output is parsed by Claude Code as row
+        // decoration JSON; printing anything here would surface as a
+        // schema error, so this path must stay silent on stdout.
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_to_string(&mut buf);
+        let _ = crate::agent_status::write_feed(&dir, &buf);
+        return Ok(());
+    }
     let (dir, do_set) = match action {
         HookAction::AwaitingSet { dir } => (dir, true),
         HookAction::AwaitingClear { dir } => (dir, false),
+        HookAction::SubagentStatus { .. } => unreachable!(),
     };
     let Some((session_id, mode)) = read_hook_payload_from_stdin() else {
         return Ok(());

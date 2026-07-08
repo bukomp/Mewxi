@@ -136,6 +136,100 @@ fn classify_tool(name: &str) -> Activity {
     }
 }
 
+/// Max length of the salient-argument portion of a tool action caption
+/// (e.g. the `view_all.rs` in `Read(view_all.rs)`). Long args (a giant
+/// grep pattern, a multi-line bash command) would blow out the sub-agent
+/// row's fixed-width caption column, so we cap and ellipsize instead of
+/// wrapping or truncating the whole row layout.
+const ACTION_ARG_MAX_CHARS: usize = 40;
+
+/// Cap for a narration snippet (see [`latest_narration`]). Longer than a
+/// tool arg — it's a sentence, not a path — but still bounded so one
+/// verbose agent can't blow out every consumer's layout math.
+const NARRATION_MAX_CHARS: usize = 80;
+
+/// Collapse embedded newlines/tabs to spaces and cap length. Truncation
+/// is char-boundary-safe (`.chars()`) since the text can contain
+/// multi-byte UTF-8 (paths, search patterns, prose) that a byte-offset
+/// slice would split.
+fn sanitize_snippet(s: &str, max_chars: usize) -> String {
+    let collapsed: String = s
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .collect();
+    let trimmed = collapsed.trim();
+    if trimmed.chars().count() > max_chars {
+        let head: String = trimmed.chars().take(max_chars).collect();
+        format!("{head}…")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Tool-argument variant of [`sanitize_snippet`], matching how Claude
+/// Code's own UI renders a tool argument inline.
+fn sanitize_caption_arg(s: &str) -> String {
+    sanitize_snippet(s, ACTION_ARG_MAX_CHARS)
+}
+
+/// Build a Claude-Code-style caption for a tool call — short tool name
+/// plus whichever input field is the salient argument for that tool,
+/// e.g. `Read(view_all.rs)`, `Bash(cargo test)`, `Grep(subagent)`. Falls
+/// back to just the short name when `input` is absent or none of the
+/// expected keys are present (covers exotic/MCP tools we don't special-
+/// case). Unlike [`classify_tool`], which lowercases for matching
+/// purposes only, the caption keeps the tool's original capitalization
+/// since it's meant to read like Claude Code's own UI.
+fn tool_action_caption(name: &str, input: Option<&serde_json::Value>) -> String {
+    let short = name.rsplit("__").next().unwrap_or(name);
+    let lower = short.to_ascii_lowercase();
+    let arg = input.and_then(|input| {
+        let get_str = |key: &str| {
+            input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        };
+        match lower.as_str() {
+            "read" | "edit" | "write" | "notebookedit" => get_str("file_path").map(|s| {
+                std::path::Path::new(s)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(s)
+                    .to_string()
+            }),
+            "bash" => get_str("description")
+                .or_else(|| get_str("command"))
+                .map(String::from),
+            "grep" | "glob" => get_str("pattern").map(String::from),
+            "webfetch" => get_str("url").map(String::from),
+            "websearch" | "toolsearch" => get_str("query").map(String::from),
+            "agent" | "task" => get_str("description").map(String::from),
+            "skill" => get_str("skill").map(String::from),
+            // No dedicated arm — try the usual suspects in priority order
+            // so an unrecognized (often MCP) tool still gets *something*
+            // more useful than a bare name when it can.
+            _ => [
+                "description",
+                "file_path",
+                "path",
+                "pattern",
+                "query",
+                "url",
+                "command",
+                "prompt",
+            ]
+            .iter()
+            .find_map(|k| get_str(k))
+            .map(String::from),
+        }
+    });
+    match arg {
+        Some(a) => format!("{short}({})", sanitize_caption_arg(&a)),
+        None => short.to_string(),
+    }
+}
+
 /// Inspect one JSONL record and report the activity it implies, or None
 /// if it's a record kind that says nothing about what Claude is doing
 /// (attachment, ai-title, file-history-snapshot, etc.).
@@ -201,6 +295,33 @@ fn classify_record(j: &serde_json::Value) -> Option<Activity> {
     }
 }
 
+/// Find the content item [`classify_record`] would treat as "the last
+/// meaningful thing in this assistant turn" and, if it's a `tool_use`,
+/// return that item so callers can pull `name`/`input` off it. Mirrors
+/// classify_record's reverse walk exactly — thinking/text short-circuit
+/// to None there too — so the two never disagree about which item is
+/// current.
+fn last_tool_use(j: &serde_json::Value) -> Option<&serde_json::Value> {
+    let arr = j.get("message")?.get("content")?.as_array()?;
+    for ci in arr.iter().rev() {
+        let Some(ct) = ci.get("type").and_then(|x| x.as_str()) else { continue };
+        match ct {
+            "tool_use" => return Some(ci),
+            "thinking" | "text" => return None,
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// Action caption for an assistant record's trailing `tool_use`, or None
+/// if it doesn't end in one (see [`last_tool_use`]).
+fn tool_use_caption(j: &serde_json::Value) -> Option<String> {
+    let ci = last_tool_use(j)?;
+    let name = ci.get("name").and_then(|x| x.as_str()).unwrap_or("");
+    Some(tool_action_caption(name, ci.get("input")))
+}
+
 /// Read the last `max_bytes` of `path` as a string, discarding any
 /// partial leading line so callers can safely split on `\n`. Returns
 /// None on read errors or empty files.
@@ -252,6 +373,25 @@ pub enum TailKind {
     Completed(Activity),
 }
 
+/// What the transcript tail says the session/agent is doing, plus a
+/// detailed caption of the current tool call when there is one.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TailStatus {
+    pub kind: TailKind,
+    /// Detailed caption of the current/most-recent tool call — tool name
+    /// plus its salient argument, e.g. `Read(view_all.rs)`,
+    /// `Bash(cargo test)`. `None` when the tail activity is not a tool
+    /// (thinking / writing / starting).
+    pub action: Option<String>,
+    /// The agent's most recent narration line — the last assistant `text`
+    /// block in the tail, first non-empty line. Agents narrate between
+    /// tool calls ("Now checking the rendering code…"), so this reads as
+    /// a live description of what the work currently *is*, where `action`
+    /// only says which tool it's touching. `None` until the first text
+    /// block lands.
+    pub narration: Option<String>,
+}
+
 /// Max age of a `tool_result` tail for which we still carry the
 /// preceding tool's activity. Past this, Claude has had enough time
 /// that the pause is a real reasoning pause, not the inter-record gap
@@ -259,11 +399,56 @@ pub enum TailKind {
 const TOOL_RESULT_CARRY_WINDOW: chrono::Duration = chrono::Duration::milliseconds(1500);
 
 /// Walk the tail of a transcript backwards looking for the most recent
-/// record that implies an activity. Returns None if nothing meaningful
-/// is found in the inspected window.
-pub(crate) fn tail_activity(path: &Path) -> Option<TailKind> {
+/// record that implies an activity, plus the action caption of the
+/// current tool call and the latest narration line. Returns None if
+/// nothing meaningful is found in the inspected window.
+pub(crate) fn tail_status(path: &Path) -> Option<TailStatus> {
     let tail = read_tail(path, 256 * 1024)?;
-    classify_tail(&tail, Utc::now())
+    let mut status = classify_tail(&tail, Utc::now())?;
+    status.narration = latest_narration(&tail);
+    Some(status)
+}
+
+/// The most recent assistant `text` block anywhere in the tail — unlike
+/// [`classify_tail`], which stops at the newest meaningful record, this
+/// walks past tool_use/tool_result records to whatever the agent last
+/// *said*. That's the between-tool-calls status note ("Now checking the
+/// rendering code…") a sub-agent row wants in place of its stale launch
+/// description. An agent's final answer is a text block too, but the
+/// completion scan drops the row before that could mislead anyone.
+fn latest_narration(tail: &str) -> Option<String> {
+    for line in tail.lines().rev() {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if v.get("type").and_then(|x| x.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(arr) = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for ci in arr.iter().rev() {
+            if ci.get("type").and_then(|x| x.as_str()) != Some("text") {
+                continue;
+            }
+            let Some(text) = ci.get("text").and_then(|x| x.as_str()) else { continue };
+            if let Some(first) = text.lines().map(str::trim).find(|l| !l.is_empty()) {
+                return Some(sanitize_snippet(first, NARRATION_MAX_CHARS));
+            }
+        }
+    }
+    None
+}
+
+/// Thin wrapper over [`tail_status`] for callers (`scan()` below) that
+/// only care about the coarse activity, not the detailed caption.
+pub(crate) fn tail_activity(path: &Path) -> Option<TailKind> {
+    tail_status(path).map(|s| s.kind)
 }
 
 /// Walk the tail of a transcript backwards looking for the most recent
@@ -327,7 +512,7 @@ fn hook_permission_mode(account: &Account, session_id: &str) -> Option<(String, 
     Some((mode.to_string(), mtime))
 }
 
-fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailKind> {
+fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailStatus> {
     let lines: Vec<&str> = tail.lines().collect();
 
     for (idx, line) in lines.iter().enumerate().rev() {
@@ -351,15 +536,25 @@ fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailKind> {
         // so the activity column actually surfaces real reasoning pauses
         // as `thinking`.
         if t == "user" && a == Activity::Thinking && record_is_recent(&v, now) {
-            if let Some(tool_a) = preceding_tool_activity(&lines[..idx]) {
-                return Some(TailKind::Completed(tool_a));
+            if let Some((tool_a, action)) = preceding_tool_activity(&lines[..idx]) {
+                return Some(TailStatus {
+                    kind: TailKind::Completed(tool_a),
+                    action,
+                    narration: None,
+                });
             }
         }
 
         // An assistant record we just classified as a tool is by
         // definition unresolved — nothing came after it in the file.
         let is_pending = t == "assistant" && is_tool_activity(&a);
-        return Some(if is_pending { TailKind::PendingTool(a) } else { TailKind::Completed(a) });
+        // Only a still-pending tool_use has an "argument" worth
+        // captioning — completed thinking/text/starting records don't.
+        // Narration is filled in by `tail_status` from a separate walk —
+        // it needs to look past the newest record this walk stops at.
+        let action = if is_pending { tool_use_caption(&v) } else { None };
+        let kind = if is_pending { TailKind::PendingTool(a) } else { TailKind::Completed(a) };
+        return Some(TailStatus { kind, action, narration: None });
     }
     None
 }
@@ -378,10 +573,11 @@ fn record_is_recent(v: &serde_json::Value, now: DateTime<Utc>) -> bool {
 }
 
 /// Walk `prior` lines (older-first) in reverse and return the tool
-/// activity of the most recent assistant record, if that record was a
-/// tool_use. If the most recent assistant record was thinking/text (no
-/// tool), or there is none in window, returns None.
-fn preceding_tool_activity(prior: &[&str]) -> Option<Activity> {
+/// activity — and its action caption — of the most recent assistant
+/// record, if that record was a tool_use. If the most recent assistant
+/// record was thinking/text (no tool), or there is none in window,
+/// returns None.
+fn preceding_tool_activity(prior: &[&str]) -> Option<(Activity, Option<String>)> {
     for line in prior.iter().rev() {
         if line.is_empty() {
             continue;
@@ -391,7 +587,10 @@ fn preceding_tool_activity(prior: &[&str]) -> Option<Activity> {
             continue;
         }
         let a = classify_record(&v)?;
-        return is_tool_activity(&a).then_some(a);
+        if !is_tool_activity(&a) {
+            return None;
+        }
+        return Some((a, tool_use_caption(&v)));
     }
     None
 }
@@ -791,7 +990,13 @@ pub fn scan(
         // currently-running ones (fresh transcript, not yet returned) —
         // see [`crate::subagents::scan_running`]. Cheap when the session
         // isn't delegating: it early-outs on a missing `subagents/` dir.
-        let subagents = crate::subagents::scan_running(&transcript, &marker.session_id);
+        // `account.dir` also lets it pick up the `subagentStatusLine` feed
+        // for live per-agent status captions, when one is being written.
+        let subagents = crate::subagents::scan_running(
+            &transcript,
+            &marker.session_id,
+            Some(&account.dir),
+        );
 
         out.push(LiveSession {
             account_name: account.name.clone(),
@@ -865,6 +1070,14 @@ mod tests {
             r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"{name}"}}]}}}}"#
         )
     }
+    /// Variant of [`assistant_tool_use`] carrying an `input` object, for
+    /// tests exercising the action-caption extraction. `input` must be a
+    /// raw JSON object literal, e.g. `r#"{"file_path":"/a/b.rs"}"#`.
+    fn assistant_tool_use_with_input(name: &str, input: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"{name}","input":{input}}}]}}}}"#
+        )
+    }
     fn user_tool_result() -> &'static str {
         r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#
     }
@@ -884,7 +1097,23 @@ mod tests {
         // nothing after it yet. Must surface as Pending so the marker's
         // `idle` (e.g. AskUserQuestion) can't downgrade us to Waiting.
         let tail = format!("{}\n{}\n", assistant_thinking(), assistant_tool_use("Read"));
-        assert_eq!(classify_tail(&tail, now()), Some(TailKind::PendingTool(Activity::Reading)));
+        assert_eq!(
+            classify_tail(&tail, now()).map(|s| s.kind),
+            Some(TailKind::PendingTool(Activity::Reading))
+        );
+    }
+
+    #[test]
+    fn pending_tool_action_caption_uses_file_basename() {
+        // Requirement: a pending Read with a file_path input surfaces a
+        // Claude-Code-style caption — short name plus the basename.
+        let tail = format!(
+            "{}\n",
+            assistant_tool_use_with_input("Read", r#"{"file_path":"/a/b/view_all.rs"}"#)
+        );
+        let status = classify_tail(&tail, now()).unwrap();
+        assert_eq!(status.kind, TailKind::PendingTool(Activity::Reading));
+        assert_eq!(status.action.as_deref(), Some("Read(view_all.rs)"));
     }
 
     #[test]
@@ -900,15 +1129,42 @@ mod tests {
             assistant_tool_use("Read"),
             user_tool_result()
         );
-        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Reading)));
+        assert_eq!(
+            classify_tail(&tail, now()).map(|s| s.kind),
+            Some(TailKind::Completed(Activity::Reading))
+        );
+    }
+
+    #[test]
+    fn carry_back_action_caption_uses_preceding_tool_input() {
+        // Requirement: the carry-back path must surface the *preceding*
+        // tool_use's caption, not just its Activity. Bash prefers
+        // `description` over the raw `command` when both are present.
+        let tail = format!(
+            "{}\n{}\n",
+            assistant_tool_use_with_input(
+                "Bash",
+                r#"{"command":"cargo test","description":"Run tests"}"#
+            ),
+            user_tool_result()
+        );
+        let status = classify_tail(&tail, now()).unwrap();
+        assert_eq!(status.kind, TailKind::Completed(Activity::Running));
+        assert_eq!(status.action.as_deref(), Some("Bash(Run tests)"));
     }
 
     #[test]
     fn carry_works_for_bash_and_edit_too() {
         let bash_tail = format!("{}\n{}\n", assistant_tool_use("Bash"), user_tool_result());
-        assert_eq!(classify_tail(&bash_tail, now()), Some(TailKind::Completed(Activity::Running)));
+        assert_eq!(
+            classify_tail(&bash_tail, now()).map(|s| s.kind),
+            Some(TailKind::Completed(Activity::Running))
+        );
         let edit_tail = format!("{}\n{}\n", assistant_tool_use("Edit"), user_tool_result());
-        assert_eq!(classify_tail(&edit_tail, now()), Some(TailKind::Completed(Activity::Editing)));
+        assert_eq!(
+            classify_tail(&edit_tail, now()).map(|s| s.kind),
+            Some(TailKind::Completed(Activity::Editing))
+        );
     }
 
     #[test]
@@ -921,30 +1177,39 @@ mod tests {
             assistant_tool_use("Read"),
             user_tool_result_at(recent)
         );
-        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Reading)));
+        assert_eq!(
+            classify_tail(&tail, now()).map(|s| s.kind),
+            Some(TailKind::Completed(Activity::Reading))
+        );
     }
 
     #[test]
     fn stale_tool_result_flips_to_thinking() {
         // tool_result is 5s old — Claude is past the cascade window and
         // is genuinely reasoning before the next action. Show Thinking
-        // rather than continuing to claim the tool is the activity.
+        // rather than continuing to claim the tool is the activity, and
+        // there's no "current tool" left to caption.
         let stale = now() - chrono::Duration::seconds(5);
         let tail = format!(
             "{}\n{}\n",
             assistant_tool_use("Read"),
             user_tool_result_at(stale)
         );
-        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Thinking)));
+        let status = classify_tail(&tail, now()).unwrap();
+        assert_eq!(status.kind, TailKind::Completed(Activity::Thinking));
+        assert_eq!(status.action, None);
     }
 
     #[test]
     fn thinking_only_tail_stays_thinking() {
         // Claude has emitted a thinking block but not yet the tool_use.
         // No prior tool to carry; must read as Completed(Thinking) so the
-        // activity column actually says "thinking" during this window.
+        // activity column actually says "thinking" during this window,
+        // with no action caption (there's no tool call to describe).
         let tail = format!("{}\n", assistant_thinking());
-        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Thinking)));
+        let status = classify_tail(&tail, now()).unwrap();
+        assert_eq!(status.kind, TailKind::Completed(Activity::Thinking));
+        assert_eq!(status.action, None);
     }
 
     #[test]
@@ -953,14 +1218,20 @@ mod tests {
         // tool_use anywhere in window. Carry-back finds nothing → fall
         // through to the original Completed(Thinking) classification.
         let tail = format!("{}\n", user_tool_result());
-        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Thinking)));
+        assert_eq!(
+            classify_tail(&tail, now()).map(|s| s.kind),
+            Some(TailKind::Completed(Activity::Thinking))
+        );
     }
 
     #[test]
     fn final_text_classifies_as_writing() {
         // End of turn: assistant ends with a text block, no tool to carry.
         let tail = format!("{}\n", assistant_text());
-        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Writing)));
+        assert_eq!(
+            classify_tail(&tail, now()).map(|s| s.kind),
+            Some(TailKind::Completed(Activity::Writing))
+        );
     }
 
     #[test]
@@ -982,7 +1253,7 @@ mod tests {
             r#"{"type":"user","message":{"content":[{"type":"text","text":"<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>"}]}}"#
         );
         assert_eq!(
-            classify_tail(&tail, now()),
+            classify_tail(&tail, now()).map(|s| s.kind),
             Some(TailKind::Completed(Activity::Writing))
         );
     }
@@ -998,6 +1269,85 @@ mod tests {
             r#"{"type":"ai-title"}"#,
             r#"{"type":"file-history-snapshot"}"#
         );
-        assert_eq!(classify_tail(&tail, now()), Some(TailKind::Completed(Activity::Running)));
+        assert_eq!(
+            classify_tail(&tail, now()).map(|s| s.kind),
+            Some(TailKind::Completed(Activity::Running))
+        );
+    }
+
+    #[test]
+    fn mcp_prefixed_tool_with_no_matching_keys_falls_back_to_short_name() {
+        // classify_tool lowercases only for matching; the caption itself
+        // preserves the tool's actual capitalization (here already
+        // lowercase upstream of the mcp__ prefix). No key in `input`
+        // matches the generic fallback list, so the caption is bare.
+        let tail = format!(
+            "{}\n",
+            assistant_tool_use_with_input("mcp__github__get_pr", r#"{"owner":"acme"}"#)
+        );
+        let status = classify_tail(&tail, now()).unwrap();
+        assert_eq!(status.action.as_deref(), Some("get_pr"));
+    }
+
+    #[test]
+    fn unrecognized_tool_falls_back_to_first_present_key() {
+        // Tools with no dedicated arm (exotic/MCP) still get an action,
+        // matched against the first present key in priority order —
+        // here `query` from an unmatched search-style MCP tool.
+        let tail = format!(
+            "{}\n",
+            assistant_tool_use_with_input("mcp__search__lookup", r#"{"query":"open issues"}"#)
+        );
+        let status = classify_tail(&tail, now()).unwrap();
+        assert_eq!(status.action.as_deref(), Some("lookup(open issues)"));
+    }
+
+    #[test]
+    fn narration_surfaces_latest_text_past_tool_records() {
+        // The agent narrated, then fired two tools. classify_tail stops
+        // at the pending tool_use; narration must keep walking back to
+        // the text block and surface its first non-empty line.
+        let tail = format!(
+            "{}\n{}\n{}\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"\nNow checking the rendering code\nsecond line"}]}}"#,
+            assistant_tool_use("Read"),
+            assistant_tool_use("Grep"),
+        );
+        assert_eq!(
+            latest_narration(&tail).as_deref(),
+            Some("Now checking the rendering code")
+        );
+    }
+
+    #[test]
+    fn narration_none_without_any_text_block() {
+        // Tool-only tail (agent hasn't said anything yet) — no narration,
+        // so consumers fall back to the static launch description.
+        let tail = format!("{}\n{}\n", assistant_tool_use("Read"), user_tool_result());
+        assert_eq!(latest_narration(&tail), None);
+    }
+
+    #[test]
+    fn narration_caps_at_80_chars() {
+        let long = "n".repeat(100);
+        let tail = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{long}"}}]}}}}"#
+        );
+        let expected = format!("{}…", "n".repeat(80));
+        assert_eq!(latest_narration(&tail).as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn long_argument_truncates_to_40_chars() {
+        // A 60-char grep pattern must not blow out the caption column —
+        // cap at 40 chars and mark the cut with an ellipsis.
+        let pattern = "a".repeat(60);
+        let tail = format!(
+            "{}\n",
+            assistant_tool_use_with_input("Grep", &format!(r#"{{"pattern":"{pattern}"}}"#))
+        );
+        let status = classify_tail(&tail, now()).unwrap();
+        let expected = format!("Grep({}…)", "a".repeat(40));
+        assert_eq!(status.action.as_deref(), Some(expected.as_str()));
     }
 }
