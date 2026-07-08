@@ -958,6 +958,16 @@ pub fn set_defocus_input_after_send(enabled: bool) -> Result<()> {
     })
 }
 
+/// Persist whether sub-agent captions carry the `— Tool(arg)` suffix.
+pub fn set_subagent_tool_action(enabled: bool) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert(
+            "subagent_tool_action".to_string(),
+            toml::Value::Boolean(enabled),
+        );
+    })
+}
+
 /// Persist which view opens when the TUI starts
 /// (`"all"` / `"session"` / `"account"` / `"config"`).
 pub fn set_default_view(view: &str) -> Result<()> {

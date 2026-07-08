@@ -1279,10 +1279,10 @@ fn run_loop<B: ratatui::backend::Backend>(
     // hits an edge.
     let mut driver_input_scroll: usize = 0;
     let mut defocus_input_after_send: bool = view.defocus_input_after_send;
-    // Config-file-only toggle (no TUI setter): whether sub-agent rows
-    // suffix their caption with the in-flight tool call. Read once at
-    // startup like the rest of accounts.toml.
-    let subagent_tool_action: bool = view.subagent_tool_action;
+    // Whether sub-agent rows suffix their caption with the in-flight
+    // tool call. Persisted as `subagent_tool_action` in accounts.toml,
+    // toggleable from the Config view like `defocus_input_after_send`.
+    let mut subagent_tool_action: bool = view.subagent_tool_action;
     let mut default_view_pref =
         view_setup::DefaultView::from_config(view.default_view.as_deref());
     let mut driver_status: Option<(String, Instant)> = None;
@@ -1927,6 +1927,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 setup_snapshot.as_ref(),
                 combined_message.as_deref(),
                 defocus_input_after_send,
+                subagent_tool_action,
                 default_view_pref,
                 &update_ui,
                 live_error,
@@ -3750,6 +3751,23 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             }
                                         }
                                     }
+                                    Some(view_setup::ConfigItem::SubagentToolActionToggle) => {
+                                        let next = !subagent_tool_action;
+                                        match accounts::set_subagent_tool_action(next) {
+                                            Ok(()) => {
+                                                subagent_tool_action = next;
+                                                setup_message = Some(format!(
+                                                    "sub-agent tool call suffix: {}",
+                                                    if next { "on" } else { "off" }
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
                                     Some(view_setup::ConfigItem::StatusLineComposer) => {
                                         composer_modal = Some(ComposerModal::new(
                                             crate::statusline::composer_rows(&view),
@@ -4187,6 +4205,7 @@ fn render(
     setup: Option<&SetupSnapshot>,
     setup_message: Option<&str>,
     defocus_input_after_send: bool,
+    subagent_tool_action: bool,
     default_view: view_setup::DefaultView,
     update_ui: &view_setup::UpdateUi,
     live_error: Option<&str>,
@@ -4273,6 +4292,7 @@ fn render(
             setup_scroll,
             setup_message,
             defocus_input_after_send,
+            subagent_tool_action,
             default_view,
             update_ui,
             setup_rect,

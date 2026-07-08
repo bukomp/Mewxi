@@ -39,6 +39,9 @@ pub enum ConfigItem {
     UpdateCheckNow,
     DefaultView,
     DefocusToggle,
+    /// Toggles the `— Tool(arg)` suffix on sub-agent row captions
+    /// (`subagent_tool_action` in accounts.toml).
+    SubagentToolActionToggle,
     /// Opens the status-line block composer modal.
     StatusLineComposer,
 }
@@ -109,6 +112,7 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
     v.push(ConfigItem::UpdateCheckNow);
     v.push(ConfigItem::DefaultView);
     v.push(ConfigItem::DefocusToggle);
+    v.push(ConfigItem::SubagentToolActionToggle);
     v.push(ConfigItem::StatusLineComposer);
     v
 }
@@ -143,6 +147,7 @@ pub fn render(
     scroll: &mut usize,
     last_message: Option<&str>,
     defocus_input_after_send: bool,
+    subagent_tool_action: bool,
     default_view: DefaultView,
     update: &UpdateUi,
     setup_rect: &mut Option<Rect>,
@@ -159,8 +164,8 @@ pub fn render(
 
     render_header(f, rows[0], snap, update);
     *setup_rect = Some(rows[1]);
-    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, default_view, update);
-    render_info(f, rows[2], snap, selected, defocus_input_after_send, default_view, update, last_message);
+    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, update);
+    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, update, last_message);
     render_footer(
         f,
         rows[3],
@@ -235,6 +240,7 @@ fn build_lines(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     defocus: bool,
+    subagent_tool_action: bool,
     default_view: DefaultView,
     update: &UpdateUi,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
@@ -446,6 +452,20 @@ fn build_lines(
                     "unfocus the prompt box after sending".to_string(),
                 ));
                 owners.push(Some(i));
+            }
+            ConfigItem::SubagentToolActionToggle => {
+                let (txt, color) = if subagent_tool_action {
+                    ("✓ on", Color::Green)
+                } else {
+                    ("off", Color::Yellow)
+                };
+                lines.push(row(
+                    i,
+                    "sub-agent tool call".to_string(),
+                    bold(format!("{txt:<16}"), color),
+                    "suffix agent captions with the in-flight tool".to_string(),
+                ));
+                owners.push(Some(i));
 
                 push_header(&mut lines, &mut owners, "Status line", false);
             }
@@ -471,6 +491,7 @@ fn render_list(
     selected: usize,
     scroll: &mut usize,
     defocus: bool,
+    subagent_tool_action: bool,
     default_view: DefaultView,
     update: &UpdateUi,
 ) {
@@ -487,7 +508,8 @@ fn render_list(
         return;
     }
 
-    let (lines, owners) = build_lines(snap, selected, defocus, default_view, update);
+    let (lines, owners) =
+        build_lines(snap, selected, defocus, subagent_tool_action, default_view, update);
 
     // Edge-triggered scrolling: the cursor moves freely inside the visible
     // window and the list only scrolls once the cursor reaches the top or
@@ -520,6 +542,7 @@ fn action_hint(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     defocus: bool,
+    subagent_tool_action: bool,
     default_view: DefaultView,
     update: &UpdateUi,
 ) -> String {
@@ -607,6 +630,12 @@ fn action_hint(
         } else {
             "Enter: unfocus the prompt box after sending (keys go back to navigation)".to_string()
         },
+        ConfigItem::SubagentToolActionToggle => if subagent_tool_action {
+            "Enter: hide the — Tool(arg) suffix on sub-agent captions".to_string()
+        } else {
+            "Enter: show the agent's in-flight tool call after its caption — e.g. — Bash(cargo test)"
+                .to_string()
+        },
         ConfigItem::StatusLineComposer => {
             "Enter: open the status-line composer — reorder / toggle / add / edit blocks with a live preview"
                 .to_string()
@@ -620,11 +649,12 @@ fn render_info(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     defocus: bool,
+    subagent_tool_action: bool,
     default_view: DefaultView,
     update: &UpdateUi,
     last_message: Option<&str>,
 ) {
-    let hint = action_hint(snap, selected, defocus, default_view, update);
+    let hint = action_hint(snap, selected, defocus, subagent_tool_action, default_view, update);
     let msg_line = match last_message {
         Some(m) => Line::from(Span::styled(m.to_string(), Style::default().fg(Color::Cyan))),
         None => Line::from(Span::styled(
@@ -700,9 +730,10 @@ mod tests {
         assert_eq!(list[8], ConfigItem::UpdateCheckNow);
         assert_eq!(list[9], ConfigItem::DefaultView);
         assert_eq!(list[10], ConfigItem::DefocusToggle);
-        assert_eq!(list[11], ConfigItem::StatusLineComposer);
+        assert_eq!(list[11], ConfigItem::SubagentToolActionToggle);
+        assert_eq!(list[12], ConfigItem::StatusLineComposer);
         // No snapshot yet → only the fixed rows.
-        assert_eq!(items(None).len(), 10);
+        assert_eq!(items(None).len(), 11);
     }
 
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
@@ -721,6 +752,7 @@ mod tests {
                     &mut scroll,
                     Some("did a thing"),
                     true,
+                    false,
                     DefaultView::All,
                     &update_ui(status.as_ref()),
                     &mut rect,
