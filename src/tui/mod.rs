@@ -158,6 +158,12 @@ pub struct SubAgentTag {
     /// present — `narration`/`description` are the fallbacks for when
     /// the feed isn't wired up or has gone stale.
     pub status_label: Option<String>,
+    /// Nesting depth from the sidecar's `spawnDepth`: 1 for an agent the
+    /// session's main loop delegated to, 2 for one spawned *by* a depth-1
+    /// agent (fork-style nesting), and so on. The scan emits rows in DFS
+    /// tree order, so the renderer only needs this to widen the indent —
+    /// a child already sits directly under the agent that spawned it.
+    pub depth: u32,
 }
 
 /// Optimistic per-driver state for things mewxi just commanded but
@@ -4712,6 +4718,7 @@ fn flatten_sessions(
                             .filter(|_| show_tool_action),
                         narration: sub.narration.clone(),
                         status_label: sub.status_label.clone(),
+                        depth: sub.depth,
                     }),
                 }));
                 rows
@@ -4810,6 +4817,7 @@ mod tests {
                 current_action: None,
                 narration: None,
                 status_label: None,
+                depth: 1,
             }),
         }
     }

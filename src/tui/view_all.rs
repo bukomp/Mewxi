@@ -767,23 +767,27 @@ fn render_sessions_table(
 /// One indented child row beneath a session for a sub-agent it is
 /// currently running (`s.subagent` is `Some`) — either a plain Agent/Task
 /// delegation, or one of a Workflow's internal `agent()` calls (tagged
-/// with a `⚙ <workflow name>` prefix so the two aren't confused). These
-/// rows only exist while the delegation is live (dropped the moment its
-/// completion is detected), so the row is styled to read as *active* —
-/// readable text, a coloured live-activity column, and a green `active`
-/// state — rather than reusing the dim style idle sessions wear. When
-/// selected, the row wears the same arrow + yellow-bold chrome as a
+/// with a `⚙ <workflow name>` prefix so the two aren't confused). An agent
+/// can itself spawn further agents, so rows carry a `depth` (1 for agents
+/// launched by the session's own transcript, 2+ for agents launched by
+/// another agent) and indent two extra columns per level beyond 1 — the
+/// scanner already hands rows to us in DFS order, so a nested agent's row
+/// simply follows its parent's with a deeper indent, no separate tree walk
+/// needed here. These rows only exist while the delegation is live (dropped
+/// the moment its completion is detected), so the row is styled to read as
+/// *active* — readable text, a coloured live-activity column, and a green
+/// `active` state — rather than reusing the dim style idle sessions wear.
+/// When selected, the row wears the same arrow + yellow-bold chrome as a
 /// session row. Cost, tokens and context all come from the sub-agent's
 /// own transcript, which never overlaps the parent session row's figures.
 /// The caption is live: Claude Code's own agent panel label (the
 /// `subagentStatusLine` feed) is shown when fresh, else once the agent has
 /// narrated ("Now checking the rendering code…") that narration replaces
 /// the launch description, which goes stale the moment work begins. When
-/// the transcript tail
-/// additionally shows the agent mid-tool-call, a live action (e.g.
-/// `Read(view_all.rs)`) is appended — the caption is truncated in that
-/// case to keep the action visible on typical widths; with no action it
-/// renders in full.
+/// the transcript tail additionally shows the agent mid-tool-call, a live
+/// action (e.g. `Read(view_all.rs)`) is appended — the caption is truncated
+/// in that case to keep the action visible on typical widths; with no
+/// action it renders in full.
 fn subagent_row(
     s: &SessionRef,
     now: chrono::DateTime<chrono::Utc>,
@@ -802,13 +806,21 @@ fn subagent_row(
             Style::default().fg(Color::Gray),
         )
     };
-    // Indent two further than the session's "  ▶ name" so the tree nests:
+    // Indent two further than the session's "  ▶ name" so the tree nests,
+    // then two more per level of nesting beyond depth 1 so an agent spawned
+    // by another agent reads as a child of that row rather than a sibling:
     //   ▾ project
-    //     ▶ account        (session)
-    //       ↳ Explore · …  (sub-agent)
-    //       ↳ ⚙ my-workflow › Explore · …  (workflow-spawned agent)
-    // The selection arrow slots into the indent so the ↳ stays put.
-    let lead = if is_selected { "    ▶ ↳ " } else { "      ↳ " };
+    //     ▶ account                 (session)
+    //       ↳ general-purpose · …   (sub-agent, depth 1)
+    //         ↳ Explore · …         (nested sub-agent, depth 2 — spawned by the row above)
+    // The selection arrow slots into the indent so the ↳ stays put at every depth.
+    let depth = s.subagent.as_ref().map(|t| t.depth).unwrap_or(1).max(1);
+    let indent = "  ".repeat((depth - 1) as usize);
+    let lead = if is_selected {
+        format!("{indent}    ▶ ↳ ")
+    } else {
+        format!("{indent}      ↳ ")
+    };
     let lead_style = if is_selected { text } else { Style::default().fg(Color::Cyan) };
     let mut label = vec![Span::styled(lead, lead_style)];
     let tag = s.subagent.as_ref();

@@ -31,6 +31,25 @@
 //! The parent transcript is read only when at least one fresh sub-agent
 //! file exists.
 //!
+//! A sub-agent can itself spawn further sub-agents — an Agent-tool call
+//! made from inside another sub-agent, or a `fork` agent. These nested
+//! agents land flat in the very same `subagents/` directory (no nested
+//! directories), with two extra `.meta.json` fields: `parentAgentId` (the
+//! spawning agent's id) and `spawnDepth` (1 = spawned by the main agent, 2
+//! = spawned by a depth-1 agent, …; absent on sidecars predating the
+//! field, treated as depth 1). Resolution still follows the `toolUseId` →
+//! `tool_result` rule, but is read from the *parent agent's own*
+//! transcript (`agent-<parentAgentId>.jsonl`) rather than the session
+//! transcript — each agent is judged solely by its own signal, so a
+//! long-lived background child is never hidden just because its parent has
+//! resolved. A parent blocked on its child's Agent-tool call can go quiet
+//! in its own transcript for longer than [`FRESH_WINDOW`]; to avoid
+//! orphaning the child's row, an otherwise-stale ancestor is pulled back in
+//! and kept alive as long as any of its descendants is still fresh. The
+//! combined result is ordered as a depth-first tree (see [`scan_running`])
+//! instead of a flat sort, so a child renders immediately under its
+//! parent.
+//!
 //! A `Workflow` run — Claude orchestrating many agents from a script via
 //! `agent()`/`parallel()`/`pipeline()` — fans out through a second,
 //! parallel layout instead of the parent transcript's tool-call loop:
@@ -60,7 +79,7 @@
 use crate::live_session::{self, Activity, TailKind};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -77,6 +96,15 @@ const FRESH_WINDOW: Duration = Duration::from_secs(90);
 #[derive(Clone, Debug, Serialize)]
 pub struct SubAgent {
     pub agent_id: String,
+    /// Agent id of the sub-agent that spawned this one — set when this
+    /// agent is nested (an Agent-tool call made from inside another
+    /// sub-agent, or a `fork` agent). `None` when the session's main agent
+    /// spawned it directly.
+    pub parent_agent_id: Option<String>,
+    /// Nesting depth from the sidecar's `spawnDepth` (1 = spawned by the
+    /// main agent, 2 = spawned by a depth-1 agent, …). Defaults to 1 when
+    /// the sidecar is missing or predates the field.
+    pub depth: u32,
     /// The sub-agent's own transcript (`…/subagents/agent-<id>.jsonl`).
     /// Lets the TUI open the agent in the session-detail view exactly
     /// like a top-level session.
@@ -141,10 +169,11 @@ pub struct SubAgent {
 }
 
 /// Running sub-agents for the session whose transcript is `transcript_path`
-/// and id is `session_id`, ordered most-recently-active first — both plain
+/// and id is `session_id`, ordered as a depth-first tree — both plain
 /// Agent/Task delegations and agents a Workflow run has spawned
-/// internally. Cheap when the session has neither: each source early-outs
-/// on its own missing directory without reading the parent.
+/// internally, plus anything nested underneath either. Cheap when the
+/// session has neither: each source early-outs on its own missing
+/// directory without reading the parent.
 pub fn scan_running(
     transcript_path: &Path,
     session_id: &str,
@@ -153,19 +182,70 @@ pub fn scan_running(
     let feed = account_dir.and_then(|d| crate::agent_status::read_feed(d, session_id));
     let mut out = scan_flat_running(transcript_path, session_id, feed.as_ref());
     out.extend(scan_workflow_running(transcript_path, session_id, feed.as_ref()));
-    // Stable order: by launch time, oldest first, so a row never moves
-    // when its agent's activity or token count changes. agent_id breaks
-    // ties (e.g. agents launched in the same millisecond) deterministically.
-    out.sort_by(|a, b| {
-        a.started_at
-            .cmp(&b.started_at)
-            .then_with(|| a.agent_id.cmp(&b.agent_id))
-    });
+    order_as_tree(out)
+}
+
+/// Reorder a flat batch of agents into a depth-first tree so the TUI can
+/// splice rows verbatim and a nested sub-agent renders directly under its
+/// parent. A root is any agent whose `parent_agent_id` is `None` or whose
+/// parent isn't in this same batch (hidden, resolved, or spawned from a
+/// Workflow) — such an orphan still keeps its own sidecar `depth`, it just
+/// renders at the top level. Roots and each parent's children are sorted
+/// by the same stable `(started_at, agent_id)` key the flat scan used to
+/// sort the whole list by, so a row never moves on its own as long as its
+/// launch time and tree position don't change.
+fn order_as_tree(agents: Vec<SubAgent>) -> Vec<SubAgent> {
+    let emitted_ids: HashSet<String> = agents.iter().map(|a| a.agent_id.clone()).collect();
+    let mut children: HashMap<String, Vec<SubAgent>> = HashMap::new();
+    let mut roots: Vec<SubAgent> = Vec::new();
+    for a in agents {
+        match &a.parent_agent_id {
+            Some(pid) if emitted_ids.contains(pid) => {
+                children.entry(pid.clone()).or_default().push(a);
+            }
+            _ => roots.push(a),
+        }
+    }
+
+    let key = |a: &SubAgent| (a.started_at, a.agent_id.clone());
+    roots.sort_by_key(key);
+    for kids in children.values_mut() {
+        kids.sort_by_key(key);
+    }
+
+    fn push_subtree(agent: SubAgent, children: &mut HashMap<String, Vec<SubAgent>>, out: &mut Vec<SubAgent>) {
+        let id = agent.agent_id.clone();
+        out.push(agent);
+        if let Some(kids) = children.remove(&id) {
+            for kid in kids {
+                push_subtree(kid, children, out);
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(emitted_ids.len());
+    for root in roots {
+        push_subtree(root, &mut children, &mut out);
+    }
     out
 }
 
+/// One candidate row while [`scan_flat_running`] is still deciding what to
+/// emit: a fresh agent file, or a stale ancestor pulled in to keep a live
+/// descendant's row from looking orphaned (see the module docs).
+struct Candidate {
+    path: PathBuf,
+    meta: Option<Meta>,
+    /// Whether *this* agent's own transcript passed the mtime gate —
+    /// ancestors pulled in only for a fresh descendant have this `false`.
+    self_fresh: bool,
+}
+
 /// The plain Agent/Task half of [`scan_running`] — delegations launched by
-/// a tool call in the parent transcript, resolved via its `tool_result`.
+/// a tool call in a transcript, resolved via its `tool_result`. For a
+/// depth-1 agent that transcript is the session's; for a nested agent
+/// (sidecar `parentAgentId` set) it is its parent agent's own transcript
+/// instead, per the module docs.
 fn scan_flat_running(
     transcript_path: &Path,
     session_id: &str,
@@ -181,7 +261,7 @@ fn scan_flat_running(
     // Pass 1 — cheap mtime gate. Collect only the agent files written
     // recently so a long delegation history isn't parsed every tick.
     let now = SystemTime::now();
-    let mut fresh: Vec<(PathBuf, String)> = Vec::new();
+    let mut candidates: HashMap<String, Candidate> = HashMap::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
@@ -202,31 +282,106 @@ fn scan_flat_running(
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age <= FRESH_WINDOW);
         if fresh_enough {
-            fresh.push((path, agent_id));
+            let meta = read_meta(&path);
+            candidates.insert(
+                agent_id,
+                Candidate {
+                    path,
+                    meta,
+                    self_fresh: true,
+                },
+            );
         }
     }
-    if fresh.is_empty() {
+    if candidates.is_empty() {
         return Vec::new();
     }
 
-    // Pass 2 — read the parent once for the set of finished delegations.
-    let finished = finished_delegations(transcript_path);
+    // Pull in ancestors of every fresh agent: a parent blocked on its
+    // child's Agent-tool call can go quiet in its own transcript for
+    // longer than FRESH_WINDOW, and without this it would vanish from the
+    // list while its live child stayed — an orphan row. Recurses so a
+    // depth-3 agent keeps both of its ancestors alive too. Each pulled-in
+    // ancestor is judged the same as any other candidate below: not
+    // resolved, and either fresh itself or kept alive by a fresh
+    // descendant.
+    let mut frontier: Vec<String> = candidates.keys().cloned().collect();
+    while let Some(id) = frontier.pop() {
+        let Some(parent_id) = candidates
+            .get(&id)
+            .and_then(|c| c.meta.as_ref())
+            .and_then(|m| m.parent_agent_id.clone())
+        else {
+            continue;
+        };
+        if candidates.contains_key(&parent_id) {
+            continue;
+        }
+        let parent_path = dir.join(format!("agent-{parent_id}.jsonl"));
+        if !parent_path.is_file() {
+            continue;
+        }
+        let self_fresh = std::fs::metadata(&parent_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age <= FRESH_WINDOW);
+        let meta = read_meta(&parent_path);
+        candidates.insert(
+            parent_id.clone(),
+            Candidate {
+                path: parent_path,
+                meta,
+                self_fresh,
+            },
+        );
+        frontier.push(parent_id);
+    }
 
-    let mut out = Vec::new();
-    for (path, agent_id) in fresh {
-        let meta = read_meta(&path);
-        // Skip any delegation the parent has already resolved — keyed on
-        // the launching `toolUseId` (catches normal return and interrupt
-        // alike), with the legacy agentId path as a fallback.
-        let resolved = meta
+    // Pass 2 — resolve each candidate against its own resolving transcript
+    // (the session's for a depth-1 agent, its parent agent's own transcript
+    // for a nested one), reading each distinct transcript at most once per
+    // scan regardless of how many siblings share it.
+    let mut finished_cache: HashMap<Option<String>, Finished> = HashMap::new();
+    let mut resolved_ids: HashSet<String> = HashSet::new();
+    for (agent_id, cand) in &candidates {
+        let parent_key = cand.meta.as_ref().and_then(|m| m.parent_agent_id.clone());
+        let finished = finished_cache.entry(parent_key.clone()).or_insert_with(|| {
+            let resolving_path = match &parent_key {
+                Some(pid) => dir.join(format!("agent-{pid}.jsonl")),
+                None => transcript_path.to_path_buf(),
+            };
+            finished_delegations(&resolving_path)
+        });
+        // Skip any delegation its resolving transcript has already
+        // recorded a `tool_result` for — keyed on the launching
+        // `toolUseId` (catches normal return and interrupt alike), with
+        // the legacy agentId path as a fallback. Judged purely on this
+        // agent's own signal: a resolved parent does not cascade-hide its
+        // children, which can legitimately outlive it as background work.
+        let resolved = cand
+            .meta
             .as_ref()
             .and_then(|m| m.tool_use_id.as_deref())
             .is_some_and(|t| finished.tool_use_ids.contains(t))
-            || finished.agent_ids.contains(&agent_id);
+            || finished.agent_ids.contains(agent_id);
         if resolved {
+            resolved_ids.insert(agent_id.clone());
+        }
+    }
+
+    let mut out = Vec::new();
+    for (agent_id, cand) in &candidates {
+        if resolved_ids.contains(agent_id) {
             continue;
         }
-        let Some(detail) = read_subagent(&path) else { continue };
+        let keep_alive =
+            cand.self_fresh || has_fresh_descendant(agent_id, &candidates, &resolved_ids);
+        if !keep_alive {
+            continue;
+        }
+        let Some(detail) = read_subagent(&cand.path) else { continue };
+        let meta = &cand.meta;
         let agent_type = meta.as_ref().and_then(|m| m.agent_type.clone());
         let description = meta
             .as_ref()
@@ -235,13 +390,15 @@ fn scan_flat_running(
             .unwrap_or_else(|| first_line(&detail.prompt));
         let status_label = feed.and_then(|f| {
             f.labels_by_id
-                .get(&agent_id)
+                .get(agent_id)
                 .or_else(|| f.labels_by_description.get(&description))
                 .cloned()
         });
         out.push(SubAgent {
-            agent_id,
-            transcript_path: path,
+            agent_id: agent_id.clone(),
+            parent_agent_id: meta.as_ref().and_then(|m| m.parent_agent_id.clone()),
+            depth: meta.as_ref().and_then(|m| m.spawn_depth).unwrap_or(1),
+            transcript_path: cand.path.clone(),
             agent_type,
             description,
             model: detail.model,
@@ -259,6 +416,31 @@ fn scan_flat_running(
         });
     }
     out
+}
+
+/// Whether any transitive child of `agent_id` among `candidates` is itself
+/// fresh — the signal that keeps a quiet-but-unresolved ancestor's row
+/// alive (see [`scan_flat_running`]'s ancestor pull-in pass). A resolved
+/// candidate can't carry the chain further since its own row won't be
+/// emitted either way, but its still-live children are unaffected — they
+/// are judged independently, not cascade-hidden.
+fn has_fresh_descendant(
+    agent_id: &str,
+    candidates: &HashMap<String, Candidate>,
+    resolved_ids: &HashSet<String>,
+) -> bool {
+    for (id, cand) in candidates {
+        if resolved_ids.contains(id) {
+            continue;
+        }
+        if cand.meta.as_ref().and_then(|m| m.parent_agent_id.as_deref()) != Some(agent_id) {
+            continue;
+        }
+        if cand.self_fresh || has_fresh_descendant(id, candidates, resolved_ids) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Agents currently running inside a Workflow's internal fan-out —
@@ -346,6 +528,8 @@ fn scan_workflow_running(
                     .cloned()
             });
             out.push(SubAgent {
+                parent_agent_id: meta.as_ref().and_then(|m| m.parent_agent_id.clone()),
+                depth: meta.as_ref().and_then(|m| m.spawn_depth).unwrap_or(1),
                 agent_id,
                 transcript_path: path,
                 agent_type,
@@ -545,11 +729,19 @@ fn finished_delegations(path: &Path) -> Finished {
 }
 
 /// The `.meta.json` sidecar Claude Code writes beside each sub-agent
-/// transcript: the friendly label plus the launching tool-call id.
+/// transcript: the friendly label, the launching tool-call id, and — for a
+/// nested sub-agent — its spawning agent's id and nesting depth.
 struct Meta {
     tool_use_id: Option<String>,
     agent_type: Option<String>,
     description: Option<String>,
+    /// Agent id of the sub-agent that spawned this one. `None` for a
+    /// depth-1 agent (spawned by the session's main agent).
+    parent_agent_id: Option<String>,
+    /// Nesting depth (1 = spawned by the main agent, 2 = spawned by a
+    /// depth-1 agent, …). `None` when the sidecar predates the field
+    /// (older Claude Code) — callers default this to 1.
+    spawn_depth: Option<u32>,
 }
 
 fn read_meta(agent_path: &Path) -> Option<Meta> {
@@ -564,6 +756,12 @@ fn read_meta(agent_path: &Path) -> Option<Meta> {
         tool_use_id: s("toolUseId"),
         agent_type: s("agentType"),
         description: s("description"),
+        parent_agent_id: s("parentAgentId"),
+        // Real sidecar carries this as a JSON number, not a string.
+        spawn_depth: v
+            .get("spawnDepth")
+            .and_then(|x| x.as_u64())
+            .map(|n| n as u32),
     })
 }
 
@@ -820,6 +1018,9 @@ mod tests {
         // with <200K observed sits on the 200K cap.
         assert_eq!(a.current_context, Some(10));
         assert_eq!(a.context_cap, Some(200_000));
+        // Depth-1, un-nested delegation: no parent, sidecar-default depth.
+        assert_eq!(a.parent_agent_id, None);
+        assert_eq!(a.depth, 1);
     }
 
     #[test]
@@ -949,5 +1150,222 @@ mod tests {
         // caption, so the live action and narration stay unset.
         assert_eq!(a.current_action, None);
         assert_eq!(a.narration, None);
+        // Workflow sidecars carry spawnDepth too; this one has no
+        // parentAgentId, so it's a depth-1 root like a plain delegation.
+        assert_eq!(a.parent_agent_id, None);
+        assert_eq!(a.depth, 1);
+    }
+
+    #[test]
+    fn read_meta_parses_parent_and_spawn_depth() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let nested_path = dir.path().join("agent-cAgent.jsonl");
+        fs::write(&nested_path, "").unwrap();
+        fs::write(
+            dir.path().join("agent-cAgent.meta.json"),
+            r#"{"agentType":"Explore","description":"Trivial nested spawn probe","toolUseId":"tX","parentAgentId":"pAgent","spawnDepth":2}"#,
+        )
+        .unwrap();
+        let nested = read_meta(&nested_path).unwrap();
+        assert_eq!(nested.parent_agent_id.as_deref(), Some("pAgent"));
+        assert_eq!(nested.spawn_depth, Some(2));
+
+        // Depth-1 / legacy sidecar: neither field present.
+        let root_path = dir.path().join("agent-root.jsonl");
+        fs::write(&root_path, "").unwrap();
+        fs::write(
+            dir.path().join("agent-root.meta.json"),
+            r#"{"agentType":"general-purpose","description":"root task"}"#,
+        )
+        .unwrap();
+        let root = read_meta(&root_path).unwrap();
+        assert_eq!(root.parent_agent_id, None);
+        assert_eq!(root.spawn_depth, None);
+    }
+
+    /// Shared fixture builder for the nested-agent tests below: writes a
+    /// minimal-but-valid sub-agent transcript (a launch record plus a
+    /// usage record, so `read_subagent` succeeds) and its `.meta.json`
+    /// sidecar, with room for extra hand-written lines (e.g. a
+    /// `tool_result` resolving a child).
+    fn write_nested_fixture(subdir: &Path, id: &str, meta_json: &str, launched: &str, extra_lines: &str) {
+        let body = format!(
+            "{}\n{}\n{}",
+            format!(
+                r#"{{"type":"user","timestamp":"{launched}","message":{{"content":"do the work"}}}}"#
+            ),
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            extra_lines,
+        );
+        fs::write(subdir.join(format!("agent-{id}.jsonl")), body).unwrap();
+        fs::write(subdir.join(format!("agent-{id}.meta.json")), meta_json).unwrap();
+    }
+
+    #[test]
+    fn scan_running_surfaces_nested_subagent_when_parent_transcript_unresolved() {
+        let proj = tempfile::tempdir().unwrap();
+        let sid = "sess1";
+        let parent_path = proj.path().join(format!("{sid}.jsonl"));
+        fs::write(&parent_path, "").unwrap(); // session transcript resolves nothing
+
+        let subdir = proj.path().join(sid).join("subagents");
+        fs::create_dir_all(&subdir).unwrap();
+
+        write_nested_fixture(
+            &subdir,
+            "pAgent",
+            r#"{"agentType":"general-purpose","description":"Parent task","toolUseId":"tP","spawnDepth":1}"#,
+            "2026-06-19T00:00:02Z",
+            "",
+        );
+        write_nested_fixture(
+            &subdir,
+            "cAgent",
+            r#"{"agentType":"Explore","description":"Child task","toolUseId":"tC","parentAgentId":"pAgent","spawnDepth":2}"#,
+            "2026-06-19T00:00:04Z",
+            "",
+        );
+
+        let subs = scan_running(&parent_path, sid, None);
+        let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["pAgent", "cAgent"],
+            "both live; child renders right under its parent"
+        );
+        let p = subs.iter().find(|s| s.agent_id == "pAgent").unwrap();
+        assert_eq!(p.parent_agent_id, None);
+        assert_eq!(p.depth, 1);
+        let c = subs.iter().find(|s| s.agent_id == "cAgent").unwrap();
+        assert_eq!(c.parent_agent_id.as_deref(), Some("pAgent"));
+        assert_eq!(c.depth, 2);
+    }
+
+    #[test]
+    fn scan_running_retires_nested_subagent_once_parent_agent_transcript_resolves_it() {
+        let proj = tempfile::tempdir().unwrap();
+        let sid = "sess1";
+        let parent_path = proj.path().join(format!("{sid}.jsonl"));
+        fs::write(&parent_path, "").unwrap();
+
+        let subdir = proj.path().join(sid).join("subagents");
+        fs::create_dir_all(&subdir).unwrap();
+
+        // P's own transcript (not the session's) records the tool_result
+        // that resolves C's launching toolUseId — the signal a nested
+        // delegation's liveness must be judged against.
+        let p_resolves_child = format!(
+            "\n{}",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tC"}]}}"#
+        );
+        write_nested_fixture(
+            &subdir,
+            "pAgent",
+            r#"{"agentType":"general-purpose","description":"Parent task","toolUseId":"tP","spawnDepth":1}"#,
+            "2026-06-19T00:00:02Z",
+            &p_resolves_child,
+        );
+        write_nested_fixture(
+            &subdir,
+            "cAgent",
+            r#"{"agentType":"Explore","description":"Child task","toolUseId":"tC","parentAgentId":"pAgent","spawnDepth":2}"#,
+            "2026-06-19T00:00:04Z",
+            "",
+        );
+
+        let subs = scan_running(&parent_path, sid, None);
+        let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["pAgent"],
+            "child resolved via its parent's own transcript, not the session's"
+        );
+    }
+
+    #[test]
+    fn scan_running_keeps_stale_ancestor_alive_for_fresh_descendant() {
+        let proj = tempfile::tempdir().unwrap();
+        let sid = "sess1";
+        let parent_path = proj.path().join(format!("{sid}.jsonl"));
+        fs::write(&parent_path, "").unwrap();
+
+        let subdir = proj.path().join(sid).join("subagents");
+        fs::create_dir_all(&subdir).unwrap();
+
+        write_nested_fixture(
+            &subdir,
+            "pAgent",
+            r#"{"agentType":"general-purpose","description":"Parent task","toolUseId":"tP","spawnDepth":1}"#,
+            "2026-06-19T00:00:02Z",
+            "",
+        );
+        write_nested_fixture(
+            &subdir,
+            "cAgent",
+            r#"{"agentType":"Explore","description":"Child task","toolUseId":"tC","parentAgentId":"pAgent","spawnDepth":2}"#,
+            "2026-06-19T00:00:04Z",
+            "",
+        );
+
+        // Push pAgent's transcript mtime outside FRESH_WINDOW (90s) while
+        // leaving cAgent's untouched (freshly written = fresh).
+        let p_path = subdir.join("agent-pAgent.jsonl");
+        let stale = SystemTime::now() - Duration::from_secs(200);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&p_path)
+            .unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(stale))
+            .unwrap();
+
+        let subs = scan_running(&parent_path, sid, None);
+        let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["pAgent", "cAgent"],
+            "stale-but-unresolved ancestor kept alive by its fresh child"
+        );
+    }
+
+    #[test]
+    fn scan_running_orders_as_dfs_tree_with_children_glued_under_parent() {
+        let proj = tempfile::tempdir().unwrap();
+        let sid = "sess1";
+        let parent_path = proj.path().join(format!("{sid}.jsonl"));
+        fs::write(&parent_path, "").unwrap();
+
+        let subdir = proj.path().join(sid).join("subagents");
+        fs::create_dir_all(&subdir).unwrap();
+
+        write_nested_fixture(
+            &subdir,
+            "A",
+            r#"{"agentType":"general-purpose","toolUseId":"tA"}"#,
+            "2026-06-19T00:00:02Z",
+            "",
+        );
+        write_nested_fixture(
+            &subdir,
+            "C1",
+            r#"{"agentType":"Explore","toolUseId":"tC1","parentAgentId":"A","spawnDepth":2}"#,
+            "2026-06-19T00:00:07Z",
+            "",
+        );
+        write_nested_fixture(
+            &subdir,
+            "B",
+            r#"{"agentType":"general-purpose","toolUseId":"tB"}"#,
+            "2026-06-19T00:00:04Z",
+            "",
+        );
+
+        let subs = scan_running(&parent_path, sid, None);
+        let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["A", "C1", "B"],
+            "C1 sits directly under root A even though root B started earlier than C1"
+        );
     }
 }
