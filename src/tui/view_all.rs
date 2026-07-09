@@ -10,7 +10,7 @@
 use super::widgets::{fmt_tokens_compact, gauge_color, render_footer};
 use super::{PerAccount, SessionRef};
 use crate::live_session::{Activity, SessionState};
-use crate::live_usage::{LiveUsage, REFRESH_INTERVAL};
+use crate::live_usage::{refresh_interval, LiveUsage};
 use chrono::{Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
@@ -298,7 +298,7 @@ fn cache_age_span(live: Option<&LiveUsage>) -> Span<'static> {
         return Span::raw(" ".repeat(CACHE_AGE_WIDTH));
     };
     let age = lu.age_seconds();
-    let refresh = REFRESH_INTERVAL.as_secs() as i64;
+    let refresh = refresh_interval().as_secs() as i64;
     let color = if lu.is_stale() {
         Color::Red
     } else if age > 2 * refresh {

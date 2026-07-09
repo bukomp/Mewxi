@@ -336,6 +336,15 @@ struct AccountsConfig {
     live_session_active_threshold_secs: Option<u64>,
     #[serde(default)]
     live_session_open_threshold_secs: Option<u64>,
+    /// Minimum seconds between live `/usage` HTTP probes per account
+    /// (default 60). Raise this if the endpoint rate-limits you. Read
+    /// via [`live_tuning`]; floored at 10s by `live_usage`.
+    #[serde(default)]
+    live_refresh_interval_secs: Option<u64>,
+    /// Seconds to back off after the usage endpoint returns 429 (or
+    /// 401/403); default 120. Read via [`live_tuning`].
+    #[serde(default)]
+    live_backoff_secs: Option<u64>,
     /// Account names to hide from every view + aggregation. The
     /// matching `Account` records are still *discovered* so the TUI's
     /// setup view can show them as "ignored" and offer to un-ignore.
@@ -520,6 +529,18 @@ pub fn config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
     Some(base.join("mewxi").join("accounts.toml"))
+}
+
+/// The live-usage polling tunables from `accounts.toml`, without a full
+/// account-discovery pass: `(live_refresh_interval_secs, live_backoff_secs)`.
+/// `None` in either slot means "use the built-in default". A missing or
+/// unparsable config yields `(None, None)` — polling must keep working
+/// on a broken config, not stop.
+pub fn live_tuning() -> (Option<u64>, Option<u64>) {
+    let Some(path) = config_path() else { return (None, None) };
+    let Ok(raw) = std::fs::read_to_string(&path) else { return (None, None) };
+    let Ok(cfg) = toml::from_str::<AccountsConfig>(&raw) else { return (None, None) };
+    (cfg.live_refresh_interval_secs, cfg.live_backoff_secs)
 }
 
 /// Default folder for user statusline blocks — `blocks/` beside

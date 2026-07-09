@@ -22,6 +22,12 @@ default_account = "work"
 # or "config" — the view's number key ("1"–"4") works too.
 default_view = "overview"
 
+# Live /usage polling. Raise these if the endpoint rate-limits you
+# (429s in the TUI / statusline). Both are floored at 10s; the
+# statusline picks up edits immediately, a running TUI on restart.
+live_refresh_interval_secs = 300  # min seconds between HTTP probes (default 60)
+live_backoff_secs = 600           # wait after a 429/401/403 (default 120)
+
 [[account]]
 name = "work"
 dir  = "/Users/me/.claude-work"

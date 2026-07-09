@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::accounts::Account;
@@ -27,10 +27,48 @@ const BETA_HEADER: &str = "oauth-2025-04-20";
 /// `claude-cli/X.Y.Z (external, cli)` shape appears to matter.
 const USER_AGENT: &str = "claude-cli/2.1.116 (external, cli)";
 
+/// Built-in default for the minimum age of a cached response before an
+/// on-demand refetch. Override with `live_refresh_interval_secs` in
+/// `~/.config/mewxi/accounts.toml` (see [`refresh_interval`]).
+pub const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+/// Built-in default for the post-429 backoff. Override with
+/// `live_backoff_secs` in `accounts.toml` (see [`backoff_after_429`]).
+pub const DEFAULT_BACKOFF_AFTER_429: Duration = Duration::from_secs(120);
+
+/// Floor for both tunables — a typo'd `live_refresh_interval_secs = 1`
+/// must not turn the per-keypress statusline into an HTTP hammer.
+const MIN_TUNABLE_SECS: u64 = 10;
+
 /// Minimum age of a cached response before we'll refetch on demand.
-pub const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
-/// After a 429, wait at least this long before trying again.
-pub const BACKOFF_AFTER_429: Duration = Duration::from_secs(120);
+/// `live_refresh_interval_secs` in `accounts.toml`; defaults to
+/// [`DEFAULT_REFRESH_INTERVAL`]. Read once per process — the statusline
+/// spawns fresh per invocation so edits apply immediately there; the
+/// long-lived TUI picks them up on restart.
+pub fn refresh_interval() -> Duration {
+    tuning().0
+}
+
+/// After a 429 (or 401/403), wait at least this long before trying
+/// again. `live_backoff_secs` in `accounts.toml`; defaults to
+/// [`DEFAULT_BACKOFF_AFTER_429`].
+pub fn backoff_after_429() -> Duration {
+    tuning().1
+}
+
+fn tunable_duration(configured: Option<u64>, default: Duration) -> Duration {
+    Duration::from_secs(configured.unwrap_or(default.as_secs()).max(MIN_TUNABLE_SECS))
+}
+
+fn tuning() -> (Duration, Duration) {
+    static S: OnceLock<(Duration, Duration)> = OnceLock::new();
+    *S.get_or_init(|| {
+        let (refresh, backoff) = crate::accounts::live_tuning();
+        (
+            tunable_duration(refresh, DEFAULT_REFRESH_INTERVAL),
+            tunable_duration(backoff, DEFAULT_BACKOFF_AFTER_429),
+        )
+    })
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WindowUsage {
@@ -123,9 +161,10 @@ impl LiveUsage {
     /// we should assume a fetch has been attempted and failed (or the poller
     /// hasn't run). A value aged just a few tens of seconds is NOT stale — the
     /// status-line command is invoked per keypress and we serve cached reads
-    /// within REFRESH_INTERVAL by design.
+    /// within `refresh_interval()` by design.
     pub fn is_stale(&self) -> bool {
-        self.age_seconds() > (REFRESH_INTERVAL.as_secs() as i64 + BACKOFF_AFTER_429.as_secs() as i64)
+        self.age_seconds()
+            > (refresh_interval().as_secs() as i64 + backoff_after_429().as_secs() as i64)
     }
 
     /// The scoped weekly limit entry for a given model display name
@@ -176,13 +215,18 @@ impl std::fmt::Display for FetchError {
 
 impl std::error::Error for FetchError {}
 
+/// Request timeout for the usage endpoint. Doubles as the single-flight
+/// window: while an attempt marker is younger than this, a concurrent
+/// fetch can still be in flight, so siblings serve the cache instead.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Raw HTTP call. Synchronous; blocks up to the request timeout.
 pub fn fetch_live(token: &str) -> Result<LiveUsage, FetchError> {
     let resp = ureq::get(ENDPOINT)
         .set("Authorization", &format!("Bearer {token}"))
         .set("anthropic-beta", BETA_HEADER)
         .set("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(15))
+        .timeout(HTTP_TIMEOUT)
         .call();
 
     match resp {
@@ -258,6 +302,123 @@ pub fn save_cached(account: &Account, u: &LiveUsage) {
     }
 }
 
+// --- Cross-process backoff + single-flight markers ---------------------------
+//
+// The statusline is a fresh process per Claude Code invocation, so
+// in-memory throttle state dies before it can help. Worse, a 429 leaves
+// the cache stale, which used to mean every subsequent invocation across
+// every concurrent session retried the endpoint immediately — being rate
+// limited *increased* our request rate. Both markers therefore live on
+// disk, next to the per-account cache file:
+//
+//  * `live-<slug>.backoff.json` — written on 429/401/403, removed on the
+//    next success. While younger than `backoff_after_429()`, fetches
+//    short-circuit (429 unconditionally; 401/403 unless `force`).
+//  * `live-<slug>.attempt` — touched right before each HTTP call. While
+//    younger than `HTTP_TIMEOUT`, sibling processes serve the cache
+//    instead of piling on when the cache expires. Best-effort by design:
+//    the check-then-touch race window is microseconds wide, versus the
+//    seconds-wide synchronized herd it suppresses; a leftover marker
+//    from a crashed process ages out after 15s.
+
+/// On-disk shape of `live-<slug>.backoff.json`.
+#[derive(Serialize, Deserialize)]
+struct BackoffMarker {
+    at: DateTime<Utc>,
+    /// `"rate_limited"` (429) or `"denied"` (401/403). Unknown values
+    /// from a future binary are treated as `rate_limited` — the more
+    /// conservative read.
+    kind: String,
+    /// Human-readable reason recorded at rejection time, surfaced by
+    /// short-circuited callers so they can report *why*, not just that
+    /// a backoff is in effect. Empty for plain 429s.
+    reason: String,
+}
+
+/// Why the last fetch was rejected, per the on-disk marker.
+enum Backoff {
+    RateLimited,
+    Denied(String),
+}
+
+fn backoff_path(account: &Account) -> Option<PathBuf> {
+    cache_path(account).map(|p| p.with_extension("backoff.json"))
+}
+
+fn attempt_path(account: &Account) -> Option<PathBuf> {
+    cache_path(account).map(|p| p.with_extension("attempt"))
+}
+
+fn write_backoff(account: &Account, kind: &str, reason: &str) {
+    let Some(p) = backoff_path(account) else { return };
+    write_backoff_marker(&p, kind, reason);
+}
+
+fn clear_backoff(account: &Account) {
+    if let Some(p) = backoff_path(account) {
+        let _ = fs::remove_file(&p);
+    }
+}
+
+/// The account's backoff state, if a marker exists and is still within
+/// the `backoff_after_429()` window. Unreadable or aged-out markers
+/// read as "no backoff" — polling must never wedge on a corrupt file.
+fn recent_backoff(account: &Account) -> Option<Backoff> {
+    let p = backoff_path(account)?;
+    read_backoff_marker(&p, backoff_after_429())
+}
+
+fn write_backoff_marker(p: &Path, kind: &str, reason: &str) {
+    if let Some(parent) = p.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let marker = BackoffMarker {
+        at: Utc::now(),
+        kind: kind.to_string(),
+        reason: reason.to_string(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&marker) {
+        let tmp = p.with_extension("json.tmp");
+        if fs::write(&tmp, &bytes).is_ok() {
+            let _ = fs::rename(&tmp, p);
+        }
+    }
+}
+
+fn read_backoff_marker(p: &Path, max_age: Duration) -> Option<Backoff> {
+    let bytes = fs::read(p).ok()?;
+    let marker: BackoffMarker = serde_json::from_slice(&bytes).ok()?;
+    let delta = chrono::Duration::from_std(max_age).ok()?;
+    if Utc::now() - marker.at >= delta {
+        return None;
+    }
+    Some(match marker.kind.as_str() {
+        "denied" => Backoff::Denied(marker.reason),
+        _ => Backoff::RateLimited,
+    })
+}
+
+/// True while a sibling process's HTTP attempt may still be in flight.
+/// A future mtime (clock skew) reads as *not* attempted — the safe
+/// failure mode is one extra fetch, never a blocked poller.
+fn fetch_recently_attempted(account: &Account) -> bool {
+    let Some(p) = attempt_path(account) else { return false };
+    let Ok(meta) = fs::metadata(&p) else { return false };
+    let Ok(mtime) = meta.modified() else { return false };
+    mtime
+        .elapsed()
+        .map(|age| age < HTTP_TIMEOUT)
+        .unwrap_or(false)
+}
+
+fn mark_fetch_attempt(account: &Account) {
+    let Some(p) = attempt_path(account) else { return };
+    if let Some(parent) = p.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&p, b"");
+}
+
 /// What a fetch attempt actually did. Carries the usage value to display
 /// (fresh or a cached fallback) plus enough detail for the TUI to tell the
 /// user whether a manual refresh genuinely reached the web.
@@ -322,34 +483,38 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
 
     let now = Utc::now();
 
-    // 401/403 get the same treatment as 429: the statusline is invoked per
-    // keypress, so re-hitting an endpoint that just told us "no" on every
-    // render would hammer it for nothing. Unlike the 429 branch below, this
-    // must not depend on having a (fresh) cache — a persistent 403 means the
-    // cache is old or absent, precisely when the backoff matters most.
-    // `force` (the TUI's manual refresh) bypasses it so the user can retry
-    // immediately after fixing their credentials.
-    if !force {
-        if let Some(reason) = recent_denied(&account.name) {
-            return FetchOutcome::Failed { reason, cached };
-        }
-    }
-
-    if let Some(ref c) = cached {
+    // On-disk backoff marker, written on 429/401/403 and removed on the
+    // next success (see the marker section below). Checked before anything
+    // else — including the cache, which after a rejection is stale or
+    // absent, precisely when the backoff matters most.
+    match recent_backoff(account) {
         // 429 backoff is non-negotiable even with `force` — we don't want
         // to hammer the endpoint after it told us to back off.
-        if is_recent_429(&account.name) {
-            if let Ok(delta) = chrono::Duration::from_std(BACKOFF_AFTER_429) {
-                if now - c.fetched_at < delta {
-                    return FetchOutcome::RateLimited(cached);
-                }
-            }
-        } else if !force {
-            if let Ok(delta) = chrono::Duration::from_std(REFRESH_INTERVAL) {
+        Some(Backoff::RateLimited) => return FetchOutcome::RateLimited(cached),
+        // 401/403 won't be reconsidered by the endpoint until something
+        // changes locally, so they back off like a 429 — but `force` (the
+        // TUI's manual refresh) bypasses, so the user can retry immediately
+        // after fixing their credentials.
+        Some(Backoff::Denied(reason)) if !force => {
+            return FetchOutcome::Failed { reason, cached };
+        }
+        _ => {}
+    }
+
+    if !force {
+        if let Some(ref c) = cached {
+            if let Ok(delta) = chrono::Duration::from_std(refresh_interval()) {
                 if now - c.fetched_at < delta {
                     return FetchOutcome::Cached(cached);
                 }
             }
+        }
+        // Single-flight: when the cache expires, every concurrent session's
+        // statusline sees "stale" in the same instant. Let the first one
+        // fetch; siblings serve the (marginally stale) cache instead of
+        // firing a synchronized burst at the endpoint.
+        if fetch_recently_attempted(account) {
+            return FetchOutcome::Cached(cached);
         }
     }
 
@@ -367,16 +532,16 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
         }
     };
 
+    mark_fetch_attempt(account);
     match fetch_live(&token) {
         Ok(fresh) => {
             save_cached(account, &fresh);
-            clear_429_flag(&account.name);
-            clear_denied_flag(&account.name);
+            clear_backoff(account);
             clear_error_entry(&account.name);
             FetchOutcome::Fetched(fresh)
         }
         Err(FetchError::RateLimited) => {
-            mark_429(&account.name);
+            write_backoff(account, "rate_limited", "");
             FetchOutcome::RateLimited(cached)
         }
         Err(e @ (FetchError::Unauthorized | FetchError::Forbidden)) => {
@@ -397,7 +562,7 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
                     ));
                 }
             }
-            mark_denied(&account.name, reason.clone());
+            write_backoff(account, "denied", &reason);
             log_once(
                 &account.name,
                 format!("mewxi: live fetch failed for '{}': {reason}", account.name),
@@ -417,7 +582,11 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
     }
 }
 
-// --- Minimal in-process state for 429 back-off + log dedupe -----------------
+// --- Minimal in-process state for error display + log dedupe ----------------
+//
+// (429/401/403 backoff used to live here too, but in-memory flags die
+// with the one-shot statusline process — it's on disk now, see the
+// marker section above.)
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -460,63 +629,69 @@ pub fn most_recent_error() -> Option<(String, String)> {
         .map(|(acct, (msg, _))| (acct.clone(), msg.clone()))
 }
 
-fn last_429_ts() -> &'static Mutex<HashMap<String, DateTime<Utc>>> {
-    static S: OnceLock<Mutex<HashMap<String, DateTime<Utc>>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
-}
-/// Parallel to `last_429_ts`, but for 401/403 (permission rejections rather
-/// than rate limiting). Kept as a distinct map — rather than reusing the 429
-/// one — so a short-circuited call during the backoff window can still
-/// report `FetchOutcome::Failed` with the *actual* reason (forbidden /
-/// unauthorized, possibly with the stale-token note) instead of being
-/// mislabeled as `RateLimited`.
-fn last_denied() -> &'static Mutex<HashMap<String, (DateTime<Utc>, String)>> {
-    static S: OnceLock<Mutex<HashMap<String, (DateTime<Utc>, String)>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
-}
 fn logged_once_set() -> &'static Mutex<std::collections::HashSet<String>> {
     static S: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-fn mark_429(account: &str) {
-    if let Ok(mut g) = last_429_ts().lock() {
-        g.insert(account.to_string(), Utc::now());
-    }
-}
-fn clear_429_flag(account: &str) {
-    if let Ok(mut g) = last_429_ts().lock() {
-        g.remove(account);
-    }
-}
-fn is_recent_429(account: &str) -> bool {
-    let Ok(g) = last_429_ts().lock() else { return false };
-    let Some(ts) = g.get(account).copied() else { return false };
-    let Ok(delta) = chrono::Duration::from_std(BACKOFF_AFTER_429) else { return false };
-    Utc::now() - ts < delta
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn mark_denied(account: &str, reason: String) {
-    if let Ok(mut g) = last_denied().lock() {
-        g.insert(account.to_string(), (Utc::now(), reason));
+    #[test]
+    fn tunable_duration_defaults_clamps_and_passes_through() {
+        // Unset → built-in default.
+        assert_eq!(
+            tunable_duration(None, DEFAULT_REFRESH_INTERVAL),
+            DEFAULT_REFRESH_INTERVAL
+        );
+        // Configured value wins.
+        assert_eq!(
+            tunable_duration(Some(300), DEFAULT_REFRESH_INTERVAL),
+            Duration::from_secs(300)
+        );
+        // Absurdly low values are floored, not honored.
+        assert_eq!(
+            tunable_duration(Some(1), DEFAULT_REFRESH_INTERVAL),
+            Duration::from_secs(MIN_TUNABLE_SECS)
+        );
     }
-}
-fn clear_denied_flag(account: &str) {
-    if let Ok(mut g) = last_denied().lock() {
-        g.remove(account);
-    }
-}
-/// If the account was denied (401/403) within the backoff window, return
-/// the reason string that was recorded at the time — so a short-circuited
-/// caller can still surface *why*, not just that it's backing off.
-fn recent_denied(account: &str) -> Option<String> {
-    let g = last_denied().lock().ok()?;
-    let (ts, reason) = g.get(account)?;
-    let delta = chrono::Duration::from_std(BACKOFF_AFTER_429).ok()?;
-    if Utc::now() - *ts < delta {
-        Some(reason.clone())
-    } else {
-        None
+
+    #[test]
+    fn backoff_marker_roundtrips_and_ages_out() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = tmp.path().join("live-test.backoff.json");
+
+        // No file → no backoff.
+        assert!(read_backoff_marker(&p, Duration::from_secs(120)).is_none());
+
+        write_backoff_marker(&p, "denied", "forbidden (403)");
+        match read_backoff_marker(&p, Duration::from_secs(120)) {
+            Some(Backoff::Denied(reason)) => assert_eq!(reason, "forbidden (403)"),
+            _ => panic!("expected Denied within the window"),
+        }
+
+        write_backoff_marker(&p, "rate_limited", "");
+        assert!(matches!(
+            read_backoff_marker(&p, Duration::from_secs(120)),
+            Some(Backoff::RateLimited)
+        ));
+
+        // Unknown kinds from a future binary read as the conservative
+        // rate-limited state, not as "no backoff".
+        write_backoff_marker(&p, "some-future-kind", "");
+        assert!(matches!(
+            read_backoff_marker(&p, Duration::from_secs(120)),
+            Some(Backoff::RateLimited)
+        ));
+
+        // A marker older than the window reads as "no backoff". Simulate
+        // age by shrinking the window instead of sleeping.
+        assert!(read_backoff_marker(&p, Duration::ZERO).is_none());
+
+        // Corrupt markers must not wedge polling.
+        std::fs::write(&p, b"not json").unwrap();
+        assert!(read_backoff_marker(&p, Duration::from_secs(120)).is_none());
     }
 }
 
