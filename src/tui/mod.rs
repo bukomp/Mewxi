@@ -1382,6 +1382,10 @@ fn run_loop<B: ratatui::backend::Backend>(
     // While Some, the Config view's build-dir row is in text-edit mode
     // and keys go to this input instead of navigation.
     let mut update_build_dir_edit: Option<text_input::TextInput> = None;
+    // Current `live_refresh_interval_secs` for the Config view's cycling
+    // row — seeded from the resolved (clamped/defaulted) value so the row
+    // always shows what's actually in effect.
+    let mut live_poll_secs: u64 = live_usage::refresh_interval().as_secs();
     let mut update_prompted = false;
     if let Some(cached) = update_cached {
         if cached.available && update_prompt_enabled {
@@ -1935,6 +1939,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 defocus_input_after_send,
                 subagent_tool_action,
                 default_view_pref,
+                live_poll_secs,
                 &update_ui,
                 live_error,
                 driver_pane.as_mut(),
@@ -3757,6 +3762,27 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             }
                                         }
                                     }
+                                    Some(view_setup::ConfigItem::LivePollInterval) => {
+                                        let next = view_setup::next_live_poll_preset(live_poll_secs);
+                                        match accounts::set_live_refresh_interval_secs(next) {
+                                            Ok(()) => {
+                                                live_poll_secs = next;
+                                                // Without this, the change would
+                                                // only apply after a restart —
+                                                // the pollers cache the tunables.
+                                                live_usage::reload_tuning();
+                                                setup_message = Some(format!(
+                                                    "probe usage at most every {}",
+                                                    view_setup::fmt_poll_secs(next)
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
                                     Some(view_setup::ConfigItem::SubagentToolActionToggle) => {
                                         let next = !subagent_tool_action;
                                         match accounts::set_subagent_tool_action(next) {
@@ -4213,6 +4239,7 @@ fn render(
     defocus_input_after_send: bool,
     subagent_tool_action: bool,
     default_view: view_setup::DefaultView,
+    live_poll_secs: u64,
     update_ui: &view_setup::UpdateUi,
     live_error: Option<&str>,
     driver: Option<&mut view_session::DriverPane<'_>>,
@@ -4300,6 +4327,7 @@ fn render(
             defocus_input_after_send,
             subagent_tool_action,
             default_view,
+            live_poll_secs,
             update_ui,
             setup_rect,
         ),

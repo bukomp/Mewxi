@@ -39,6 +39,9 @@ pub enum ConfigItem {
     UpdateCheckNow,
     DefaultView,
     DefocusToggle,
+    /// Cycles the minimum time between live usage-endpoint probes
+    /// (`live_refresh_interval_secs` in accounts.toml).
+    LivePollInterval,
     /// Toggles the `— Tool(arg)` suffix on sub-agent row captions
     /// (`subagent_tool_action` in accounts.toml).
     SubagentToolActionToggle,
@@ -97,6 +100,29 @@ impl DefaultView {
     }
 }
 
+/// Presets the "usage poll interval" row cycles through, in seconds.
+/// A hand-edited value between presets renders as-is and cycles to the
+/// next larger preset (wrapping past the largest).
+pub const LIVE_POLL_PRESETS: &[u64] = &[30, 60, 120, 300, 600];
+
+pub fn next_live_poll_preset(current: u64) -> u64 {
+    LIVE_POLL_PRESETS
+        .iter()
+        .copied()
+        .find(|&p| p > current)
+        .unwrap_or(LIVE_POLL_PRESETS[0])
+}
+
+/// `90` → `"90s"`, `120` → `"2m"` — whole minutes collapse, everything
+/// else stays in seconds so hand-edited values render faithfully.
+pub fn fmt_poll_secs(secs: u64) -> String {
+    if secs >= 60 && secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// Actionable rows, in display order. Accounts come first so the
 /// existing account-oriented shortcuts (`s`, `i`) keep indexing
 /// naturally.
@@ -112,6 +138,7 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
     v.push(ConfigItem::UpdateCheckNow);
     v.push(ConfigItem::DefaultView);
     v.push(ConfigItem::DefocusToggle);
+    v.push(ConfigItem::LivePollInterval);
     v.push(ConfigItem::SubagentToolActionToggle);
     v.push(ConfigItem::StatusLineComposer);
     v
@@ -149,6 +176,7 @@ pub fn render(
     defocus_input_after_send: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
+    live_poll_secs: u64,
     update: &UpdateUi,
     setup_rect: &mut Option<Rect>,
 ) {
@@ -164,8 +192,8 @@ pub fn render(
 
     render_header(f, rows[0], snap, update);
     *setup_rect = Some(rows[1]);
-    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, update);
-    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, update, last_message);
+    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, live_poll_secs, update);
+    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, live_poll_secs, update, last_message);
     render_footer(
         f,
         rows[3],
@@ -236,12 +264,14 @@ fn render_header(f: &mut Frame, area: Rect, snap: Option<&SetupSnapshot>, update
 /// parallel, the item index each line belongs to (None for headers /
 /// spacers) so the renderer can place the selection arrow and keep the
 /// selected row scrolled into view.
+#[allow(clippy::too_many_arguments)]
 fn build_lines(
     snap: Option<&SetupSnapshot>,
     selected: usize,
     defocus: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
+    live_poll_secs: u64,
     update: &UpdateUi,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
     let mut lines: Vec<Line> = Vec::new();
@@ -453,6 +483,15 @@ fn build_lines(
                 ));
                 owners.push(Some(i));
             }
+            ConfigItem::LivePollInterval => {
+                lines.push(row(
+                    i,
+                    "usage poll interval".to_string(),
+                    bold(format!("{:<16}", fmt_poll_secs(live_poll_secs)), Color::Magenta),
+                    "min time between usage-endpoint probes (per account)".to_string(),
+                ));
+                owners.push(Some(i));
+            }
             ConfigItem::SubagentToolActionToggle => {
                 let (txt, color) = if subagent_tool_action {
                     ("✓ on", Color::Green)
@@ -484,6 +523,7 @@ fn build_lines(
     (lines, owners)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_list(
     f: &mut Frame,
     area: Rect,
@@ -493,6 +533,7 @@ fn render_list(
     defocus: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
+    live_poll_secs: u64,
     update: &UpdateUi,
 ) {
     let block = Block::default().borders(Borders::ALL).title("Settings");
@@ -509,7 +550,7 @@ fn render_list(
     }
 
     let (lines, owners) =
-        build_lines(snap, selected, defocus, subagent_tool_action, default_view, update);
+        build_lines(snap, selected, defocus, subagent_tool_action, default_view, live_poll_secs, update);
 
     // Edge-triggered scrolling: the cursor moves freely inside the visible
     // window and the list only scrolls once the cursor reaches the top or
@@ -544,6 +585,7 @@ fn action_hint(
     defocus: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
+    live_poll_secs: u64,
     update: &UpdateUi,
 ) -> String {
     let list = items(snap);
@@ -630,6 +672,11 @@ fn action_hint(
         } else {
             "Enter: unfocus the prompt box after sending (keys go back to navigation)".to_string()
         },
+        ConfigItem::LivePollInterval => format!(
+            "Enter: probe the usage endpoint at most every {} instead (currently {})",
+            fmt_poll_secs(next_live_poll_preset(live_poll_secs)),
+            fmt_poll_secs(live_poll_secs)
+        ),
         ConfigItem::SubagentToolActionToggle => if subagent_tool_action {
             "Enter: hide the — Tool(arg) suffix on sub-agent captions".to_string()
         } else {
@@ -643,6 +690,7 @@ fn action_hint(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_info(
     f: &mut Frame,
     area: Rect,
@@ -651,10 +699,11 @@ fn render_info(
     defocus: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
+    live_poll_secs: u64,
     update: &UpdateUi,
     last_message: Option<&str>,
 ) {
-    let hint = action_hint(snap, selected, defocus, subagent_tool_action, default_view, update);
+    let hint = action_hint(snap, selected, defocus, subagent_tool_action, default_view, live_poll_secs, update);
     let msg_line = match last_message {
         Some(m) => Line::from(Span::styled(m.to_string(), Style::default().fg(Color::Cyan))),
         None => Line::from(Span::styled(
@@ -730,15 +779,28 @@ mod tests {
         assert_eq!(list[8], ConfigItem::UpdateCheckNow);
         assert_eq!(list[9], ConfigItem::DefaultView);
         assert_eq!(list[10], ConfigItem::DefocusToggle);
-        assert_eq!(list[11], ConfigItem::SubagentToolActionToggle);
-        assert_eq!(list[12], ConfigItem::StatusLineComposer);
+        assert_eq!(list[11], ConfigItem::LivePollInterval);
+        assert_eq!(list[12], ConfigItem::SubagentToolActionToggle);
+        assert_eq!(list[13], ConfigItem::StatusLineComposer);
         // No snapshot yet → only the fixed rows.
-        assert_eq!(items(None).len(), 11);
+        assert_eq!(items(None).len(), 12);
+    }
+
+    #[test]
+    fn live_poll_presets_cycle_and_format() {
+        assert_eq!(next_live_poll_preset(60), 120);
+        // Wraps past the largest preset.
+        assert_eq!(next_live_poll_preset(600), 30);
+        // Hand-edited off-preset values advance to the next larger one.
+        assert_eq!(next_live_poll_preset(90), 120);
+        assert_eq!(fmt_poll_secs(30), "30s");
+        assert_eq!(fmt_poll_secs(90), "90s");
+        assert_eq!(fmt_poll_secs(120), "2m");
     }
 
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
         let snap = snapshot();
-        let backend = TestBackend::new(100, 30);
+        let backend = TestBackend::new(100, 32);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
@@ -754,6 +816,7 @@ mod tests {
                     true,
                     false,
                     DefaultView::All,
+                    60,
                     &update_ui(status.as_ref()),
                     &mut rect,
                 );
@@ -787,6 +850,7 @@ mod tests {
             "check for updates",
             "Preferences",
             "defocus input after send",
+            "usage poll interval",
             "Status line",
             "status line blocks",
             "did a thing",

@@ -1042,6 +1042,19 @@ pub fn set_update_build_dir(dir: &str) -> Result<()> {
     })
 }
 
+/// Persist the minimum seconds between live usage-endpoint probes
+/// (`live_refresh_interval_secs`). Callers should follow up with
+/// [`crate::live_usage::reload_tuning`] so a running process picks the
+/// new value up without a restart.
+pub fn set_live_refresh_interval_secs(secs: u64) -> Result<()> {
+    edit_config_table(move |t| {
+        t.insert(
+            "live_refresh_interval_secs".to_string(),
+            toml::Value::Integer(secs as i64),
+        );
+    })
+}
+
 /// Persist whether the TUI asks about updates on startup.
 pub fn set_update_prompt(enabled: bool) -> Result<()> {
     edit_config_table(|t| {

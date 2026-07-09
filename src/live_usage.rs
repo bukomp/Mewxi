@@ -59,15 +59,36 @@ fn tunable_duration(configured: Option<u64>, default: Duration) -> Duration {
     Duration::from_secs(configured.unwrap_or(default.as_secs()).max(MIN_TUNABLE_SECS))
 }
 
+// Cached tunables, in seconds; 0 = not read yet (MIN_TUNABLE_SECS keeps
+// real values from ever being 0). Plain atomics rather than OnceLock so
+// the Config view can invalidate them after writing a new value —
+// otherwise a running TUI would keep the old cadence until restart.
+static TUNED_REFRESH_SECS: AtomicU64 = AtomicU64::new(0);
+static TUNED_BACKOFF_SECS: AtomicU64 = AtomicU64::new(0);
+
 fn tuning() -> (Duration, Duration) {
-    static S: OnceLock<(Duration, Duration)> = OnceLock::new();
-    *S.get_or_init(|| {
-        let (refresh, backoff) = crate::accounts::live_tuning();
-        (
-            tunable_duration(refresh, DEFAULT_REFRESH_INTERVAL),
-            tunable_duration(backoff, DEFAULT_BACKOFF_AFTER_429),
-        )
-    })
+    // Acquire pairs with the Release below: a reader that sees a
+    // non-zero refresh value is guaranteed to see the backoff written
+    // before it.
+    let refresh = TUNED_REFRESH_SECS.load(Ordering::Acquire);
+    if refresh != 0 {
+        return (
+            Duration::from_secs(refresh),
+            Duration::from_secs(TUNED_BACKOFF_SECS.load(Ordering::Relaxed)),
+        );
+    }
+    let (refresh, backoff) = crate::accounts::live_tuning();
+    let refresh = tunable_duration(refresh, DEFAULT_REFRESH_INTERVAL);
+    let backoff = tunable_duration(backoff, DEFAULT_BACKOFF_AFTER_429);
+    TUNED_BACKOFF_SECS.store(backoff.as_secs(), Ordering::Relaxed);
+    TUNED_REFRESH_SECS.store(refresh.as_secs(), Ordering::Release);
+    (refresh, backoff)
+}
+
+/// Drop the cached tunables so the next read re-parses `accounts.toml`.
+/// Called by the TUI's Config view after persisting a new value.
+pub fn reload_tuning() {
+    TUNED_REFRESH_SECS.store(0, Ordering::Release);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -588,7 +609,7 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
 // with the one-shot statusline process — it's on disk now, see the
 // marker section above.)
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
