@@ -19,10 +19,13 @@ use crate::auth;
 
 const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const BETA_HEADER: &str = "oauth-2025-04-20";
-/// Mirror Claude Code's UA so the server treats us the same. The version is
-/// the one currently installed on the author's machine; any `claude-code/X.Y.Z`
-/// string appears to be accepted.
-const USER_AGENT: &str = "claude-code/2.1.116";
+/// Mirror Claude Code's own UA so the server treats us the same way it
+/// treats the real CLI. This *must* track Claude Code's current format —
+/// the endpoint has been observed to 403 ("Request not allowed") requests
+/// whose UA doesn't look like a genuine Claude Code client. The version
+/// number is the one currently installed on the author's machine; only the
+/// `claude-cli/X.Y.Z (external, cli)` shape appears to matter.
+const USER_AGENT: &str = "claude-cli/2.1.116 (external, cli)";
 
 /// Minimum age of a cached response before we'll refetch on demand.
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
@@ -147,6 +150,13 @@ impl LiveUsage {
 pub enum FetchError {
     RateLimited,
     Unauthorized,
+    /// 403 "Request not allowed" — an edge/permission rejection distinct
+    /// from an expired token. Observed causes: a User-Agent that doesn't
+    /// match Claude Code's own format, or an account without an active
+    /// Claude subscription. Kept as its own variant (rather than falling
+    /// into `Other`) so it gets a clean message instead of a raw JSON dump,
+    /// and so callers can back off instead of hammering the endpoint.
+    Forbidden,
     Other(anyhow::Error),
 }
 
@@ -155,6 +165,10 @@ impl std::fmt::Display for FetchError {
         match self {
             FetchError::RateLimited => write!(f, "rate limited (429)"),
             FetchError::Unauthorized => write!(f, "unauthorized (401) — token expired or invalid"),
+            FetchError::Forbidden => write!(
+                f,
+                "forbidden (403) — Anthropic rejected the request; open Claude Code once to refresh credentials, or the account may lack an active Claude subscription"
+            ),
             FetchError::Other(e) => write!(f, "{e}"),
         }
     }
@@ -190,6 +204,7 @@ pub fn fetch_live(token: &str) -> Result<LiveUsage, FetchError> {
         }
         Err(ureq::Error::Status(429, _)) => Err(FetchError::RateLimited),
         Err(ureq::Error::Status(401, _)) => Err(FetchError::Unauthorized),
+        Err(ureq::Error::Status(403, _)) => Err(FetchError::Forbidden),
         Err(ureq::Error::Status(code, r)) => {
             let body = r.into_string().unwrap_or_default();
             Err(FetchError::Other(anyhow!("HTTP {code}: {body}")))
@@ -306,6 +321,20 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
     }
 
     let now = Utc::now();
+
+    // 401/403 get the same treatment as 429: the statusline is invoked per
+    // keypress, so re-hitting an endpoint that just told us "no" on every
+    // render would hammer it for nothing. Unlike the 429 branch below, this
+    // must not depend on having a (fresh) cache — a persistent 403 means the
+    // cache is old or absent, precisely when the backoff matters most.
+    // `force` (the TUI's manual refresh) bypasses it so the user can retry
+    // immediately after fixing their credentials.
+    if !force {
+        if let Some(reason) = recent_denied(&account.name) {
+            return FetchOutcome::Failed { reason, cached };
+        }
+    }
+
     if let Some(ref c) = cached {
         // 429 backoff is non-negotiable even with `force` — we don't want
         // to hammer the endpoint after it told us to back off.
@@ -324,7 +353,7 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
         }
     }
 
-    let token = match auth::read_oauth_token(account) {
+    let (token, expiry) = match auth::read_oauth_token_with_expiry(account) {
         Ok(t) => t,
         Err(e) => {
             log_once(
@@ -342,12 +371,38 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
         Ok(fresh) => {
             save_cached(account, &fresh);
             clear_429_flag(&account.name);
+            clear_denied_flag(&account.name);
             clear_error_entry(&account.name);
             FetchOutcome::Fetched(fresh)
         }
         Err(FetchError::RateLimited) => {
             mark_429(&account.name);
             FetchOutcome::RateLimited(cached)
+        }
+        Err(e @ (FetchError::Unauthorized | FetchError::Forbidden)) => {
+            // Both are permission rejections the endpoint won't reconsider
+            // until something changes locally (a refreshed token, or a
+            // subscription change) — back off like a 429 rather than
+            // retrying every keypress. If we know the local credential's
+            // expiry and it's already passed, say so: that's the most
+            // actionable read for a user staring at a 401/403 they didn't
+            // cause (e.g. Claude Code hasn't refreshed the token on this
+            // machine in a while).
+            let mut reason = e.to_string();
+            if let Some(expiry) = expiry {
+                if expiry < now {
+                    let stale_for = (now - expiry).num_minutes().max(0);
+                    reason.push_str(&format!(
+                        " (local token expired {stale_for}m ago — open Claude Code on this machine to refresh it)"
+                    ));
+                }
+            }
+            mark_denied(&account.name, reason.clone());
+            log_once(
+                &account.name,
+                format!("mewxi: live fetch failed for '{}': {reason}", account.name),
+            );
+            FetchOutcome::Failed { reason, cached }
         }
         Err(e) => {
             log_once(
@@ -409,6 +464,16 @@ fn last_429_ts() -> &'static Mutex<HashMap<String, DateTime<Utc>>> {
     static S: OnceLock<Mutex<HashMap<String, DateTime<Utc>>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
+/// Parallel to `last_429_ts`, but for 401/403 (permission rejections rather
+/// than rate limiting). Kept as a distinct map — rather than reusing the 429
+/// one — so a short-circuited call during the backoff window can still
+/// report `FetchOutcome::Failed` with the *actual* reason (forbidden /
+/// unauthorized, possibly with the stale-token note) instead of being
+/// mislabeled as `RateLimited`.
+fn last_denied() -> &'static Mutex<HashMap<String, (DateTime<Utc>, String)>> {
+    static S: OnceLock<Mutex<HashMap<String, (DateTime<Utc>, String)>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
 fn logged_once_set() -> &'static Mutex<std::collections::HashSet<String>> {
     static S: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
@@ -429,6 +494,30 @@ fn is_recent_429(account: &str) -> bool {
     let Some(ts) = g.get(account).copied() else { return false };
     let Ok(delta) = chrono::Duration::from_std(BACKOFF_AFTER_429) else { return false };
     Utc::now() - ts < delta
+}
+
+fn mark_denied(account: &str, reason: String) {
+    if let Ok(mut g) = last_denied().lock() {
+        g.insert(account.to_string(), (Utc::now(), reason));
+    }
+}
+fn clear_denied_flag(account: &str) {
+    if let Ok(mut g) = last_denied().lock() {
+        g.remove(account);
+    }
+}
+/// If the account was denied (401/403) within the backoff window, return
+/// the reason string that was recorded at the time — so a short-circuited
+/// caller can still surface *why*, not just that it's backing off.
+fn recent_denied(account: &str) -> Option<String> {
+    let g = last_denied().lock().ok()?;
+    let (ts, reason) = g.get(account)?;
+    let delta = chrono::Duration::from_std(BACKOFF_AFTER_429).ok()?;
+    if Utc::now() - *ts < delta {
+        Some(reason.clone())
+    } else {
+        None
+    }
 }
 
 fn log_once(account: &str, msg: String) {

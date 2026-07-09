@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 // `live_session_*_threshold_secs` fields in `accounts.toml` are still
 // parsed for backward compatibility but no longer influence detection.)
 
-/// How `read_oauth_token` should resolve an account's bearer token.
+/// How `auth::read_oauth_token_with_expiry` should resolve an account's
+/// bearer token.
 ///
 /// `#[serde(untagged)]` lets the user pick exactly one variant inline:
 /// `token_source = { env = "VAR" }`, `token_source = { keychain = "svc" }`,
