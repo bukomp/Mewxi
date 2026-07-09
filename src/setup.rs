@@ -10,8 +10,15 @@
 //!
 //! Watcher service: a single user-scope unit (one on the box). On
 //! macOS it's a `launchd` agent under `~/Library/LaunchAgents/`; on
-//! Linux it's a `systemd` user unit; on Windows it's a per-user
-//! `ONLOGON` Scheduled Task (`schtasks`).
+//! Linux it's a `systemd` user unit. Windows is two-tiered: the
+//! preferred mechanism is a per-user `ONLOGON` Scheduled Task
+//! (`schtasks`), but creating an `ONLOGON`-triggered task requires an
+//! elevated (administrator) shell — a non-admin user gets "Access is
+//! denied" from `schtasks /Create`, no matter what `/RL` says — so
+//! `install_watcher` falls back to a per-user `HKCU\...\Run` registry
+//! value (no elevation needed) plus a detached spawn of `mewxi watch`
+//! to start it immediately. See the `#[cfg(windows)]` block below for
+//! the full elevated-vs-unelevated mechanism matrix.
 
 use crate::accounts::{self, Account};
 use crate::watch;
@@ -752,12 +759,33 @@ fn inspect_watcher() -> WatcherState {
     }
 }
 
-/// Windows: the watcher runs as a per-user Scheduled Task triggered
-/// `ONLOGON` (the closest analogue to a launchd agent / systemd user
-/// unit — survives reboots, no admin rights needed).
+/// Windows: the watcher's preferred mechanism is a per-user Scheduled
+/// Task triggered `ONLOGON` (the closest analogue to a launchd agent /
+/// systemd user unit — survives reboots). In practice `schtasks /Create
+/// /SC ONLOGON` needs an elevated shell: Microsoft documents `ONLOGON`
+/// as requiring administrator rights to register, and a non-admin
+/// `/Create` fails with "Access is denied" regardless of `/RL LIMITED`
+/// (that flag only controls the *run-time* token of an already-created
+/// task). Most users are never elevated, so `install_watcher` treats
+/// this as a best-effort tier-1 attempt and falls back to the per-user
+/// `Run` key below when it fails. Also doubles as the registry value
+/// name used by that fallback, so both mechanisms are easy to find by
+/// the same string.
 #[cfg(windows)]
 const WATCH_TASK_NAME: &str = "mewxi-watch";
 
+/// Per-user `Run` key: HKCU-scoped (no admin rights required), runs the
+/// value's command once at interactive logon — the same mechanism
+/// countless unelevated "start on login" installers rely on. This is
+/// `install_watcher`'s tier-2 fallback for when the `ONLOGON` scheduled
+/// task in [`WATCH_TASK_NAME`] can't be created.
+#[cfg(windows)]
+const WATCH_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Query both install tiers. The scheduled task (tier 1) is checked
+/// first since it's the richer signal (it reports its own Running/Ready
+/// status); if it's absent — which is the common case on a non-admin
+/// box, see [`WATCH_TASK_NAME`] — fall back to the `Run` key (tier 2).
 #[cfg(windows)]
 fn inspect_watcher() -> WatcherState {
     match Command::new("schtasks")
@@ -765,23 +793,63 @@ fn inspect_watcher() -> WatcherState {
         .output()
     {
         Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
+            let text = decode_console(&o.stdout);
             // The verbose LIST view carries a `Status: Running/Ready` line;
             // a long-lived `mewxi watch` process keeps it at Running.
             let running = text.lines().any(|l| {
                 let l = l.trim();
                 l.starts_with("Status:") && l.contains("Running")
             });
-            if running {
+            return if running {
                 WatcherState::Running
             } else {
                 WatcherState::Installed
-            }
+            };
         }
-        // schtasks exits non-zero when the task doesn't exist.
-        Ok(_) => WatcherState::NotInstalled,
-        Err(e) => WatcherState::Unknown(format!("schtasks: {e}")),
+        // schtasks exits non-zero when the task doesn't exist — don't
+        // conclude NotInstalled yet, the Run-key tier might be in play.
+        Ok(_) => {}
+        Err(e) => return WatcherState::Unknown(format!("schtasks: {e}")),
     }
+
+    if !run_key_present() {
+        return WatcherState::NotInstalled;
+    }
+    if run_key_watcher_running() {
+        WatcherState::Running
+    } else {
+        WatcherState::Installed
+    }
+}
+
+/// True when the `Run`-key fallback's value exists (regardless of
+/// whether the watcher process is currently alive).
+#[cfg(windows)]
+fn run_key_present() -> bool {
+    Command::new("reg")
+        .args(["query", WATCH_RUN_KEY, "/v", WATCH_TASK_NAME])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Best-effort Running check for the Run-key mechanism. `src/watch.rs`
+/// writes no pidfile — the only liveness signal it produces is
+/// rewriting each account's `status-<slug>.txt` cache on a 15s
+/// heartbeat (see `watch::run_forever` and `watcher_heartbeat_stale`,
+/// which the cheap `setup_incomplete` probe already relies on). Reuse
+/// that same freshness check here instead of `tasklist /IM mewxi.exe`:
+/// the TUI itself is also a `mewxi.exe` process, so an image-name
+/// filter can't tell "the watch daemon is alive" from "the user has
+/// mewxi open" and would misreport Running while the daemon is actually
+/// dead. If accounts can't even be loaded, report not-running rather
+/// than guess.
+#[cfg(windows)]
+fn run_key_watcher_running() -> bool {
+    let Ok(view) = accounts::load_accounts() else {
+        return false;
+    };
+    !watcher_heartbeat_stale(&view)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -876,27 +944,89 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
     Ok(())
 }
 
+/// The `<quoted-exe> [--no-live] watch` command line shared by both
+/// install tiers: the scheduled task's `/TR` and the Run key's `/d` want
+/// the exact same shape (exe quoted, then args) — cmd.exe interprets
+/// both the same way.
 #[cfg(windows)]
-pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
-    let tr = if no_live {
+fn watch_command_line(binary: &Path, no_live: bool) -> String {
+    if no_live {
         format!("\"{}\" --no-live watch", binary.display())
     } else {
         format!("\"{}\" watch", binary.display())
-    };
+    }
+}
+
+/// Tier 1: try the `ONLOGON` scheduled task; tier 2: fall back to the
+/// per-user `Run` key when that fails (typically "Access is denied" in
+/// a non-admin shell — see [`WATCH_TASK_NAME`]). Only when *both*
+/// mechanisms fail do we surface an error, and it carries both
+/// (properly decoded) failure reasons so a bug report shows what
+/// actually went wrong instead of a wall of `◆◆◆◆` mojibake from the
+/// OEM-codepage console output — see `decode_console`.
+#[cfg(windows)]
+pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
+    let tr = watch_command_line(binary, no_live);
     // `/F` recreates the task so a binary-path change is picked up.
-    // `/RL LIMITED` keeps it in the user's normal token (no elevation).
-    run_cmd(
+    // `/RL LIMITED` keeps it in the user's normal token — this only
+    // affects the token the task *runs with*, not whether an unelevated
+    // caller is allowed to *create* an ONLOGON task in the first place.
+    let schtasks_err = match run_cmd(
         "schtasks",
         &[
             "/Create", "/TN", WATCH_TASK_NAME, "/SC", "ONLOGON", "/TR", &tr, "/F", "/RL", "LIMITED",
         ],
-    )?;
-    // Start it now too, so setup doesn't have to wait for the next logon.
-    // Best-effort: ignore failure (e.g. an instance is already running).
-    let _ = Command::new("schtasks")
-        .args(["/Run", "/TN", WATCH_TASK_NAME])
-        .output();
-    Ok(())
+    ) {
+        Ok(()) => {
+            // Start it now too, so setup doesn't have to wait for the next
+            // logon. Best-effort: ignore failure (e.g. already running).
+            let _ = Command::new("schtasks")
+                .args(["/Run", "/TN", WATCH_TASK_NAME])
+                .output();
+            return Ok(());
+        }
+        Err(e) => e,
+    };
+
+    // Tier 2: per-user Run key — no elevation required.
+    match run_cmd(
+        "reg",
+        &["add", WATCH_RUN_KEY, "/v", WATCH_TASK_NAME, "/t", "REG_SZ", "/d", &tr, "/f"],
+    ) {
+        Ok(()) => {
+            // The Run key only fires at the *next* logon; start it now
+            // too, detached from this process so it outlives the TUI/CLI
+            // that ran setup. Best-effort, same as the schtasks /Run call
+            // above — ignore failure (e.g. already running).
+            spawn_detached_watcher(binary, no_live);
+            Ok(())
+        }
+        Err(run_key_err) => Err(anyhow!(
+            "scheduled task install failed: {schtasks_err}; Run-key fallback also failed: {run_key_err}"
+        )),
+    }
+}
+
+/// Launch `mewxi [--no-live] watch` detached from the current process —
+/// used by the Run-key install tier so the watcher starts immediately
+/// instead of waiting for the next interactive logon. `DETACHED_PROCESS`
+/// drops the child from this process's console/job so it survives the
+/// CLI or TUI exiting; `CREATE_NO_WINDOW` keeps a stray console from
+/// flashing up for a binary that has no window of its own. Best-effort,
+/// mirrored on the schtasks tier's own `/Run` call: failure here just
+/// means the watcher starts at next logon instead of immediately.
+#[cfg(windows)]
+fn spawn_detached_watcher(binary: &Path, no_live: bool) {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW (0x08000000) | DETACHED_PROCESS (0x00000008).
+    const CREATE_NO_WINDOW_DETACHED: u32 = 0x0800_0008;
+    let mut cmd = Command::new(binary);
+    if no_live {
+        cmd.arg("--no-live");
+    }
+    cmd.arg("watch");
+    cmd.creation_flags(CREATE_NO_WINDOW_DETACHED);
+    let _ = cmd.spawn();
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -940,9 +1070,19 @@ pub fn stop_watcher_now() -> Result<()> {
     if matches!(inspect_watcher(), WatcherState::NotInstalled) {
         return Ok(());
     }
+    // Tier 1: scheduled-task mechanism, if that's what's running.
     let _ = Command::new("schtasks")
         .args(["/End", "/TN", WATCH_TASK_NAME])
         .output();
+    // Tier 2: the Run-key mechanism has no pidfile (see
+    // `run_key_watcher_running`), so there is no pid we can trust to
+    // belong to the watch process rather than something else. We
+    // deliberately never `taskkill /IM mewxi.exe` here — that image name
+    // also matches the TUI/CLI process executing this very command, so a
+    // by-name kill would take down the caller as collateral damage.
+    // Net effect: a Run-key-only watcher can't be force-stopped
+    // immediately today; it keeps running until the user logs off, and
+    // `uninstall_watcher` at least prevents it from coming back.
     Ok(())
 }
 
@@ -981,11 +1121,24 @@ pub fn uninstall_watcher() -> Result<()> {
     if matches!(inspect_watcher(), WatcherState::NotInstalled) {
         return Ok(());
     }
-    // Stop the live instance first, then drop the task registration.
+    // Stop the live instance first (best-effort — see `stop_watcher_now`
+    // for why the Run-key mechanism can't be reliably killed), then drop
+    // *both* possible registrations. Each removal is independently
+    // best-effort: a fresh install only ever used one of the two tiers,
+    // so the other's delete/query is expected to "fail" (not found) most
+    // of the time — that's not a real error, just idempotency. We still
+    // return Ok even when neither existed, matching every other
+    // uninstall_watcher on this platform matrix.
     let _ = Command::new("schtasks")
         .args(["/End", "/TN", WATCH_TASK_NAME])
         .output();
-    run_cmd("schtasks", &["/Delete", "/TN", WATCH_TASK_NAME, "/F"])
+    let _ = Command::new("schtasks")
+        .args(["/Delete", "/TN", WATCH_TASK_NAME, "/F"])
+        .output();
+    let _ = Command::new("reg")
+        .args(["delete", WATCH_RUN_KEY, "/v", WATCH_TASK_NAME, "/f"])
+        .output();
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -1257,10 +1410,60 @@ fn run_cmd(bin: &str, args: &[&str]) -> Result<()> {
         return Err(anyhow!(
             "`{bin} {}` failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
+            decode_console(&out.stderr).trim()
         ));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Console-output decoding
+//
+// Windows console tools (`schtasks`, `reg`, …) emit error text in the
+// box's OEM codepage, not UTF-8 — cp866 on Russian Windows, cp850 on many
+// West-European installs, cp437 on a US default, etc. Decoding that byte
+// stream with `String::from_utf8_lossy` turns every non-ASCII run into a
+// wall of U+FFFD replacement characters (`◆◆◆◆…` in the TUI's monospace
+// font) — unreadable, and useless for a bug report. `decode_console`
+// tries UTF-8 first (harmless if a tool already emits it) and otherwise
+// decodes against the OEM codepage so the text stays legible. Every
+// Windows-side read of subprocess stdout/stderr in this module should go
+// through it instead of `from_utf8_lossy`; non-Windows platforms don't
+// have this problem (their console tools are UTF-8), so the fallback
+// there is the plain lossy decode, unchanged.
+// ---------------------------------------------------------------------------
+
+/// `GetOEMCP` — the OEM codepage Windows console applications use for
+/// stdout/stderr, as opposed to `GetACP`'s "ANSI" codepage used by GUI
+/// apps. `schtasks`/`reg` are console apps, so OEM is the right one.
+/// Declared directly via `extern "system"` rather than pulling in the
+/// `windows`/`winapi` crate for a single one-line syscall.
+#[cfg(windows)]
+fn oem_cp() -> u32 {
+    extern "system" {
+        fn GetOEMCP() -> u32;
+    }
+    unsafe { GetOEMCP() }
+}
+
+#[cfg(windows)]
+fn decode_console(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    codepage::to_encoding(oem_cp() as u16)
+        .unwrap_or(encoding_rs::WINDOWS_1252)
+        .decode(bytes)
+        .0
+        .into_owned()
+}
+
+// Only `run_cmd` calls the non-Windows arm, and `run_cmd` itself is only
+// compiled for Linux/Windows (see its `#[cfg]`) — matching that here
+// keeps macOS builds from seeing this as dead code.
+#[cfg(all(not(windows), target_os = "linux"))]
+fn decode_console(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 #[cfg(target_os = "macos")]
@@ -1556,5 +1759,19 @@ mod tests {
         assert!(v.get("subagentStatusLine").is_none());
         // Second unwire is a no-op.
         assert!(!unwire_subagent_statusline(&settings).unwrap());
+    }
+
+    // `decode_console` only exists on the platforms that call it (see its
+    // `#[cfg]`s) — macOS never does, so this test is gated the same way
+    // rather than forcing the helper to exist everywhere just to be
+    // testable.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn decode_console_passes_through_valid_utf8() {
+        // The common case (and the only case reachable on Linux, whose
+        // console tools are UTF-8): valid UTF-8 bytes decode losslessly,
+        // multi-byte characters included.
+        assert_eq!(decode_console("hello".as_bytes()), "hello");
+        assert_eq!(decode_console("привет".as_bytes()), "привет");
     }
 }

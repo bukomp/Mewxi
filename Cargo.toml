@@ -28,6 +28,13 @@ ureq = { version = "2", features = ["json"] }
 vt100 = "0.16"
 walkdir = "2"
 
+[target.'cfg(windows)'.dependencies]
+# Decode Windows console-tool (schtasks/reg) output, which comes back in
+# the box's OEM codepage rather than UTF-8 — see `decode_console` in
+# src/setup.rs. Kept windows-only so macOS/Linux builds don't pull them.
+encoding_rs = "0.8"
+codepage = "0.1"
+
 [build-dependencies]
 # Used by build.rs to enumerate blocks/*.toml for embedding.
 walkdir = "2"
