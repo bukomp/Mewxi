@@ -25,6 +25,19 @@
 //! `update_repo_dir` in `accounts.toml` when the checkout has moved
 //! since the build.
 //!
+//! Binaries downloaded prebuilt (GitHub Actions artifacts, Releases)
+//! have no source checkout on the machine at all — `MEWXI_SOURCE_REPO`
+//! there is the *builder's* path and never resolves locally. For that
+//! case `build.rs` also embeds `MEWXI_ORIGIN_URL` (the repo's `origin`
+//! remote at build time). When the local checkout can't be found but
+//! that URL is non-empty, checks and applies fall back to a
+//! remote-only path driven by `git ls-remote <url>` — no local repo
+//! needed, git still required on PATH. It's strictly less capable than
+//! the local path (no behind-count for the dev channel, since that
+//! needs a merge-base walk against a local ref), but it's the
+//! difference between the updater working at all and silently dying
+//! for anyone not running from a checkout. See [`RepoSource`].
+//!
 //! Every successful check is cached at
 //! `~/.cache/mewxi/update-check.json` so cheap consumers — most
 //! importantly the statusLine renderer that runs inside every Claude
@@ -296,9 +309,60 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Run a bare `git <args>` with no `-C <repo>` — for `ls-remote`
+/// against a URL, which needs no local checkout at all. Same
+/// error-with-stderr shape as [`git`].
+fn git_norepo(args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// The commit this binary was built from, embedded by `build.rs`.
 /// Empty when the build had no git context (e.g. a source tarball).
 const BUILD_COMMIT: &str = env!("MEWXI_BUILD_COMMIT");
+
+/// The repo's `origin` URL at build time, embedded by `build.rs`.
+/// Empty when the build had no git context. This is what lets
+/// prebuilt-binary users (no local checkout, so [`repo_dir`] fails)
+/// still check for and apply updates — see [`RepoSource`].
+const ORIGIN_URL: &str = env!("MEWXI_ORIGIN_URL");
+
+/// Where to run update checks/applies against: a local checkout (the
+/// normal case — richer checks, e.g. dev-channel behind-counts) or,
+/// when no local checkout can be found but the binary was built with a
+/// known `origin`, the bare URL via `git ls-remote`/`git clone`.
+enum RepoSource {
+    Local(PathBuf),
+    Remote(String),
+}
+
+/// Resolve the checkout to operate against: [`repo_dir`] if it
+/// resolves, else a remote fallback using the build-embedded
+/// [`ORIGIN_URL`] when one exists. Only errors when both are
+/// unavailable — in which case the [`repo_dir`] error (which already
+/// names `update_repo_dir` as the fix) is the right message to surface.
+fn resolve_repo_source(override_dir: Option<&Path>) -> Result<RepoSource> {
+    match repo_dir(override_dir) {
+        Ok(dir) => Ok(RepoSource::Local(dir)),
+        Err(e) => {
+            if ORIGIN_URL.is_empty() {
+                Err(e)
+            } else {
+                Ok(RepoSource::Remote(ORIGIN_URL.to_string()))
+            }
+        }
+    }
+}
 
 /// Baseline for the dev-channel comparison: the commit the running
 /// binary was built from, when it's known and still exists in `repo`;
@@ -349,6 +413,35 @@ fn latest_version_tag(repo: &Path) -> Result<Option<String>> {
         .map(String::from))
 }
 
+/// Parse `git ls-remote --tags --refs <url>` output (`<sha>\trefs/tags/<name>`
+/// per line) into version-looking tag names — same digit-after-optional-`v`
+/// filter as [`latest_version_tag`]. Pure string parsing, no network, so
+/// it's covered by a unit test below.
+fn parse_ls_remote_tags(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.split('\t').nth(1))
+        .filter_map(|refname| refname.strip_prefix("refs/tags/"))
+        .filter(|t| {
+            t.trim_start_matches('v')
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        })
+        .map(String::from)
+        .collect()
+}
+
+/// Parse `git ls-remote --symref <url> HEAD` output for the default
+/// branch: the `ref: refs/heads/<branch>\tHEAD` line git prints ahead
+/// of the sha line when `--symref` is given.
+fn parse_ls_remote_symref_head(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let rest = line.strip_prefix("ref: refs/heads/")?;
+        rest.split_whitespace().next().map(String::from)
+    })
+}
+
 /// Loose semver: optional `v` prefix, numeric dot components, anything
 /// after `-`/`+` ignored. Compares as a numeric vector, so `v0.10.0`
 /// beats `v0.9.1`.
@@ -373,17 +466,29 @@ fn version_newer(candidate: &str, current: &str) -> bool {
 
 /// Fetch origin and compare per the configured channel. Network +
 /// subprocess heavy — call from a background thread in interactive
-/// contexts. Writes the cache on success.
+/// contexts. Writes the cache on success. Uses the local checkout when
+/// [`resolve_repo_source`] finds one, else falls back to a remote-only
+/// check against the build-embedded origin URL.
 pub fn check_now() -> Result<UpdateStatus> {
     let view = accounts::load_accounts()?;
     let channel = channel_from_view(&view);
-    let repo = repo_dir(view.update_repo_dir.as_deref())?;
-    git(&repo, &["fetch", "--quiet", "--tags", "origin"]).context("fetching origin")?;
+    let status = match resolve_repo_source(view.update_repo_dir.as_deref())? {
+        RepoSource::Local(repo) => check_local(&repo, channel)?,
+        RepoSource::Remote(url) => check_remote(&url, channel)?,
+    };
+    write_cache(&status);
+    Ok(status)
+}
 
-    let status = match channel {
+/// [`check_now`]'s local-checkout path: fetch, then compare against
+/// origin's tags (release) or default branch (dev).
+fn check_local(repo: &Path, channel: UpdateChannel) -> Result<UpdateStatus> {
+    git(repo, &["fetch", "--quiet", "--tags", "origin"]).context("fetching origin")?;
+
+    Ok(match channel {
         UpdateChannel::Release => {
             let current = env!("CARGO_PKG_VERSION").to_string();
-            match latest_version_tag(&repo)? {
+            match latest_version_tag(repo)? {
                 Some(tag) => {
                     let available = version_newer(&tag, &current);
                     let detail = if available {
@@ -403,12 +508,12 @@ pub fn check_now() -> Result<UpdateStatus> {
             }
         }
         UpdateChannel::Dev => {
-            let branch = remote_default_branch(&repo);
-            let current = dev_baseline(&repo, BUILD_COMMIT)?;
-            let behind: u64 = git(&repo, &["rev-list", "--count", &format!("{current}..origin/{branch}")])?
+            let branch = remote_default_branch(repo);
+            let current = dev_baseline(repo, BUILD_COMMIT)?;
+            let behind: u64 = git(repo, &["rev-list", "--count", &format!("{current}..origin/{branch}")])?
                 .parse()
                 .unwrap_or(0);
-            let latest = git(&repo, &["rev-parse", "--short", &format!("origin/{branch}")])?;
+            let latest = git(repo, &["rev-parse", "--short", &format!("origin/{branch}")])?;
             UpdateStatus {
                 channel,
                 available: behind > 0,
@@ -421,9 +526,73 @@ pub fn check_now() -> Result<UpdateStatus> {
                 },
             }
         }
-    };
-    write_cache(&status);
-    Ok(status)
+    })
+}
+
+/// [`check_now`]'s remote-only fallback for prebuilt binaries with no
+/// local checkout: `git ls-remote` straight against `url`, no fetch or
+/// local repo needed (git on PATH still required). Can't produce a
+/// behind-count for the dev channel — that needs a merge-base walk
+/// against a local ref — so it reports a plain sha comparison instead.
+fn check_remote(url: &str, channel: UpdateChannel) -> Result<UpdateStatus> {
+    Ok(match channel {
+        UpdateChannel::Release => {
+            let current = env!("CARGO_PKG_VERSION").to_string();
+            let out = git_norepo(&["ls-remote", "--tags", "--refs", url])
+                .context("ls-remote --tags origin")?;
+            match parse_ls_remote_tags(&out).into_iter().max_by_key(|t| parse_version(t)) {
+                Some(tag) => {
+                    let available = version_newer(&tag, &current);
+                    let detail = if available {
+                        format!("tag {tag} is newer than v{current}")
+                    } else {
+                        format!("v{current} matches the newest tag")
+                    };
+                    UpdateStatus { channel, available, current: format!("v{current}"), latest: tag, detail }
+                }
+                None => UpdateStatus {
+                    channel,
+                    available: false,
+                    current: format!("v{current}"),
+                    latest: format!("v{current}"),
+                    detail: "no version tags on origin yet".to_string(),
+                },
+            }
+        }
+        UpdateChannel::Dev => {
+            if BUILD_COMMIT.is_empty() {
+                return Ok(UpdateStatus {
+                    channel,
+                    available: false,
+                    current: String::new(),
+                    latest: String::new(),
+                    detail: "binary has no build-commit metadata to compare against origin"
+                        .to_string(),
+                });
+            }
+            let out = git_norepo(&["ls-remote", url, "HEAD"]).context("ls-remote origin HEAD")?;
+            let remote_sha = out.split_whitespace().next().unwrap_or("");
+            if remote_sha.is_empty() {
+                return Err(anyhow!("git ls-remote {url} HEAD returned no commit"));
+            }
+            // Match BUILD_COMMIT's own abbreviation length so the two
+            // read as the same kind of thing side by side.
+            let short_len = BUILD_COMMIT.len().max(7).min(remote_sha.len());
+            let short = &remote_sha[..short_len];
+            let in_sync = remote_sha.starts_with(BUILD_COMMIT);
+            UpdateStatus {
+                channel,
+                available: !in_sync,
+                current: BUILD_COMMIT.to_string(),
+                latest: short.to_string(),
+                detail: if in_sync {
+                    "in sync with origin HEAD".to_string()
+                } else {
+                    format!("origin HEAD {short} differs from build {BUILD_COMMIT}")
+                },
+            }
+        }
+    })
 }
 
 /// Run [`check_now`] on a background thread, delivering the result
@@ -470,27 +639,83 @@ fn build_workdir(override_dir: Option<&Path>) -> PathBuf {
     root.join(format!("mewxi-update-{}", std::process::id()))
 }
 
+/// True when `cargo` resolves on PATH. Prebuilt-binary users may have
+/// only the mewxi binary and no Rust toolchain — self-update builds
+/// from source, so we want a clear message instead of a raw "No such
+/// file or directory" from the failed `Command::new("cargo")` spawn.
+fn cargo_available() -> bool {
+    Command::new("cargo")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 /// Build the channel's newest point in a throwaway clone and install
 /// it via `cargo install --path <clone> --force` — the source checkout
-/// is only consulted for its origin URL and never modified, so a dirty
-/// working tree or a checked-out feature branch is fine. Streams
-/// git/cargo output to the inherited stdout/stderr — call only with
-/// the terminal restored (the TUI suspends its alternate screen around
-/// this).
+/// (when there is one) is only consulted for its origin URL and never
+/// modified, so a dirty working tree or a checked-out feature branch is
+/// fine. Falls back to a remote-only resolution (no local checkout
+/// needed) when [`resolve_repo_source`] can't find a local repo but the
+/// binary was built with a known origin URL — see the module docs.
+/// Streams git/cargo output to the inherited stdout/stderr — call only
+/// with the terminal restored (the TUI suspends its alternate screen
+/// around this).
 pub fn apply_now() -> Result<String> {
     let view = accounts::load_accounts()?;
     let channel = channel_from_view(&view);
-    let repo = repo_dir(view.update_repo_dir.as_deref())?;
 
     println!("mewxi update ({})", channel.as_str());
-    println!("  fetching origin …");
-    git(&repo, &["fetch", "--quiet", "--tags", "origin"]).context("fetching origin")?;
 
-    let origin = git(&repo, &["remote", "get-url", "origin"]).context("reading origin URL")?;
-    let git_ref = match channel {
-        UpdateChannel::Release => latest_version_tag(&repo)?
-            .ok_or_else(|| anyhow!("no version tags on origin — switch to the dev channel?"))?,
-        UpdateChannel::Dev => remote_default_branch(&repo),
+    if !cargo_available() {
+        return Err(anyhow!(
+            "cargo not found — self-update builds from source; install Rust (rustup.rs) or download a prebuilt release"
+        ));
+    }
+
+    // `source_repo` is Some only for the local path — it's forwarded to
+    // the rebuild below as MEWXI_SOURCE_REPO so the new binary remembers
+    // the real checkout instead of baking in the throwaway clone dir.
+    // In remote mode there's no local checkout to remember: the clone's
+    // own `origin` remote (the real URL) is genuine, so leaving
+    // MEWXI_SOURCE_REPO unset lets the new binary's build.rs pick up
+    // both MEWXI_SOURCE_REPO (harmlessly wrong — it'll fail like this
+    // run did) and MEWXI_ORIGIN_URL (correctly, from the clone's own git
+    // context) — the new binary self-heals into the same remote-only
+    // path rather than losing update capability entirely.
+    let (origin, git_ref, source_repo) = match resolve_repo_source(view.update_repo_dir.as_deref())? {
+        RepoSource::Local(repo) => {
+            println!("  fetching origin …");
+            git(&repo, &["fetch", "--quiet", "--tags", "origin"]).context("fetching origin")?;
+            let origin = git(&repo, &["remote", "get-url", "origin"]).context("reading origin URL")?;
+            let git_ref = match channel {
+                UpdateChannel::Release => latest_version_tag(&repo)?.ok_or_else(|| {
+                    anyhow!("no version tags on origin — switch to the dev channel?")
+                })?,
+                UpdateChannel::Dev => remote_default_branch(&repo),
+            };
+            (origin, git_ref, Some(repo))
+        }
+        RepoSource::Remote(url) => {
+            println!("  resolving {url} …");
+            let git_ref = match channel {
+                UpdateChannel::Release => {
+                    let out = git_norepo(&["ls-remote", "--tags", "--refs", &url])
+                        .context("ls-remote --tags origin")?;
+                    parse_ls_remote_tags(&out)
+                        .into_iter()
+                        .max_by_key(|t| parse_version(t))
+                        .ok_or_else(|| {
+                            anyhow!("no version tags on origin — switch to the dev channel?")
+                        })?
+                }
+                UpdateChannel::Dev => {
+                    let out = git_norepo(&["ls-remote", "--symref", &url, "HEAD"])
+                        .context("ls-remote --symref origin HEAD")?;
+                    parse_ls_remote_symref_head(&out).unwrap_or_else(|| "main".to_string())
+                }
+            };
+            (url, git_ref, None)
+        }
     };
 
     let workdir = build_workdir(view.update_build_dir.as_deref());
@@ -521,12 +746,14 @@ pub fn apply_now() -> Result<String> {
     // MEWXI_SOURCE_REPO: make the new binary remember the real source
     // checkout, not this throwaway clone (build.rs embeds it) — else
     // its own update checks point at a dir we delete a few lines down.
-    let status = Command::new("cargo")
-        .arg("install")
-        .arg("--path")
-        .arg(&workdir)
-        .arg("--force")
-        .env("MEWXI_SOURCE_REPO", &repo)
+    // Left unset in remote mode (source_repo is None) — see the comment
+    // above on why that's the right call there.
+    let mut cargo_cmd = Command::new("cargo");
+    cargo_cmd.arg("install").arg("--path").arg(&workdir).arg("--force");
+    if let Some(repo) = &source_repo {
+        cargo_cmd.env("MEWXI_SOURCE_REPO", repo);
+    }
+    let status = cargo_cmd
         .status()
         .context("running cargo install (is cargo on PATH?)")?;
     // Best-effort cleanup either way — the clone is throwaway.
@@ -548,7 +775,9 @@ pub fn apply_now() -> Result<String> {
     if let Ok(running) = std::env::current_exe() {
         let running = std::fs::canonicalize(&running).unwrap_or(running);
         let installed_real = std::fs::canonicalize(&installed).unwrap_or_else(|_| installed.clone());
-        let is_dev_build = running.starts_with(repo.join("target"));
+        let is_dev_build = source_repo
+            .as_ref()
+            .is_some_and(|repo| running.starts_with(repo.join("target")));
         if running != installed_real && !is_dev_build && installed_real.is_file() {
             replace_binary(&installed_real, &running).with_context(|| {
                 format!(
@@ -713,6 +942,42 @@ mod tests {
         assert!(!version_newer("0.1.0", "v0.2.0"));
         // Longer wins on equal prefix: 0.1.0.1 > 0.1.0.
         assert!(version_newer("0.1.0.1", "0.1.0"));
+    }
+
+    #[test]
+    fn ls_remote_tags_keeps_only_version_looking_refs() {
+        // `--refs` (as used by check_remote/apply_now) excludes the
+        // peeled `^{}` dereference lines git would otherwise print
+        // alongside annotated tags, so real output never has them.
+        let out = "\
+abc123\trefs/tags/v0.1.0
+def456\trefs/tags/v0.10.0
+aaa111\trefs/tags/not-a-version
+ccc333\trefs/heads/main";
+        let tags = parse_ls_remote_tags(out);
+        assert_eq!(tags, vec!["v0.1.0", "v0.10.0"]);
+        // Numeric ordering, not lexical — v0.10.0 beats v0.1.0.
+        assert_eq!(
+            tags.iter().max_by_key(|t| parse_version(t)),
+            Some(&"v0.10.0".to_string())
+        );
+    }
+
+    #[test]
+    fn ls_remote_tags_empty_on_no_tags() {
+        assert!(parse_ls_remote_tags("").is_empty());
+        assert!(parse_ls_remote_tags("aaa\trefs/heads/main").is_empty());
+    }
+
+    #[test]
+    fn ls_remote_symref_head_parses_default_branch() {
+        let out = "ref: refs/heads/main\tHEAD\nabc123def456\tHEAD\n";
+        assert_eq!(parse_ls_remote_symref_head(out), Some("main".to_string()));
+    }
+
+    #[test]
+    fn ls_remote_symref_head_none_without_symref_line() {
+        assert_eq!(parse_ls_remote_symref_head("abc123\tHEAD\n"), None);
     }
 
     #[test]

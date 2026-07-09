@@ -12,6 +12,7 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");
     println!("cargo:rerun-if-env-changed=MEWXI_SOURCE_REPO");
+    println!("cargo:rerun-if-env-changed=MEWXI_ORIGIN_URL");
 
     // Where the source checkout lives, as seen by the *installed*
     // binary. Normally the dir being built — but when the self-updater
@@ -32,6 +33,28 @@ fn main() {
     // Empty when there's no git context (e.g. building from a source
     // tarball) — update::dev_baseline falls back to the checkout HEAD.
     println!("cargo:rustc-env=MEWXI_BUILD_COMMIT={hash}");
+
+    // Users who grab a prebuilt `mewxi`/`mewxi.exe` off GitHub
+    // Actions/Releases have no source checkout at all — MEWXI_SOURCE_REPO
+    // above bakes in the *builder's* path (e.g. a CI runner's
+    // `D:\a\Mewxi\Mewxi`), which doesn't exist on their machine, so
+    // `update::repo_dir` always fails for them. Embedding the origin URL
+    // too lets the updater fall back to a remote-only check/apply
+    // (`git ls-remote`, then clone straight from this URL) instead of
+    // just giving up. MEWXI_ORIGIN_URL lets CI override this explicitly
+    // (e.g. to pin the public repo URL regardless of what remote the
+    // runner's checkout happens to use); otherwise we read the checkout's
+    // own `origin` — same fallback shape as MEWXI_SOURCE_REPO/BUILD_COMMIT,
+    // empty when there's no git context.
+    let origin_url = std::env::var("MEWXI_ORIGIN_URL").ok().or_else(|| {
+        Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    }).unwrap_or_default();
+    println!("cargo:rustc-env=MEWXI_ORIGIN_URL={origin_url}");
 
     embed_default_blocks();
 }
