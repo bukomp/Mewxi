@@ -26,6 +26,7 @@
 //! account so concurrent watchers don't stomp on each other.
 
 use crate::accounts::Account;
+use crate::debug_log::{LogKind, LogOrigin};
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use walkdir::WalkDir;
 
 use crate::pricing::price_for;
@@ -167,10 +168,32 @@ fn save_file_cache(path: &Path, cache: &FileCache) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(bytes) = serde_json::to_vec(cache) {
-        let tmp = path.with_extension("json.tmp");
-        if fs::write(&tmp, &bytes).is_ok() {
-            let _ = fs::rename(&tmp, path);
+    match serde_json::to_vec(cache) {
+        Ok(bytes) => {
+            let tmp = path.with_extension("json.tmp");
+            match fs::write(&tmp, &bytes).and_then(|_| fs::rename(&tmp, path)) {
+                Ok(()) => {
+                    crate::debug_log::log_event(
+                        LogOrigin::Sessions,
+                        LogKind::FileWrite,
+                        &format!("wrote stats cache · {} files", cache.files.len()),
+                    );
+                }
+                Err(e) => {
+                    crate::debug_log::log_event(
+                        LogOrigin::Sessions,
+                        LogKind::Error,
+                        &format!("cache write failed — {e}"),
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            crate::debug_log::log_event(
+                LogOrigin::Sessions,
+                LogKind::Error,
+                &format!("cache serialize failed — {e}"),
+            );
         }
     }
 }
@@ -222,6 +245,7 @@ fn mtime_unix(m: &fs::Metadata) -> u64 {
 /// Uses the cache keyed on (mtime, size): unchanged files skip
 /// re-parsing, so repeat scans on a large history are near-instant.
 pub fn scan_all(root: &Path, cache_path: Option<&Path>) -> Result<Vec<UsageRecord>> {
+    let start = Instant::now();
     let mut out = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     if !root.exists() {
@@ -233,12 +257,15 @@ pub fn scan_all(root: &Path, cache_path: Option<&Path>) -> Result<Vec<UsageRecor
         .unwrap_or_default();
     let mut next: HashMap<PathBuf, FileEntry> = HashMap::new();
     let mut changed = false;
+    let mut files_scanned = 0usize;
+    let mut files_parsed = 0usize;
 
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
+        files_scanned += 1;
         let Ok(meta) = entry.metadata() else { continue };
         let mtime = mtime_unix(&meta);
         let size = meta.len();
@@ -248,7 +275,18 @@ pub fn scan_all(root: &Path, cache_path: Option<&Path>) -> Result<Vec<UsageRecor
             Some(e) if e.mtime_unix == mtime && e.size == size => e.records,
             _ => {
                 changed = true;
-                parse_file(path).unwrap_or_default()
+                files_parsed += 1;
+                match parse_file(path) {
+                    Ok(recs) => recs,
+                    Err(e) => {
+                        crate::debug_log::log_event(
+                            LogOrigin::Sessions,
+                            LogKind::Error,
+                            &format!("{} parse failed — {e}", file_label(path)),
+                        );
+                        Vec::new()
+                    }
+                }
             }
         };
         next.insert(path_buf, FileEntry { mtime_unix: mtime, size, records: entry_records });
@@ -286,8 +324,41 @@ pub fn scan_all(root: &Path, cache_path: Option<&Path>) -> Result<Vec<UsageRecor
         if let Some(p) = cache_path {
             save_file_cache(p, &FileCache { files: next });
         }
+        // Only log when the scan actually did work (a file was parsed,
+        // deleted, or is new) — a pure cache-hit rescan (the common case
+        // once history has been scanned once) stays silent so the hot
+        // per-tick reload path in the TUI doesn't flood the log ring.
+        crate::debug_log::log_event(
+            LogOrigin::Sessions,
+            LogKind::FileRead,
+            &format!(
+                "parsed {files_parsed}/{files_scanned} files · {} records · {}",
+                out.len(),
+                fmt_dur(start.elapsed())
+            ),
+        );
     }
     Ok(out)
+}
+
+/// Format an elapsed duration for a log line: `142ms` under a second,
+/// `1.2s` at or above.
+fn fmt_dur(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+/// Filename (not full path) for log messages — keeps scan/parse log
+/// lines short and avoids spelling out the full account/project tree.
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string()
 }
 
 fn parse_file(path: &Path) -> Result<Vec<UsageRecord>> {

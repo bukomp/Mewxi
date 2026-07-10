@@ -37,6 +37,7 @@
 //! itself when no summary has been generated yet; `label == description`
 //! therefore carries no live signal and is skipped rather than indexed.
 
+use crate::debug_log::{LogKind, LogOrigin};
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -75,13 +76,39 @@ pub fn write_feed(dir: &Path, payload: &str) -> Result<()> {
         .unwrap_or("any");
 
     let sessions_dir = dir.join("sessions");
-    std::fs::create_dir_all(&sessions_dir)?;
+    if let Err(e) = std::fs::create_dir_all(&sessions_dir) {
+        crate::debug_log::log_event(
+            LogOrigin::Agents,
+            LogKind::Error,
+            &format!("sessions dir failed — {e}"),
+        );
+        return Err(e.into());
+    }
     let path = feed_path(&sessions_dir, session_id);
     let tmp_path = path.with_extension("json.tmp");
     // Atomic write: the TUI polls this file on a 500ms tick and must
     // never observe a partial write.
-    std::fs::write(&tmp_path, payload)?;
-    std::fs::rename(&tmp_path, &path)?;
+    if let Err(e) = std::fs::write(&tmp_path, payload) {
+        crate::debug_log::log_event(
+            LogOrigin::Agents,
+            LogKind::Error,
+            &format!("agent feed write failed — {e} · {}", short_sid(session_id)),
+        );
+        return Err(e.into());
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+        crate::debug_log::log_event(
+            LogOrigin::Agents,
+            LogKind::Error,
+            &format!("agent feed rename failed — {e} · {}", short_sid(session_id)),
+        );
+        return Err(e.into());
+    }
+    crate::debug_log::log_event(
+        LogOrigin::Agents,
+        LogKind::FileWrite,
+        &format!("wrote agent feed · {}", short_sid(session_id)),
+    );
     Ok(())
 }
 
@@ -97,12 +124,44 @@ pub fn read_feed(dir: &Path, session_id: &str) -> Option<AgentStatusFeed> {
     if !is_fresh(&path, FRESH_WINDOW) {
         return None;
     }
-    let raw = std::fs::read_to_string(&path).ok()?;
-    parse_feed(&raw)
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::debug_log::log_event(
+                LogOrigin::Agents,
+                LogKind::Error,
+                &format!("agent feed unreadable — {e} · {}", short_sid(session_id)),
+            );
+            return None;
+        }
+    };
+    let parsed = parse_feed(&raw);
+    if parsed.is_none() {
+        crate::debug_log::log_event(
+            LogOrigin::Agents,
+            LogKind::Error,
+            &format!("feed parse failed · {}", short_sid(session_id)),
+        );
+    }
+    parsed
 }
 
 fn feed_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir.join(format!("{session_id}.agent-status.json"))
+}
+
+/// Shorten a session id for log messages: first 8 chars + `…` when
+/// longer. Left as-is for the special `any` bucket.
+fn short_sid(id: &str) -> String {
+    if id == "any" {
+        return id.to_string();
+    }
+    let head: String = id.chars().take(8).collect();
+    if id.chars().count() > 8 {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 /// Filename-safety gate for session ids pulled out of an untrusted

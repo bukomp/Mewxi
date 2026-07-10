@@ -207,7 +207,22 @@ pub fn cache_path() -> Option<PathBuf> {
 
 pub fn load_cached() -> Option<CachedCheck> {
     let path = cache_path()?;
-    let raw = std::fs::read_to_string(path).ok()?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::FileRead,
+                &format!("{} unreadable — {}", basename(&path), first_line(&e.to_string())),
+            );
+            return None;
+        }
+    };
+    crate::debug_log::log_event(
+        crate::debug_log::LogOrigin::Update,
+        crate::debug_log::LogKind::FileRead,
+        &format!("read {}", basename(&path)),
+    );
     serde_json::from_str(&raw).ok()
 }
 
@@ -226,8 +241,17 @@ fn write_cache(status: &UpdateStatus) {
     };
     if let Ok(json) = serde_json::to_string_pretty(&cached) {
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+        match std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &path)) {
+            Ok(()) => crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::FileWrite,
+                &format!("wrote {}", basename(&path)),
+            ),
+            Err(e) => crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::FileWrite,
+                &format!("{} write failed — {}", basename(&path), first_line(&e.to_string())),
+            ),
         }
     }
 }
@@ -290,22 +314,83 @@ pub fn repo_dir(override_dir: Option<&Path>) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Last path component, for log messages — full paths are noise in the
+/// panel and mostly redundant with the surrounding message.
+fn basename(p: &Path) -> std::borrow::Cow<'_, str> {
+    p.file_name()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_else(|| p.to_string_lossy())
+}
+
+/// First line of a possibly multi-line OS/stderr message — the rest is
+/// rarely useful in a one-line log entry.
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("").trim()
+}
+
+/// Format a duration the way the log panel expects: sub-second in ms,
+/// otherwise seconds with one decimal (e.g. `142ms`, `1.2s`).
+fn fmt_dur(ms: u128) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
+/// Build a short `git <subcommand> [<arg>]` label for log messages —
+/// the full arg list is noise, and a bare remote URL can embed
+/// credentials, so only the subcommand plus the first identifying,
+/// non-URL argument is kept.
+fn git_label(args: &[&str]) -> String {
+    let cmd = args.first().copied().unwrap_or("git");
+    let target = args
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-') && !a.contains("://"));
+    match target {
+        Some(t) => format!("git {cmd} {t}"),
+        None => format!("git {cmd}"),
+    }
+}
+
 /// Run `git -C <repo> <args>` and return trimmed stdout. Errors carry
 /// stderr so failures (auth, network) read meaningfully in the TUI.
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .with_context(|| format!("running git {}", args.join(" ")))?;
+    let start = std::time::Instant::now();
+    let result = Command::new("git").arg("-C").arg(repo).args(args).output();
+    let dur_ms = start.elapsed().as_millis();
+    let label = git_label(args);
+    let out = match result {
+        Ok(o) => o,
+        Err(e) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::Error,
+                &format!("{label} failed — {}", first_line(&e.to_string())),
+            );
+            return Err(e).with_context(|| format!("running git {}", args.join(" ")));
+        }
+    };
     if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let reason = first_line(&stderr);
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Update,
+            crate::debug_log::LogKind::Proc,
+            &format!("{label} failed — {reason}"),
+        );
         return Err(anyhow!(
             "git {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
+    crate::debug_log::log_event(
+        crate::debug_log::LogOrigin::Update,
+        crate::debug_log::LogKind::Proc,
+        &format!("{label} · {}", fmt_dur(dur_ms)),
+    );
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
@@ -313,17 +398,40 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 /// against a URL, which needs no local checkout at all. Same
 /// error-with-stderr shape as [`git`].
 fn git_norepo(args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .args(args)
-        .output()
-        .with_context(|| format!("running git {}", args.join(" ")))?;
+    let start = std::time::Instant::now();
+    let result = Command::new("git").args(args).output();
+    let dur_ms = start.elapsed().as_millis();
+    let label = git_label(args);
+    let out = match result {
+        Ok(o) => o,
+        Err(e) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::Error,
+                &format!("{label} failed — {}", first_line(&e.to_string())),
+            );
+            return Err(e).with_context(|| format!("running git {}", args.join(" ")));
+        }
+    };
     if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let reason = first_line(&stderr);
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Update,
+            crate::debug_log::LogKind::Proc,
+            &format!("{label} failed — {reason}"),
+        );
         return Err(anyhow!(
             "git {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
+    crate::debug_log::log_event(
+        crate::debug_log::LogOrigin::Update,
+        crate::debug_log::LogKind::Proc,
+        &format!("{label} · {}", fmt_dur(dur_ms)),
+    );
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
@@ -470,6 +578,40 @@ fn version_newer(candidate: &str, current: &str) -> bool {
 /// [`resolve_repo_source`] finds one, else falls back to a remote-only
 /// check against the build-embedded origin URL.
 pub fn check_now() -> Result<UpdateStatus> {
+    match check_now_inner() {
+        Ok(status) => {
+            let msg = if status.available {
+                format!(
+                    "update available — {} ({})",
+                    status.latest,
+                    status.channel.as_str()
+                )
+            } else {
+                format!(
+                    "up to date — {} ({})",
+                    status.current,
+                    status.channel.as_str()
+                )
+            };
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::Info,
+                &msg,
+            );
+            Ok(status)
+        }
+        Err(e) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::Error,
+                &format!("check failed — {}", first_line(&e.to_string())),
+            );
+            Err(e)
+        }
+    }
+}
+
+fn check_now_inner() -> Result<UpdateStatus> {
     let view = accounts::load_accounts()?;
     let channel = channel_from_view(&view);
     let status = match resolve_repo_source(view.update_repo_dir.as_deref())? {
@@ -644,10 +786,22 @@ fn build_workdir(override_dir: Option<&Path>) -> PathBuf {
 /// from source, so we want a clear message instead of a raw "No such
 /// file or directory" from the failed `Command::new("cargo")` spawn.
 fn cargo_available() -> bool {
-    Command::new("cargo")
+    let start = std::time::Instant::now();
+    let ok = Command::new("cargo")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    let msg = if ok {
+        format!("cargo --version · {}", fmt_dur(start.elapsed().as_millis()))
+    } else {
+        "cargo --version failed — not on PATH".to_string()
+    };
+    crate::debug_log::log_event(
+        crate::debug_log::LogOrigin::Update,
+        crate::debug_log::LogKind::Proc,
+        &msg,
+    );
+    ok
 }
 
 /// Build the channel's newest point in a throwaway clone and install
@@ -720,20 +874,67 @@ pub fn apply_now() -> Result<String> {
 
     let workdir = build_workdir(view.update_build_dir.as_deref());
     if workdir.exists() {
-        std::fs::remove_dir_all(&workdir)
-            .with_context(|| format!("clearing stale build dir {}", workdir.display()))?;
+        if let Err(e) = std::fs::remove_dir_all(&workdir) {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::Error,
+                &format!("build workdir clear failed — {}", first_line(&e.to_string())),
+            );
+            return Err(e).with_context(|| format!("clearing stale build dir {}", workdir.display()));
+        }
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Update,
+            crate::debug_log::LogKind::FileWrite,
+            "cleared build workdir",
+        );
     }
     if let Some(parent) = workdir.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating build dir {}", parent.display()))?;
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::Error,
+                &format!("build workdir create failed — {}", first_line(&e.to_string())),
+            );
+            return Err(e).with_context(|| format!("creating build dir {}", parent.display()));
+        }
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Update,
+            crate::debug_log::LogKind::FileWrite,
+            "created build workdir",
+        );
     }
     println!("  cloning {git_ref} into {} …", workdir.display());
-    let status = Command::new("git")
+    let clone_start = std::time::Instant::now();
+    let clone_result = Command::new("git")
         .args(["clone", "--quiet", "--depth", "1", "--branch", &git_ref])
         .arg(&origin)
         .arg(&workdir)
-        .status()
-        .context("running git clone")?;
+        .status();
+    let clone_dur_ms = clone_start.elapsed().as_millis();
+    let status = match clone_result {
+        Ok(s) => s,
+        Err(e) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::Error,
+                &format!("git clone failed — {}", first_line(&e.to_string())),
+            );
+            return Err(e).context("running git clone");
+        }
+    };
+    if status.success() {
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Update,
+            crate::debug_log::LogKind::Proc,
+            &format!("git clone · {}", fmt_dur(clone_dur_ms)),
+        );
+    } else {
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Update,
+            crate::debug_log::LogKind::Proc,
+            &format!("git clone failed — exit {status}"),
+        );
+    }
     if !status.success() {
         return Err(anyhow!("git clone failed ({status})"));
     }
@@ -753,11 +954,44 @@ pub fn apply_now() -> Result<String> {
     if let Some(repo) = &source_repo {
         cargo_cmd.env("MEWXI_SOURCE_REPO", repo);
     }
-    let status = cargo_cmd
-        .status()
-        .context("running cargo install (is cargo on PATH?)")?;
+    let build_start = std::time::Instant::now();
+    let build_result = cargo_cmd.status();
+    let build_dur_ms = build_start.elapsed().as_millis();
+    let status = match build_result {
+        Ok(s) => s,
+        Err(e) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Update,
+                crate::debug_log::LogKind::Error,
+                &format!("cargo install failed — {}", first_line(&e.to_string())),
+            );
+            return Err(e).context("running cargo install (is cargo on PATH?)");
+        }
+    };
+    if status.success() {
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Update,
+            crate::debug_log::LogKind::Proc,
+            &format!("cargo install · {}", fmt_dur(build_dur_ms)),
+        );
+    } else {
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Update,
+            crate::debug_log::LogKind::Proc,
+            &format!("cargo install failed — exit {status}"),
+        );
+    }
     // Best-effort cleanup either way — the clone is throwaway.
-    let _ = std::fs::remove_dir_all(&workdir);
+    let cleanup_ok = std::fs::remove_dir_all(&workdir).is_ok();
+    crate::debug_log::log_event(
+        crate::debug_log::LogOrigin::Update,
+        crate::debug_log::LogKind::FileWrite,
+        if cleanup_ok {
+            "removed build workdir"
+        } else {
+            "build workdir cleanup failed"
+        },
+    );
     if !status.success() {
         return Err(anyhow!("cargo install failed ({status})"));
     }
@@ -775,6 +1009,15 @@ pub fn apply_now() -> Result<String> {
     if let Ok(running) = std::env::current_exe() {
         let running = std::fs::canonicalize(&running).unwrap_or(running);
         let installed_real = std::fs::canonicalize(&installed).unwrap_or_else(|_| installed.clone());
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Update,
+            crate::debug_log::LogKind::FileRead,
+            if running == installed_real {
+                "binary check · in sync"
+            } else {
+                "binary check · differs"
+            },
+        );
         let is_dev_build = source_repo
             .as_ref()
             .is_some_and(|repo| running.starts_with(repo.join("target")));
@@ -817,6 +1060,11 @@ pub fn restart_process() -> std::io::Error {
         .ok()
         .filter(|p| p.is_file())
         .unwrap_or_else(cargo_bin_path);
+    crate::debug_log::log_event(
+        crate::debug_log::LogOrigin::Update,
+        crate::debug_log::LogKind::Info,
+        "restarting into new binary",
+    );
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

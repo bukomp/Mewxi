@@ -20,6 +20,7 @@
 //! for back-compat with existing statusLine hooks.
 
 use crate::accounts::{self, Account};
+use crate::debug_log::{LogKind, LogOrigin};
 use crate::live_usage;
 use crate::stats;
 use crate::update;
@@ -99,7 +100,14 @@ pub fn render_status(
 ) -> String {
     let view = match accounts::load_accounts() {
         Ok(v) => v,
-        Err(e) => return format!("\x1b[31mmewxi: {e}\x1b[0m"),
+        Err(e) => {
+            crate::debug_log::log_event(
+                LogOrigin::Statusline,
+                LogKind::Error,
+                &format!("accounts unavailable — {e}"),
+            );
+            return format!("\x1b[31mmewxi: {e}\x1b[0m");
+        }
     };
 
     let account = match transcript_path
@@ -322,6 +330,14 @@ pub(crate) fn local_five_h_segment(agg: &stats::Aggregate) -> (String, String) {
     (seg, format_reset(agg.five_h_resets_at))
 }
 
+/// Last path component, for log messages (full paths are too noisy for
+/// the on-screen logs panel).
+fn basename(path: &Path) -> std::borrow::Cow<'_, str> {
+    path.file_name()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_else(|| path.to_string_lossy())
+}
+
 fn write_status_cache(path: &Path, line: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -333,6 +349,11 @@ fn write_status_cache(path: &Path, line: &str) -> Result<()> {
         f.sync_data().ok();
     }
     fs::rename(&tmp, path)?;
+    crate::debug_log::log_event(
+        LogOrigin::Statusline,
+        LogKind::FileWrite,
+        &format!("wrote {}", basename(path)),
+    );
     Ok(())
 }
 
@@ -342,10 +363,22 @@ fn write_status_cache(path: &Path, line: &str) -> Result<()> {
 fn write_account_status(account: &Account, prefix_name: bool, no_live: bool) {
     let line = render_status_for_account(account, prefix_name, None, SessionMeta::default(), no_live);
     if let Some(p) = stats::status_cache_path_for(account) {
-        let _ = write_status_cache(&p, &line);
+        if let Err(e) = write_status_cache(&p, &line) {
+            crate::debug_log::log_event(
+                LogOrigin::Statusline,
+                LogKind::Error,
+                &format!("{} write failed — {e}", basename(&p)),
+            );
+        }
     }
     if let Some(mirror) = stats::status_cache_path_mirror() {
-        let _ = write_status_cache(&mirror, &line);
+        if let Err(e) = write_status_cache(&mirror, &line) {
+            crate::debug_log::log_event(
+                LogOrigin::Statusline,
+                LogKind::Error,
+                &format!("{} write failed — {e}", basename(&mirror)),
+            );
+        }
     }
 }
 
@@ -355,6 +388,11 @@ fn write_account_status(account: &Account, prefix_name: bool, no_live: bool) {
 pub fn run_forever(no_live: bool) -> Result<()> {
     let view = accounts::load_accounts()?;
     let prefix_name = view.accounts.len() > 1;
+    crate::debug_log::log_event(
+        LogOrigin::Statusline,
+        LogKind::Info,
+        &format!("watcher started · {} accounts", view.accounts.len()),
+    );
 
     // Seed once so statusLine has something to show immediately.
     for account in &view.accounts {
@@ -380,6 +418,11 @@ pub fn run_forever(no_live: bool) -> Result<()> {
             }
         })?;
         watcher.watch(&dir, RecursiveMode::Recursive)?;
+        crate::debug_log::log_event(
+            LogOrigin::Statusline,
+            LogKind::Info,
+            &format!("subscribed to transcripts · {}", account.name),
+        );
         watchers.push(watcher);
     }
     drop(dirty_tx);

@@ -14,6 +14,7 @@
 //!
 //! Dedup by canonicalized `dir`, then sort by `name` for stable iteration.
 
+use crate::debug_log::{LogKind, LogOrigin};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -272,6 +273,11 @@ pub fn set_default_effort(account: &Account, level: &str) -> Result<()> {
         .with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("rename into {}", path.display()))?;
+    crate::debug_log::log_event(
+        LogOrigin::Accounts,
+        LogKind::FileWrite,
+        &format!("wrote settings.json · {} · effort {level}", account.name),
+    );
     Ok(())
 }
 
@@ -319,6 +325,11 @@ pub fn set_default_model(account: &Account, slug: &str) -> Result<()> {
         .with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("rename into {}", path.display()))?;
+    crate::debug_log::log_event(
+        LogOrigin::Accounts,
+        LogKind::FileWrite,
+        &format!("wrote settings.json · {} · model {slug}", account.name),
+    );
     Ok(())
 }
 
@@ -572,8 +583,22 @@ pub fn load_accounts() -> Result<AccountsView> {
     if let Some(cfg_path) = config_path() {
         if cfg_path.exists() {
             let raw = std::fs::read_to_string(&cfg_path)
+                .inspect_err(|e| {
+                    crate::debug_log::log_event(
+                        LogOrigin::Accounts,
+                        LogKind::Error,
+                        &format!("accounts.toml unreadable — {e}"),
+                    );
+                })
                 .with_context(|| format!("read {}", cfg_path.display()))?;
             let cfg: AccountsConfig = toml::from_str(&raw)
+                .inspect_err(|e| {
+                    crate::debug_log::log_event(
+                        LogOrigin::Accounts,
+                        LogKind::Error,
+                        &format!("accounts.toml parse failed — {e}"),
+                    );
+                })
                 .with_context(|| format!("parse {}", cfg_path.display()))?;
             default_account = cfg.default_account;
             ignored_names = cfg.ignored;
@@ -642,6 +667,11 @@ pub fn load_accounts() -> Result<AccountsView> {
     accounts.sort_by(|a, b| a.name.cmp(&b.name));
 
     if accounts.is_empty() {
+        crate::debug_log::log_event(
+            LogOrigin::Accounts,
+            LogKind::Error,
+            "no accounts found",
+        );
         return Err(anyhow!(
             "no Claude config directories discovered. \
              Either create ~/.config/mewxi/accounts.toml, \
@@ -966,7 +996,9 @@ pub fn set_ignored(names: &[String]) -> Result<()> {
                 names.iter().map(|s| toml::Value::String(s.clone())).collect();
             t.insert("ignored".to_string(), toml::Value::Array(arr));
         }
-    })
+    })?;
+    log_toml_write(&format!("{} accounts ignored", names.len()));
+    Ok(())
 }
 
 /// Write the `defocus_input_after_send` field to `accounts.toml`,
@@ -977,7 +1009,9 @@ pub fn set_defocus_input_after_send(enabled: bool) -> Result<()> {
             "defocus_input_after_send".to_string(),
             toml::Value::Boolean(enabled),
         );
-    })
+    })?;
+    log_toml_write(if enabled { "defocus on" } else { "defocus off" });
+    Ok(())
 }
 
 /// Persist whether sub-agent captions carry the `— Tool(arg)` suffix.
@@ -987,7 +1021,9 @@ pub fn set_subagent_tool_action(enabled: bool) -> Result<()> {
             "subagent_tool_action".to_string(),
             toml::Value::Boolean(enabled),
         );
-    })
+    })?;
+    log_toml_write(if enabled { "subagent tool action on" } else { "subagent tool action off" });
+    Ok(())
 }
 
 /// Persist which view opens when the TUI starts
@@ -998,7 +1034,9 @@ pub fn set_default_view(view: &str) -> Result<()> {
             "default_view".to_string(),
             toml::Value::String(view.to_string()),
         );
-    })
+    })?;
+    log_toml_write(&format!("default view {view}"));
+    Ok(())
 }
 
 /// Persist the self-update channel (`"release"` / `"dev"`).
@@ -1008,14 +1046,18 @@ pub fn set_update_channel(channel: &str) -> Result<()> {
             "update_channel".to_string(),
             toml::Value::String(channel.to_string()),
         );
-    })
+    })?;
+    log_toml_write(&format!("update channel {channel}"));
+    Ok(())
 }
 
 /// Persist whether mewxi checks origin for updates automatically.
 pub fn set_update_check(enabled: bool) -> Result<()> {
     edit_config_table(|t| {
         t.insert("update_check".to_string(), toml::Value::Boolean(enabled));
-    })
+    })?;
+    log_toml_write(if enabled { "auto update check on" } else { "auto update check off" });
+    Ok(())
 }
 
 /// Persist the minimum time between automatic update checks
@@ -1026,20 +1068,40 @@ pub fn set_update_interval(interval: &str) -> Result<()> {
             "update_interval".to_string(),
             toml::Value::String(interval.to_string()),
         );
-    })
+    })?;
+    log_toml_write(&format!("update interval {interval}"));
+    Ok(())
 }
 
 /// Persist where self-update clones + builds the source. An empty (or
 /// whitespace) path removes the key, falling back to the OS temp dir.
 pub fn set_update_build_dir(dir: &str) -> Result<()> {
     let dir = dir.trim().to_string();
-    edit_config_table(move |t| {
-        if dir.is_empty() {
-            t.remove("update_build_dir");
-        } else {
-            t.insert("update_build_dir".to_string(), toml::Value::String(dir));
+    edit_config_table({
+        let dir = dir.clone();
+        move |t| {
+            if dir.is_empty() {
+                t.remove("update_build_dir");
+            } else {
+                t.insert("update_build_dir".to_string(), toml::Value::String(dir));
+            }
         }
-    })
+    })?;
+    if dir.is_empty() {
+        log_toml_write("update build dir cleared");
+    } else {
+        log_toml_write(&format!("update build dir {}", basename(&dir)));
+    }
+    Ok(())
+}
+
+/// Last path component, for log messages (full paths are too noisy for
+/// the on-screen logs panel).
+fn basename(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
 }
 
 /// Persist the minimum seconds between live usage-endpoint probes
@@ -1052,14 +1114,18 @@ pub fn set_live_refresh_interval_secs(secs: u64) -> Result<()> {
             "live_refresh_interval_secs".to_string(),
             toml::Value::Integer(secs as i64),
         );
-    })
+    })?;
+    log_toml_write(&format!("poll interval {secs}s"));
+    Ok(())
 }
 
 /// Persist whether the TUI asks about updates on startup.
 pub fn set_update_prompt(enabled: bool) -> Result<()> {
     edit_config_table(|t| {
         t.insert("update_prompt".to_string(), toml::Value::Boolean(enabled));
-    })
+    })?;
+    log_toml_write(if enabled { "update prompt on" } else { "update prompt off" });
+    Ok(())
 }
 
 /// Persist the ordered status-line composition as a `[[status_blocks]]`
@@ -1084,7 +1150,20 @@ pub fn set_status_blocks(order: &[(String, bool)]) -> Result<()> {
                 .collect();
             t.insert("status_blocks".to_string(), toml::Value::Array(arr));
         }
-    })
+    })?;
+    log_toml_write(&format!("status blocks · {}", order.len()));
+    Ok(())
+}
+
+/// Every `edit_config_table`-based setter above funnels its post-write
+/// log line through here so the `accounts.toml` write announcement is
+/// worded identically regardless of which field changed.
+fn log_toml_write(detail: &str) {
+    crate::debug_log::log_event(
+        LogOrigin::Accounts,
+        LogKind::FileWrite,
+        &format!("wrote accounts.toml · {detail}"),
+    );
 }
 
 /// Toggle the ignore flag for `name`. Returns the new ignored state

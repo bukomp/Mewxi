@@ -1250,6 +1250,18 @@ fn run_loop<B: ratatui::backend::Backend>(
     // Persistent windowed offset for the config list so it scrolls only
     // when the cursor reaches the top or bottom edge of the visible area.
     let mut setup_scroll: usize = 0;
+    // Logs panel state (Config view). The ring snapshot is re-cloned
+    // only when debug_log::ring_version() moves, so idle frames don't
+    // copy up to 1000 entries for nothing.
+    let mut log_entries: Vec<crate::debug_log::LogEntry> = Vec::new();
+    let mut log_ring_seen: u64 = 0;
+    let mut log_origin_filter: Option<crate::debug_log::LogOrigin> = None;
+    let mut log_kind_filter: Option<crate::debug_log::LogKind> = None;
+    // Lines scrolled up from the newest entry; 0 = pinned to the tail.
+    let mut log_scroll: usize = 0;
+    // `L` toggles the logs panel between its fixed 9-row strip and an
+    // expanded mode where it takes the settings list's flexible share.
+    let mut log_expanded: bool = false;
     // View 1's session selection highlight fades out after a short
     // idle period so the table doesn't stay visually pinned to a row
     // the user picked once and forgot. The selection *index* still
@@ -1907,6 +1919,21 @@ fn run_loop<B: ratatui::backend::Backend>(
             error: update_error.as_deref(),
         };
 
+        // Logs-panel snapshot for the Config view — cheap version check
+        // first, clone the ring only when something new was appended.
+        let ring_v = crate::debug_log::ring_version();
+        if ring_v != log_ring_seen {
+            log_ring_seen = ring_v;
+            log_entries = crate::debug_log::recent();
+        }
+        let logs_ui = view_setup::LogsUi {
+            entries: &log_entries,
+            origin_filter: log_origin_filter,
+            kind_filter: log_kind_filter,
+            scroll: log_scroll,
+            expanded: log_expanded,
+        };
+
         terminal.draw(|f| {
             render(
                 f,
@@ -1941,6 +1968,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 default_view_pref,
                 live_poll_secs,
                 &update_ui,
+                &logs_ui,
                 live_error,
                 driver_pane.as_mut(),
                 pending_pane.as_ref(),
@@ -3471,6 +3499,29 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
+                        // Logs panel (bottom of the Config view): `o`/`y`
+                        // cycle the origin/type filters through
+                        // all → each value → all; PgUp/PgDn scroll the
+                        // panel (0 = pinned to the newest entry). Filter
+                        // changes reset the scroll so the tail of the
+                        // newly filtered stream is what shows first.
+                        KeyCode::Char('o') if mode == ViewMode::Setup => {
+                            log_origin_filter = crate::debug_log::cycle_origin(log_origin_filter);
+                            log_scroll = 0;
+                        }
+                        KeyCode::Char('y') if mode == ViewMode::Setup => {
+                            log_kind_filter = crate::debug_log::cycle_kind(log_kind_filter);
+                            log_scroll = 0;
+                        }
+                        KeyCode::Char('L') if mode == ViewMode::Setup => {
+                            log_expanded = !log_expanded;
+                        }
+                        KeyCode::PageUp if mode == ViewMode::Setup => {
+                            log_scroll = log_scroll.saturating_add(5).min(log_entries.len());
+                        }
+                        KeyCode::PageDown if mode == ViewMode::Setup => {
+                            log_scroll = log_scroll.saturating_sub(5);
+                        }
                         KeyCode::Tab => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail => {
                                 if !sessions.is_empty() {
@@ -4241,6 +4292,7 @@ fn render(
     default_view: view_setup::DefaultView,
     live_poll_secs: u64,
     update_ui: &view_setup::UpdateUi,
+    logs_ui: &view_setup::LogsUi,
     live_error: Option<&str>,
     driver: Option<&mut view_session::DriverPane<'_>>,
     pending: Option<&view_session::PendingPane>,
@@ -4329,6 +4381,7 @@ fn render(
             default_view,
             live_poll_secs,
             update_ui,
+            logs_ui,
             setup_rect,
         ),
         ViewMode::Mewxi => view_mewxi::render(f, view_area, accounts, sessions),

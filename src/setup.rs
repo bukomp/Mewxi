@@ -21,6 +21,7 @@
 //! the full elevated-vs-unelevated mechanism matrix.
 
 use crate::accounts::{self, Account};
+use crate::debug_log::{LogKind, LogOrigin};
 use crate::watch;
 use anyhow::{anyhow, Context, Result};
 use std::fs;
@@ -385,6 +386,11 @@ pub fn wire_statusline(settings_path: &Path, binary: &Path, no_live: bool, force
     obj.insert("statusLine".to_string(), desired);
     let serialized = serde_json::to_string_pretty(&root)? + "\n";
     atomic_write(settings_path, serialized.as_bytes())?;
+    crate::debug_log::log_event(
+        LogOrigin::Setup,
+        LogKind::FileWrite,
+        &format!("wired statusline · {}", basename(settings_path)),
+    );
     Ok(true)
 }
 
@@ -458,6 +464,11 @@ pub fn wire_awaiting_hooks(settings_path: &Path, binary: &Path, account_dir: &Pa
     }
     let serialized = serde_json::to_string_pretty(&root)? + "\n";
     atomic_write(settings_path, serialized.as_bytes())?;
+    crate::debug_log::log_event(
+        LogOrigin::Setup,
+        LogKind::FileWrite,
+        &format!("wired hooks · {}", basename(settings_path)),
+    );
     Ok(true)
 }
 
@@ -514,6 +525,11 @@ pub fn wire_subagent_statusline(settings_path: &Path, binary: &Path, account_dir
     obj.insert("subagentStatusLine".to_string(), desired);
     let serialized = serde_json::to_string_pretty(&root)? + "\n";
     atomic_write(settings_path, serialized.as_bytes())?;
+    crate::debug_log::log_event(
+        LogOrigin::Setup,
+        LogKind::FileWrite,
+        &format!("wired subagent feed · {}", basename(settings_path)),
+    );
     Ok(true)
 }
 
@@ -651,6 +667,11 @@ pub fn unwire_awaiting_hooks(settings_path: &Path) -> Result<bool> {
     if changed {
         let serialized = serde_json::to_string_pretty(&root)? + "\n";
         atomic_write(settings_path, serialized.as_bytes())?;
+        crate::debug_log::log_event(
+            LogOrigin::Setup,
+            LogKind::FileWrite,
+            &format!("unwired hooks · {}", basename(settings_path)),
+        );
     }
     Ok(changed)
 }
@@ -684,6 +705,11 @@ pub fn unwire_subagent_statusline(settings_path: &Path) -> Result<bool> {
     obj.remove("subagentStatusLine");
     let serialized = serde_json::to_string_pretty(&root)? + "\n";
     atomic_write(settings_path, serialized.as_bytes())?;
+    crate::debug_log::log_event(
+        LogOrigin::Setup,
+        LogKind::FileWrite,
+        &format!("unwired subagent feed · {}", basename(settings_path)),
+    );
     Ok(true)
 }
 
@@ -705,6 +731,11 @@ pub fn unwire_statusline(settings_path: &Path) -> Result<bool> {
     }
     let serialized = serde_json::to_string_pretty(&root)? + "\n";
     atomic_write(settings_path, serialized.as_bytes())?;
+    crate::debug_log::log_event(
+        LogOrigin::Setup,
+        LogKind::FileWrite,
+        &format!("unwired statusline · {}", basename(settings_path)),
+    );
     Ok(true)
 }
 
@@ -900,7 +931,9 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
         .args(["load", "-w", &plist_str])
         .output()
         .map_err(|e| anyhow!("launchctl: {e}"))?;
-    if !out.status.success() {
+    let ok = out.status.success();
+    log_proc_status("launchctl load", &out);
+    if !ok {
         return Err(anyhow!(
             "launchctl load failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
@@ -980,9 +1013,19 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
         Ok(()) => {
             // Start it now too, so setup doesn't have to wait for the next
             // logon. Best-effort: ignore failure (e.g. already running).
-            let _ = Command::new("schtasks")
+            let run_out = Command::new("schtasks")
                 .args(["/Run", "/TN", WATCH_TASK_NAME])
                 .output();
+            let started_now = run_out.as_ref().map(|o| o.status.success()).unwrap_or(false);
+            crate::debug_log::log_event(
+                LogOrigin::Setup,
+                LogKind::Proc,
+                if started_now {
+                    "installed watcher service"
+                } else {
+                    "installed watcher service · starts at next logon"
+                },
+            );
             return Ok(());
         }
         Err(e) => e,
@@ -1026,7 +1069,12 @@ fn spawn_detached_watcher(binary: &Path, no_live: bool) {
     }
     cmd.arg("watch");
     cmd.creation_flags(CREATE_NO_WINDOW_DETACHED);
-    let _ = cmd.spawn();
+    let ok = cmd.spawn().is_ok();
+    crate::debug_log::log_event(
+        LogOrigin::Setup,
+        LogKind::Proc,
+        if ok { "started watcher" } else { "watcher spawn failed" },
+    );
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -1045,7 +1093,9 @@ pub fn stop_watcher_now() -> Result<()> {
         .args(["unload", &plist_str])
         .output()
         .map_err(|e| anyhow!("launchctl: {e}"))?;
-    if !out.status.success() {
+    let ok = out.status.success();
+    log_proc_status("launchctl unload", &out);
+    if !ok {
         return Err(anyhow!(
             "launchctl unload failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
@@ -1071,9 +1121,10 @@ pub fn stop_watcher_now() -> Result<()> {
         return Ok(());
     }
     // Tier 1: scheduled-task mechanism, if that's what's running.
-    let _ = Command::new("schtasks")
+    let end_out = Command::new("schtasks")
         .args(["/End", "/TN", WATCH_TASK_NAME])
         .output();
+    log_proc_result("schtasks end", &end_out);
     // Tier 2: the Run-key mechanism has no pidfile (see
     // `run_key_watcher_running`), so there is no pid we can trust to
     // belong to the watch process rather than something else. We
@@ -1099,7 +1150,8 @@ pub fn uninstall_watcher() -> Result<()> {
     }
     let plist_str = plist_path.to_string_lossy().into_owned();
     // `-w` persists the stop so launchd won't re-enable on next login.
-    let _ = Command::new("launchctl").args(["unload", "-w", &plist_str]).output();
+    let unload_out = Command::new("launchctl").args(["unload", "-w", &plist_str]).output();
+    log_proc_result("launchctl unload", &unload_out);
     fs::remove_file(&plist_path).ok();
     Ok(())
 }
@@ -1129,15 +1181,18 @@ pub fn uninstall_watcher() -> Result<()> {
     // of the time — that's not a real error, just idempotency. We still
     // return Ok even when neither existed, matching every other
     // uninstall_watcher on this platform matrix.
-    let _ = Command::new("schtasks")
+    let end_out = Command::new("schtasks")
         .args(["/End", "/TN", WATCH_TASK_NAME])
         .output();
-    let _ = Command::new("schtasks")
+    log_proc_result("schtasks end", &end_out);
+    let delete_out = Command::new("schtasks")
         .args(["/Delete", "/TN", WATCH_TASK_NAME, "/F"])
         .output();
-    let _ = Command::new("reg")
+    log_proc_result("schtasks delete", &delete_out);
+    let reg_out = Command::new("reg")
         .args(["delete", WATCH_RUN_KEY, "/v", WATCH_TASK_NAME, "/f"])
         .output();
+    log_proc_result("reg delete", &reg_out);
     Ok(())
 }
 
@@ -1400,13 +1455,82 @@ pub fn stop(disable: bool) -> Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Last path component, for log messages (full paths are too noisy for
+/// the on-screen logs panel).
+fn basename(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Log a best-effort `Command::output()` result as `"<action> ok"` or
+/// `"<action> failed — exit N"`, keeping these terse Proc log lines
+/// consistent across the launchctl/schtasks/reg call sites.
+#[cfg(any(target_os = "macos", windows))]
+fn log_proc_result(action: &str, out: &std::io::Result<std::process::Output>) {
+    match out {
+        Ok(o) if o.status.success() => {
+            crate::debug_log::log_event(LogOrigin::Setup, LogKind::Proc, &format!("{action} ok"));
+        }
+        Ok(o) => {
+            crate::debug_log::log_event(
+                LogOrigin::Setup,
+                LogKind::Proc,
+                &format!(
+                    "{action} failed — exit {}",
+                    o.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+                ),
+            );
+        }
+        Err(e) => {
+            crate::debug_log::log_event(LogOrigin::Setup, LogKind::Proc, &format!("{action} failed — {e}"));
+        }
+    }
+}
+
+/// Same as [`log_proc_result`] but for a `Command::status()`/`.output()`
+/// call already unwrapped down to a plain [`std::process::Output`].
+#[cfg(target_os = "macos")]
+fn log_proc_status(action: &str, out: &std::process::Output) {
+    if out.status.success() {
+        crate::debug_log::log_event(LogOrigin::Setup, LogKind::Proc, &format!("{action} ok"));
+    } else {
+        crate::debug_log::log_event(
+            LogOrigin::Setup,
+            LogKind::Proc,
+            &format!(
+                "{action} failed — exit {}",
+                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            ),
+        );
+    }
+}
+
 #[cfg(any(target_os = "linux", windows))]
 fn run_cmd(bin: &str, args: &[&str]) -> Result<()> {
     let out = Command::new(bin)
         .args(args)
         .output()
         .with_context(|| format!("running `{bin} {}`", args.join(" ")))?;
-    if !out.status.success() {
+    let ok = out.status.success();
+    if ok {
+        crate::debug_log::log_event(
+            LogOrigin::Setup,
+            LogKind::Proc,
+            &format!("{bin} {} ok", args.join(" ")),
+        );
+    } else {
+        crate::debug_log::log_event(
+            LogOrigin::Setup,
+            LogKind::Proc,
+            &format!(
+                "{bin} {} failed — exit {}",
+                args.join(" "),
+                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            ),
+        );
+    }
+    if !ok {
         return Err(anyhow!(
             "`{bin} {}` failed: {}",
             args.join(" "),

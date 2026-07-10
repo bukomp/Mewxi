@@ -241,17 +241,34 @@ impl std::error::Error for FetchError {}
 /// fetch can still be in flight, so siblings serve the cache instead.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Format a millisecond duration the way the logs panel expects:
+/// sub-second as `142ms`, otherwise `1.2s`.
+fn fmt_dur(ms: u128) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
 /// Raw HTTP call. Synchronous; blocks up to the request timeout.
 pub fn fetch_live(token: &str) -> Result<LiveUsage, FetchError> {
+    let start = Instant::now();
     let resp = ureq::get(ENDPOINT)
         .set("Authorization", &format!("Bearer {token}"))
         .set("anthropic-beta", BETA_HEADER)
         .set("User-Agent", USER_AGENT)
         .timeout(HTTP_TIMEOUT)
         .call();
+    let dur_ms = start.elapsed().as_millis();
 
     match resp {
         Ok(r) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::Api,
+                &format!("limits fetched · {}", fmt_dur(dur_ms)),
+            );
             let body = r
                 .into_string()
                 .map_err(|e| FetchError::Other(anyhow!("read body: {e}")))?;
@@ -267,14 +284,47 @@ pub fn fetch_live(token: &str) -> Result<LiveUsage, FetchError> {
                 cache_schema_version: CACHE_SCHEMA_VERSION,
             })
         }
-        Err(ureq::Error::Status(429, _)) => Err(FetchError::RateLimited),
-        Err(ureq::Error::Status(401, _)) => Err(FetchError::Unauthorized),
-        Err(ureq::Error::Status(403, _)) => Err(FetchError::Forbidden),
+        Err(ureq::Error::Status(429, _)) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::Error,
+                &format!("429 rate limited · {}", fmt_dur(dur_ms)),
+            );
+            Err(FetchError::RateLimited)
+        }
+        Err(ureq::Error::Status(401, _)) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::Error,
+                &format!("401 unauthorized · {}", fmt_dur(dur_ms)),
+            );
+            Err(FetchError::Unauthorized)
+        }
+        Err(ureq::Error::Status(403, _)) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::Error,
+                &format!("403 forbidden · {}", fmt_dur(dur_ms)),
+            );
+            Err(FetchError::Forbidden)
+        }
         Err(ureq::Error::Status(code, r)) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::Error,
+                &format!("request failed — http {code} · {}", fmt_dur(dur_ms)),
+            );
             let body = r.into_string().unwrap_or_default();
             Err(FetchError::Other(anyhow!("HTTP {code}: {body}")))
         }
-        Err(e) => Err(FetchError::Other(anyhow!("transport: {e}"))),
+        Err(e) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::Error,
+                &format!("request failed — {e} · {}", fmt_dur(dur_ms)),
+            );
+            Err(FetchError::Other(anyhow!("transport: {e}")))
+        }
     }
 }
 
@@ -299,7 +349,23 @@ pub fn cache_path(account: &Account) -> Option<PathBuf> {
 
 pub fn load_cached(account: &Account) -> Option<LiveUsage> {
     let p = cache_path(account)?;
-    let bytes = fs::read(&p).ok()?;
+    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let bytes = match fs::read(&p) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::FileRead,
+                &format!("{file_name} unreadable — {e}"),
+            );
+            return None;
+        }
+    };
+    crate::debug_log::log_event(
+        crate::debug_log::LogOrigin::Usage,
+        crate::debug_log::LogKind::FileRead,
+        &format!("read {file_name}"),
+    );
     let parsed: LiveUsage = serde_json::from_slice(&bytes).ok()?;
     // Reject caches from older binaries (which may have been written with
     // the wrong account's token, before per-CLAUDE_CONFIG_DIR keychain
@@ -315,10 +381,20 @@ pub fn save_cached(account: &Account, u: &LiveUsage) {
     if let Some(parent) = p.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     if let Ok(bytes) = serde_json::to_vec(u) {
         let tmp = p.with_extension("json.tmp");
-        if fs::write(&tmp, &bytes).is_ok() {
-            let _ = fs::rename(&tmp, &p);
+        match fs::write(&tmp, &bytes).and_then(|_| fs::rename(&tmp, &p)) {
+            Ok(()) => crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::FileWrite,
+                &format!("wrote {file_name}"),
+            ),
+            Err(e) => crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::FileWrite,
+                &format!("{file_name} write failed — {e}"),
+            ),
         }
     }
 }
@@ -356,10 +432,11 @@ struct BackoffMarker {
     reason: String,
 }
 
-/// Why the last fetch was rejected, per the on-disk marker.
+/// Why the last fetch was rejected, per the on-disk marker, plus how much
+/// longer the backoff window has left.
 enum Backoff {
-    RateLimited,
-    Denied(String),
+    RateLimited { remaining: Duration },
+    Denied { reason: String, remaining: Duration },
 }
 
 fn backoff_path(account: &Account) -> Option<PathBuf> {
@@ -377,7 +454,20 @@ fn write_backoff(account: &Account, kind: &str, reason: &str) {
 
 fn clear_backoff(account: &Account) {
     if let Some(p) = backoff_path(account) {
-        let _ = fs::remove_file(&p);
+        let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        match fs::remove_file(&p) {
+            Ok(()) => crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::FileWrite,
+                &format!("cleared {file_name}"),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::FileWrite,
+                &format!("{file_name} clear failed — {e}"),
+            ),
+        }
     }
 }
 
@@ -398,24 +488,48 @@ fn write_backoff_marker(p: &Path, kind: &str, reason: &str) {
         kind: kind.to_string(),
         reason: reason.to_string(),
     };
+    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     if let Ok(bytes) = serde_json::to_vec(&marker) {
         let tmp = p.with_extension("json.tmp");
-        if fs::write(&tmp, &bytes).is_ok() {
-            let _ = fs::rename(&tmp, p);
+        match fs::write(&tmp, &bytes).and_then(|_| fs::rename(&tmp, p)) {
+            Ok(()) => crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::FileWrite,
+                &format!("wrote {file_name}"),
+            ),
+            Err(e) => crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::FileWrite,
+                &format!("{file_name} write failed — {e}"),
+            ),
         }
     }
 }
 
 fn read_backoff_marker(p: &Path, max_age: Duration) -> Option<Backoff> {
+    // A missing marker is the common, expected steady state (no backoff in
+    // effect) — not logged to avoid noise; only a successful read (an
+    // active or recently-expired marker) is worth recording.
     let bytes = fs::read(p).ok()?;
+    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    crate::debug_log::log_event(
+        crate::debug_log::LogOrigin::Usage,
+        crate::debug_log::LogKind::FileRead,
+        &format!("read {file_name}"),
+    );
     let marker: BackoffMarker = serde_json::from_slice(&bytes).ok()?;
     let delta = chrono::Duration::from_std(max_age).ok()?;
-    if Utc::now() - marker.at >= delta {
+    let elapsed = Utc::now() - marker.at;
+    if elapsed >= delta {
         return None;
     }
+    let remaining = Duration::from_secs((delta - elapsed).num_seconds().max(0) as u64);
     Some(match marker.kind.as_str() {
-        "denied" => Backoff::Denied(marker.reason),
-        _ => Backoff::RateLimited,
+        "denied" => Backoff::Denied {
+            reason: marker.reason,
+            remaining,
+        },
+        _ => Backoff::RateLimited { remaining },
     })
 }
 
@@ -437,7 +551,19 @@ fn mark_fetch_attempt(account: &Account) {
     if let Some(parent) = p.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(&p, b"");
+    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    match fs::write(&p, b"") {
+        Ok(()) => crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Usage,
+            crate::debug_log::LogKind::FileWrite,
+            &format!("wrote {file_name}"),
+        ),
+        Err(e) => crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Usage,
+            crate::debug_log::LogKind::FileWrite,
+            &format!("{file_name} write failed — {e}"),
+        ),
+    }
 }
 
 /// What a fetch attempt actually did. Carries the usage value to display
@@ -510,13 +636,44 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
     // absent, precisely when the backoff matters most.
     match recent_backoff(account) {
         // 429 backoff is non-negotiable even with `force` — we don't want
-        // to hammer the endpoint after it told us to back off.
-        Some(Backoff::RateLimited) => return FetchOutcome::RateLimited(cached),
+        // to hammer the endpoint after it told us to back off. This is the
+        // only place a manual `r` refresh during backoff produces any
+        // visible trace: no HTTP call happens, so `fetch_live`'s own
+        // logging never fires (and the original 429 may even have been
+        // observed by a different process, e.g. the watcher).
+        Some(Backoff::RateLimited { remaining }) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::Error,
+                &format!(
+                    "fetch skipped — 429 backoff · {}s left · {}",
+                    remaining.as_secs(),
+                    account.name
+                ),
+            );
+            return FetchOutcome::RateLimited(cached);
+        }
         // 401/403 won't be reconsidered by the endpoint until something
         // changes locally, so they back off like a 429 — but `force` (the
         // TUI's manual refresh) bypasses, so the user can retry immediately
         // after fixing their credentials.
-        Some(Backoff::Denied(reason)) if !force => {
+        Some(Backoff::Denied { reason, remaining }) if !force => {
+            let code = if reason.contains("401") {
+                "401"
+            } else if reason.contains("403") {
+                "403"
+            } else {
+                "denied"
+            };
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::Error,
+                &format!(
+                    "fetch skipped — {code} backoff · {}s left · {}",
+                    remaining.as_secs(),
+                    account.name
+                ),
+            );
             return FetchOutcome::Failed { reason, cached };
         }
         _ => {}
@@ -563,6 +720,15 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
         }
         Err(FetchError::RateLimited) => {
             write_backoff(account, "rate_limited", "");
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Usage,
+                crate::debug_log::LogKind::Error,
+                &format!(
+                    "backing off {}s after 429 · {}",
+                    backoff_after_429().as_secs(),
+                    account.name
+                ),
+            );
             FetchOutcome::RateLimited(cached)
         }
         Err(e @ (FetchError::Unauthorized | FetchError::Forbidden)) => {
@@ -688,14 +854,14 @@ mod tests {
 
         write_backoff_marker(&p, "denied", "forbidden (403)");
         match read_backoff_marker(&p, Duration::from_secs(120)) {
-            Some(Backoff::Denied(reason)) => assert_eq!(reason, "forbidden (403)"),
+            Some(Backoff::Denied { reason, .. }) => assert_eq!(reason, "forbidden (403)"),
             _ => panic!("expected Denied within the window"),
         }
 
         write_backoff_marker(&p, "rate_limited", "");
         assert!(matches!(
             read_backoff_marker(&p, Duration::from_secs(120)),
-            Some(Backoff::RateLimited)
+            Some(Backoff::RateLimited { .. })
         ));
 
         // Unknown kinds from a future binary read as the conservative
@@ -703,7 +869,7 @@ mod tests {
         write_backoff_marker(&p, "some-future-kind", "");
         assert!(matches!(
             read_backoff_marker(&p, Duration::from_secs(120)),
-            Some(Backoff::RateLimited)
+            Some(Backoff::RateLimited { .. })
         ));
 
         // A marker older than the window reads as "no backoff". Simulate

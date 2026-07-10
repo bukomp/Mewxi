@@ -19,6 +19,20 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 
+/// Last path component, for log messages — full paths are noise in the
+/// panel and mostly redundant with the surrounding message.
+fn basename(p: &Path) -> std::borrow::Cow<'_, str> {
+    p.file_name()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_else(|| p.to_string_lossy())
+}
+
+/// First line of a possibly multi-line OS error — the rest is rarely
+/// useful in a one-line log entry.
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("").trim()
+}
+
 /// Read the account's bearer token plus the credential's
 /// `claudeAiOauth.expiresAt` (parsed from epoch milliseconds), when the
 /// source carries one. `MEWXI_OAUTH_TOKEN` and `TokenSource::Env` tokens
@@ -117,8 +131,24 @@ fn parse_credentials_from_json(raw: &str) -> Result<(String, Option<DateTime<Utc
 }
 
 fn read_token_credentials_file(path: &Path) -> Result<(String, Option<DateTime<Utc>>)> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| anyhow!("{}: {e}", path.display()))?;
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Auth,
+                crate::debug_log::LogKind::FileRead,
+                &format!("read {}", basename(path)),
+            );
+            raw
+        }
+        Err(e) => {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Auth,
+                crate::debug_log::LogKind::FileRead,
+                &format!("{} unreadable — {}", basename(path), first_line(&e.to_string())),
+            );
+            return Err(anyhow!("{}: {e}", path.display()));
+        }
+    };
     parse_credentials_from_json(&raw)
 }
 
@@ -128,15 +158,32 @@ fn read_token_macos_keychain(service: &str) -> Result<(String, Option<DateTime<U
     let out = Command::new("security")
         .args(["find-generic-password", "-s", service, "-w"])
         .output()
-        .map_err(|e| anyhow!("failed to invoke `security`: {e}"))?;
+        .map_err(|e| {
+            crate::debug_log::log_event(
+                crate::debug_log::LogOrigin::Auth,
+                crate::debug_log::LogKind::Error,
+                &format!("keychain lookup failed — {}", first_line(&e.to_string())),
+            );
+            anyhow!("failed to invoke `security`: {e}")
+        })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Auth,
+            crate::debug_log::LogKind::Proc,
+            "keychain token missing",
+        );
         return Err(anyhow!(
             "`security` exited {}: {}",
             out.status,
             stderr.trim()
         ));
     }
+    crate::debug_log::log_event(
+        crate::debug_log::LogOrigin::Auth,
+        crate::debug_log::LogKind::Proc,
+        "keychain token found",
+    );
     let raw = String::from_utf8(out.stdout)
         .map_err(|e| anyhow!("credential is not valid UTF-8: {e}"))?;
     parse_credentials_from_json(&raw)

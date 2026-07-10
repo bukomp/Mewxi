@@ -7,12 +7,20 @@
 //!   the automatic-check toggle + interval, the startup prompt
 //!   toggle, and an on-demand check/install row.
 //! - Preferences — TUI behaviour toggles.
+//! - Status line — the block composer.
+//! - Logs — a scrollable tail of recent `crate::debug_log` entries,
+//!   filterable by origin/kind, rendered in its own panel at the
+//!   bottom of the view (above the footer). `L` toggles it between a
+//!   fixed 9-row window and an expanded view that takes the flexible
+//!   share of the vertical space (shrinking the settings list to a
+//!   fixed 10-row window in exchange).
 //!
 //! Interaction model: ↑/↓ (or Tab) moves over actionable rows, Enter
 //! performs the row's single contextual action, and the hint box under
 //! the list spells out what Enter will do *before* the user presses
 //! it. The old single-letter keys (`s`/`w`/`t`/`i`/`a`/`R`) still work
-//! as shortcuts for the same actions.
+//! as shortcuts for the same actions. `o`/`y` cycle the logs panel's
+//! origin/kind filters, `L` expands/shrinks it, and PgUp/PgDn scroll it.
 
 use super::widgets::render_footer;
 use crate::setup::{SetupSnapshot, StatusLineState, WatcherState};
@@ -165,6 +173,21 @@ pub struct UpdateUi<'a> {
     pub error: Option<&'a str>,
 }
 
+/// Logs-panel state owned by the TUI event loop.
+pub struct LogsUi<'a> {
+    /// Full recent ring snapshot, oldest → newest (filtering happens here in the view).
+    pub entries: &'a [crate::debug_log::LogEntry],
+    /// None = show all origins.
+    pub origin_filter: Option<crate::debug_log::LogOrigin>,
+    /// None = show all kinds.
+    pub kind_filter: Option<crate::debug_log::LogKind>,
+    /// Lines scrolled up from the tail; 0 = pinned to newest.
+    pub scroll: usize,
+    /// When true the logs panel takes the flexible share of the vertical
+    /// space and the settings list shrinks to a fixed window.
+    pub expanded: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
@@ -178,28 +201,137 @@ pub fn render(
     default_view: DefaultView,
     live_poll_secs: u64,
     update: &UpdateUi,
+    logs: &LogsUi,
     setup_rect: &mut Option<Rect>,
 ) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // header summary
-            Constraint::Min(8),    // settings list
-            Constraint::Length(4), // action hint + last message
-            Constraint::Length(1), // footer
-        ])
+        .constraints(if logs.expanded {
+            [
+                Constraint::Length(3),  // header summary
+                Constraint::Length(10), // settings list (fixed while logs expand)
+                Constraint::Length(4),  // action hint + last message
+                Constraint::Min(9),     // logs panel (flexible)
+                Constraint::Length(1),  // footer
+            ]
+        } else {
+            [
+                Constraint::Length(3), // header summary
+                Constraint::Min(8),    // settings list
+                Constraint::Length(4), // action hint + last message
+                Constraint::Length(9), // logs panel
+                Constraint::Length(1), // footer
+            ]
+        })
         .split(area);
 
     render_header(f, rows[0], snap, update);
     *setup_rect = Some(rows[1]);
     render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, live_poll_secs, update);
     render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, live_poll_secs, update, last_message);
+    render_logs(f, rows[3], logs);
     render_footer(
         f,
-        rows[3],
+        rows[4],
         "4",
-        "↑/↓ select · Enter action · a fix all · i ignore account · R rescan · Esc back",
+        "↑/↓ select · Enter action · a fix all · i ignore account · R rescan · Esc back · o/y/L logs · PgUp/PgDn scroll logs",
         true,
+    );
+}
+
+/// Renders the logs panel: a bordered box showing the newest lines of
+/// the (origin/kind-)filtered log tail, scrolled by `logs.scroll`
+/// lines up from the newest entry.
+fn render_logs(f: &mut Frame, area: Rect, logs: &LogsUi) {
+    use crate::debug_log::LogKind;
+
+    let filtered: Vec<&crate::debug_log::LogEntry> = logs
+        .entries
+        .iter()
+        .filter(|e| match logs.origin_filter {
+            Some(o) => e.origin == o,
+            None => true,
+        })
+        .filter(|e| match logs.kind_filter {
+            Some(k) => e.kind == k,
+            None => true,
+        })
+        .collect();
+
+    let visible_h = area.height.saturating_sub(2) as usize; // borders
+    let max_scroll = filtered.len().saturating_sub(visible_h);
+    let effective_scroll = logs.scroll.min(max_scroll);
+
+    let end = filtered.len().saturating_sub(effective_scroll);
+    let start = end.saturating_sub(visible_h);
+    let window = &filtered[start..end];
+
+    let origin_label = logs
+        .origin_filter
+        .map(|o| o.as_str().to_string())
+        .unwrap_or_else(|| "all".to_string());
+    let kind_label = logs
+        .kind_filter
+        .map(|k| k.as_str().to_string())
+        .unwrap_or_else(|| "all".to_string());
+    let mut title = format!(" Logs · origin: {origin_label} · type: {kind_label} · {}", filtered.len());
+    if effective_scroll > 0 {
+        title.push_str(&format!(" · ↑{effective_scroll}"));
+    }
+    title.push_str(if logs.expanded { " · L shrink" } else { " · L expand" });
+    title.push(' ');
+
+    let lines: Vec<Line> = if window.is_empty() {
+        let text = if logs.entries.is_empty() {
+            "no log entries"
+        } else {
+            "no entries match filters"
+        };
+        vec![Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        window
+            .iter()
+            .map(|entry| {
+                let ts = entry
+                    .ts
+                    .with_timezone(&chrono::Local)
+                    .format("%H:%M:%S")
+                    .to_string();
+                let kind_color = match entry.kind {
+                    LogKind::Api => Color::Magenta,
+                    LogKind::FileRead => Color::Blue,
+                    LogKind::FileWrite => Color::Yellow,
+                    LogKind::Proc => Color::Cyan,
+                    LogKind::Info => Color::DarkGray,
+                    LogKind::Error => Color::Red,
+                };
+                let msg_style = if matches!(entry.kind, LogKind::Error) {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default()
+                };
+                Line::from(vec![
+                    Span::styled(format!("{ts} "), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("[{}] ", entry.origin.as_str()),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        format!("[{}] ", entry.kind.as_str()),
+                        Style::default().fg(kind_color),
+                    ),
+                    Span::styled(entry.message.clone(), msg_style),
+                ])
+            })
+            .collect()
+    };
+
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
+        area,
     );
 }
 
@@ -799,13 +931,36 @@ mod tests {
     }
 
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
+        render_to_text_full(selected, status, &[], None, None, 0, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_to_text_full(
+        selected: usize,
+        status: Option<UpdateStatus>,
+        entries: &[crate::debug_log::LogEntry],
+        origin_filter: Option<crate::debug_log::LogOrigin>,
+        kind_filter: Option<crate::debug_log::LogKind>,
+        log_scroll: usize,
+        expanded: bool,
+    ) -> String {
         let snap = snapshot();
-        let backend = TestBackend::new(100, 32);
+        // Tall enough that the full settings list (21 lines across all
+        // sections) stays on-screen alongside the new logs panel row
+        // (3 header + list + 4 info + 9 logs + 1 footer).
+        let backend = TestBackend::new(100, 44);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
                 let mut rect = None;
                 let mut scroll = 0usize;
+                let logs = LogsUi {
+                    entries,
+                    origin_filter,
+                    kind_filter,
+                    scroll: log_scroll,
+                    expanded,
+                };
                 render(
                     f,
                     f.area(),
@@ -818,6 +973,7 @@ mod tests {
                     DefaultView::All,
                     60,
                     &update_ui(status.as_ref()),
+                    &logs,
                     &mut rect,
                 );
             })
@@ -874,5 +1030,123 @@ mod tests {
         let text = render_to_text(8, Some(status));
         assert!(text.contains("⬆ v0.2.0 available"), "header notice missing:\n{text}");
         assert!(text.contains("install the update now"), "hint missing:\n{text}");
+    }
+
+    #[test]
+    fn logs_panel_renders_entries() {
+        use crate::debug_log::{LogEntry, LogKind, LogOrigin};
+        let now = chrono::Utc::now();
+        let entries = vec![
+            LogEntry {
+                ts: now,
+                origin: LogOrigin::Usage,
+                kind: LogKind::Api,
+                message: "GET /usage".into(),
+            },
+            LogEntry {
+                ts: now,
+                origin: LogOrigin::Setup,
+                kind: LogKind::FileWrite,
+                message: "wrote settings.json".into(),
+            },
+            LogEntry {
+                ts: now,
+                origin: LogOrigin::Tui,
+                kind: LogKind::Error,
+                message: "boom".into(),
+            },
+        ];
+        let text = render_to_text_full(0, None, &entries, None, None, 0, false);
+        for needle in [
+            "GET /usage",
+            "[usage]",
+            "[api]",
+            "wrote settings.json",
+            "[setup]",
+            "[write]",
+            "boom",
+            "[tui]",
+            "[error]",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+        assert!(text.contains("origin: all"), "title missing origin:all in:\n{text}");
+        assert!(text.contains("type: all · 3"), "title missing count in:\n{text}");
+    }
+
+    #[test]
+    fn logs_panel_filters_by_origin_and_kind() {
+        use crate::debug_log::{LogEntry, LogKind, LogOrigin};
+        let now = chrono::Utc::now();
+        let entries = vec![
+            LogEntry {
+                ts: now,
+                origin: LogOrigin::Usage,
+                kind: LogKind::Api,
+                message: "usage message".into(),
+            },
+            LogEntry {
+                ts: now,
+                origin: LogOrigin::Setup,
+                kind: LogKind::Info,
+                message: "setup message".into(),
+            },
+        ];
+        let text = render_to_text_full(0, None, &entries, Some(LogOrigin::Usage), None, 0, false);
+        assert!(text.contains("usage message"), "kept entry missing:\n{text}");
+        assert!(!text.contains("setup message"), "filtered entry leaked:\n{text}");
+        assert!(text.contains("origin: usage"), "title missing filter in:\n{text}");
+        assert!(text.contains("type: all · 1"), "title missing filtered count in:\n{text}");
+    }
+
+    #[test]
+    fn logs_panel_empty_state() {
+        let text = render_to_text_full(0, None, &[], None, None, 0, false);
+        assert!(text.contains("no log entries"), "empty-state text missing:\n{text}");
+
+        use crate::debug_log::{LogEntry, LogKind, LogOrigin};
+        let entries = vec![LogEntry {
+            ts: chrono::Utc::now(),
+            origin: LogOrigin::Setup,
+            kind: LogKind::Info,
+            message: "setup message".into(),
+        }];
+        let filtered_out = render_to_text_full(0, None, &entries, Some(LogOrigin::Usage), None, 0, false);
+        assert!(
+            filtered_out.contains("no entries match filters"),
+            "filtered-empty-state text missing:\n{filtered_out}"
+        );
+    }
+
+    #[test]
+    fn logs_panel_expanded_shows_more_and_flips_title_hint() {
+        use crate::debug_log::{LogEntry, LogKind, LogOrigin};
+        let now = chrono::Utc::now();
+        let entries: Vec<LogEntry> = (0..20)
+            .map(|i| LogEntry {
+                ts: now,
+                origin: LogOrigin::Setup,
+                kind: LogKind::Info,
+                message: format!("entry {i}"),
+            })
+            .collect();
+
+        // Collapsed (9-row) panel only has room for the last 7 lines, so
+        // an early entry is scrolled off the top.
+        let collapsed = render_to_text_full(0, None, &entries, None, None, 0, false);
+        assert!(collapsed.contains("L expand"), "collapsed title missing hint:\n{collapsed}");
+        assert!(
+            !collapsed.contains("entry 5"),
+            "entry 5 should be cut off in the collapsed panel:\n{collapsed}"
+        );
+
+        // Expanded, the logs panel takes the flexible share of the
+        // layout and has room for all 20 entries.
+        let expanded = render_to_text_full(0, None, &entries, None, None, 0, true);
+        assert!(expanded.contains("L shrink"), "expanded title missing hint:\n{expanded}");
+        assert!(
+            expanded.contains("entry 5"),
+            "entry 5 should be visible once the logs panel expands:\n{expanded}"
+        );
     }
 }

@@ -5,6 +5,7 @@
 //! chat view. Tool calls and tool results are kept and summarised on
 //! one or two lines each.
 
+use crate::debug_log::{LogKind, LogOrigin};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 #[derive(Clone, Debug)]
 pub enum EntryKind {
@@ -47,6 +48,15 @@ struct CacheEntry {
 
 static READ_CACHE: Mutex<Option<HashMap<PathBuf, CacheEntry>>> = Mutex::new(None);
 
+/// Transcript filename for log messages — short and never leaks the
+/// full account/project path tree into the log.
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string()
+}
+
 pub fn read(path: &Path) -> Vec<ChatEntry> {
     // Fingerprint the file cheaply (one stat) and reuse the parse if it
     // hasn't changed since last read. Falls through to a full parse on
@@ -64,7 +74,13 @@ pub fn read(path: &Path) -> Vec<ChatEntry> {
         }
     }
 
+    let start = Instant::now();
     let Ok(f) = File::open(path) else {
+        crate::debug_log::log_event(
+            LogOrigin::Sessions,
+            LogKind::Error,
+            &format!("{} unreadable", file_label(path)),
+        );
         return Vec::new();
     };
     let reader = BufReader::new(f);
@@ -78,6 +94,16 @@ pub fn read(path: &Path) -> Vec<ChatEntry> {
         };
         parse_record(&v, &mut out);
     }
+    crate::debug_log::log_event(
+        LogOrigin::Sessions,
+        LogKind::FileRead,
+        &format!(
+            "parsed {} · {} entries · {}ms",
+            file_label(path),
+            out.len(),
+            start.elapsed().as_millis()
+        ),
+    );
 
     if let Some((mtime, len)) = fingerprint {
         if let Ok(mut guard) = READ_CACHE.lock() {
