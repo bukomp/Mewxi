@@ -250,6 +250,9 @@ fn main() -> Result<()> {
             println!();
             let msg = update::apply_now()?;
             println!("{msg}");
+            if let Some(note) = setup::restart_watcher_after_update(no_live) {
+                println!("  {note}");
+            }
             Ok(())
         }
         Cmd::Setup { service, force } => setup::run(service, force, no_live),

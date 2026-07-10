@@ -530,15 +530,27 @@ fn resume_terminal<B: ratatui::backend::Backend>(
 /// use the flag to exit the loop and restart into the new binary.
 fn run_update_apply<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
+    no_live: bool,
 ) -> (String, bool) {
     if let Err(e) = suspend_terminal(terminal) {
         return (format!("update aborted — failed to suspend terminal: {e}"), false);
     }
     let res = update::apply_now();
+    // Bounce the watcher onto the freshly-installed binary right away —
+    // the TUI restarts itself via exec below, but the daemon would
+    // otherwise keep running the old image.
+    let watcher_note = match &res {
+        Ok(_) => setup::restart_watcher_after_update(no_live)
+            .map(|m| format!(" · {m}"))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
     let resume = resume_terminal(terminal);
     match (res, resume) {
-        (Ok(msg), Ok(())) => (msg, true),
-        (Ok(msg), Err(e)) => (format!("{msg} (terminal resume error: {e})"), true),
+        (Ok(msg), Ok(())) => (format!("{msg}{watcher_note}"), true),
+        (Ok(msg), Err(e)) => {
+            (format!("{msg}{watcher_note} (terminal resume error: {e})"), true)
+        }
         (Err(e), _) => (format!("update FAILED: {e}"), false),
     }
 }
@@ -2475,7 +2487,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                             UpdatePromptOutcome::UpdateNow => {
                                 update_prompt_modal = None;
-                                let (msg, updated) = run_update_apply(terminal);
+                                let (msg, updated) = run_update_apply(terminal, no_live);
                                 // The cache was rewritten by apply; drop
                                 // the stale in-memory status so the
                                 // Config view doesn't keep advertising
@@ -3886,7 +3898,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             .is_some_and(|s| s.available)
                                         {
                                             let (msg, updated) =
-                                                run_update_apply(terminal);
+                                                run_update_apply(terminal, no_live);
                                             update_status = None;
                                             update_error = None;
                                             setup_message = Some(msg);

@@ -1305,6 +1305,80 @@ pub fn restart_watcher_if_stale(binary: &Path, no_live: bool) -> Option<String> 
     }
 }
 
+/// Bounce the watcher service onto the binary a self-update just
+/// installed. The service managers all keep the previous image running
+/// after the file on disk is swapped — launchd/systemd only respawn on
+/// exit — so without this the daemon serves stale cache files until the
+/// next TUI launch happens to notice ([`restart_watcher_if_stale`],
+/// macOS only) or indefinitely elsewhere. Called by the TUI's update
+/// modal and `mewxi update` right after a successful install. Returns a
+/// one-line status for the update summary, or `None` when no watcher
+/// service is installed.
+pub fn restart_watcher_after_update(no_live: bool) -> Option<String> {
+    if matches!(inspect_watcher(), WatcherState::NotInstalled) {
+        return None;
+    }
+    let binary = match current_binary() {
+        Ok(b) => b,
+        Err(e) => return Some(format!("watcher not restarted — {e}")),
+    };
+    Some(restart_watcher_onto(&binary, no_live))
+}
+
+/// macOS: `install_watcher`'s unload+load *is* a restart.
+#[cfg(target_os = "macos")]
+fn restart_watcher_onto(binary: &Path, no_live: bool) -> String {
+    match install_watcher(binary, no_live) {
+        Ok(()) => "watcher restarted on the new binary".into(),
+        Err(e) => format!("watcher restart FAILED: {e}"),
+    }
+}
+
+/// Linux: `install_watcher`'s `enable --now` starts a stopped unit but
+/// leaves a running one on the old image — an explicit restart is
+/// required on top.
+#[cfg(target_os = "linux")]
+fn restart_watcher_onto(binary: &Path, no_live: bool) -> String {
+    let restarted = install_watcher(binary, no_live).and_then(|()| {
+        run_cmd("systemctl", &["--user", "restart", "mewxi-watch.service"])
+    });
+    match restarted {
+        Ok(()) => "watcher restarted on the new binary".into(),
+        Err(e) => format!("watcher restart FAILED: {e}"),
+    }
+}
+
+/// Windows: only the scheduled-task tier can be bounced — `/End` stops
+/// the task's own process (a targeted kill, unlike anything
+/// image-name-based, which would take the TUI down too), and the
+/// reinstall's `/Run` starts it on the new binary. The Run-key tier has
+/// no service handle and the watcher has no single-instance guard, so
+/// spawning a successor would just duplicate it — that tier picks the
+/// new binary up at the next logon.
+#[cfg(windows)]
+fn restart_watcher_onto(binary: &Path, no_live: bool) -> String {
+    let task_exists = Command::new("schtasks")
+        .args(["/Query", "/TN", WATCH_TASK_NAME])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !task_exists {
+        return "watcher still on the old binary — restarts at next logon".into();
+    }
+    let _ = Command::new("schtasks")
+        .args(["/End", "/TN", WATCH_TASK_NAME])
+        .output();
+    match install_watcher(binary, no_live) {
+        Ok(()) => "watcher restarted on the new binary".into(),
+        Err(e) => format!("watcher restart FAILED: {e}"),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn restart_watcher_onto(_binary: &Path, _no_live: bool) -> String {
+    "watcher service is not supported on this OS".into()
+}
+
 // ---------------------------------------------------------------------------
 // "Apply everything that's missing" helper used by the TUI's auto-setup
 // ---------------------------------------------------------------------------
