@@ -1401,6 +1401,14 @@ fn run_loop<B: ratatui::backend::Backend>(
     // row — seeded from the resolved (clamped/defaulted) value so the row
     // always shows what's actually in effect.
     let mut live_poll_secs: u64 = live_usage::refresh_interval().as_secs();
+    // While Some, the Config view's log-file-max-lines row is in
+    // text-edit mode and keys go to this input instead of navigation.
+    let mut log_max_lines_edit: Option<text_input::TextInput> = None;
+    // Current per-file debug-log line cap for the Config view's cycling
+    // row — seeded from the resolved (unset-falls-back-to-default) value
+    // so the row always shows what's actually in effect.
+    let mut log_max_lines: u64 = accounts::log_max_lines_setting()
+        .unwrap_or(crate::debug_log::DEFAULT_MAX_LINES_PER_FILE as u64);
     let mut update_prompted = false;
     if let Some(cached) = update_cached {
         if cached.available && update_prompt_enabled {
@@ -1942,6 +1950,11 @@ fn run_loop<B: ratatui::backend::Backend>(
             edit: live_poll_edit.as_ref().map(|i| i.as_str()),
         };
 
+        let log_max_lines_ui = view_setup::LogMaxLinesUi {
+            lines: log_max_lines,
+            edit: log_max_lines_edit.as_ref().map(|i| i.as_str()),
+        };
+
         terminal.draw(|f| {
             render(
                 f,
@@ -1975,6 +1988,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 subagent_tool_action,
                 default_view_pref,
                 live_poll_ui,
+                log_max_lines_ui,
                 &update_ui,
                 &logs_ui,
                 live_error,
@@ -2552,6 +2566,50 @@ fn run_loop<B: ratatui::backend::Backend>(
                             KeyCode::Esc => {
                                 live_poll_edit = None;
                                 setup_message = Some("interval edit cancelled".into());
+                            }
+                            _ => {
+                                let _ = input.handle_edit_key(k);
+                            }
+                        }
+                        continue;
+                    }
+                    // Log-file-max-lines edit on the Config view owns every
+                    // keystroke while active: Enter saves, Esc cancels,
+                    // everything else edits the value.
+                    if let Some(input) = log_max_lines_edit.as_mut() {
+                        match k.code {
+                            KeyCode::Enter => {
+                                match view_setup::parse_log_lines_input(input.as_str()) {
+                                    Ok(lines) => {
+                                        log_max_lines_edit = None;
+                                        match accounts::set_log_max_lines(lines) {
+                                            Ok(()) => {
+                                                log_max_lines = lines;
+                                                // The logger's own mtime check
+                                                // can miss a same-second
+                                                // write-then-log pair; this
+                                                // applies it immediately.
+                                                crate::debug_log::set_max_lines(Some(lines));
+                                                setup_message = Some(format!(
+                                                    "log file capped at {} lines",
+                                                    view_setup::fmt_log_lines(lines)
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(msg) => {
+                                        setup_message = Some(msg);
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                log_max_lines_edit = None;
+                                setup_message = Some("line cap edit cancelled".into());
                             }
                             _ => {
                                 let _ = input.handle_edit_key(k);
@@ -3531,13 +3589,20 @@ fn run_loop<B: ratatui::backend::Backend>(
                             setup_snapshot = setup::inspect(no_live).ok();
                         }
                         KeyCode::Char('e') if mode == ViewMode::Setup => {
-                            if let Some(view_setup::ConfigItem::LivePollInterval) =
-                                view_setup::items(setup_snapshot.as_ref()).get(selected_setup)
-                            {
-                                live_poll_edit = Some(text_input::TextInput::from_str(
-                                    &view_setup::fmt_poll_secs(live_poll_secs),
-                                ));
-                                setup_message = None;
+                            match view_setup::items(setup_snapshot.as_ref()).get(selected_setup) {
+                                Some(view_setup::ConfigItem::LivePollInterval) => {
+                                    live_poll_edit = Some(text_input::TextInput::from_str(
+                                        &view_setup::fmt_poll_secs(live_poll_secs),
+                                    ));
+                                    setup_message = None;
+                                }
+                                Some(view_setup::ConfigItem::LogMaxLines) => {
+                                    log_max_lines_edit = Some(text_input::TextInput::from_str(
+                                        &view_setup::fmt_log_lines(log_max_lines),
+                                    ));
+                                    setup_message = None;
+                                }
+                                _ => {}
                             }
                         }
                         KeyCode::Char('a') if mode == ViewMode::Setup => {
@@ -3886,6 +3951,28 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 setup_message = Some(format!(
                                                     "probe usage at most every {}",
                                                     view_setup::fmt_poll_secs(next)
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Some(view_setup::ConfigItem::LogMaxLines) => {
+                                        let next = view_setup::next_log_lines_step(log_max_lines);
+                                        match accounts::set_log_max_lines(next) {
+                                            Ok(()) => {
+                                                log_max_lines = next;
+                                                // The logger's own mtime check
+                                                // can miss a same-second
+                                                // write-then-log pair; this
+                                                // applies it immediately.
+                                                crate::debug_log::set_max_lines(Some(next));
+                                                setup_message = Some(format!(
+                                                    "log file capped at {} lines",
+                                                    view_setup::fmt_log_lines(next)
                                                 ));
                                             }
                                             Err(e) => {
@@ -4352,6 +4439,7 @@ fn render(
     subagent_tool_action: bool,
     default_view: view_setup::DefaultView,
     live_poll: view_setup::LivePollUi,
+    log_max_lines: view_setup::LogMaxLinesUi,
     update_ui: &view_setup::UpdateUi,
     logs_ui: &view_setup::LogsUi,
     live_error: Option<&str>,
@@ -4441,6 +4529,7 @@ fn render(
             subagent_tool_action,
             default_view,
             live_poll,
+            log_max_lines,
             update_ui,
             logs_ui,
             setup_rect,

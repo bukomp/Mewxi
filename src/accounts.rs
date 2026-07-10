@@ -356,6 +356,12 @@ struct AccountsConfig {
     /// 401/403); default 120. Read via [`live_tuning`].
     #[serde(default)]
     live_backoff_secs: Option<u64>,
+    /// Line cap for the shared debug-log file — oldest lines are
+    /// trimmed once exceeded (default 10_000). Read via
+    /// [`log_max_lines_setting`]; every process picks up changes on its
+    /// next log write via `debug_log`'s config-mtime check.
+    #[serde(default)]
+    log_max_lines: Option<u64>,
     /// Account names to hide from every view + aggregation. The
     /// matching `Account` records are still *discovered* so the TUI's
     /// setup view can show them as "ignored" and offer to un-ignore.
@@ -552,6 +558,23 @@ pub fn live_tuning() -> (Option<u64>, Option<u64>) {
     let Ok(raw) = std::fs::read_to_string(&path) else { return (None, None) };
     let Ok(cfg) = toml::from_str::<AccountsConfig>(&raw) else { return (None, None) };
     (cfg.live_refresh_interval_secs, cfg.live_backoff_secs)
+}
+
+/// The debug-log per-file line cap from `accounts.toml`
+/// (`log_max_lines`), without a full account-discovery pass. `None`
+/// means "use the built-in default". Deliberately log-free: this can
+/// run while the logger itself is initializing.
+pub fn log_max_lines_setting() -> Option<u64> {
+    let raw = std::fs::read_to_string(config_path()?).ok()?;
+    toml::from_str::<AccountsConfig>(&raw).ok()?.log_max_lines
+}
+
+/// Last modification time of `accounts.toml`, if it exists. Lets
+/// long-running processes notice config edits made by another process
+/// (the TUI, or a hand edit) without a restart — see `live_usage`'s
+/// tuning cache.
+pub fn config_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(config_path()?).ok()?.modified().ok()
 }
 
 /// Default folder for user statusline blocks — `blocks/` beside
@@ -1116,6 +1139,18 @@ pub fn set_live_refresh_interval_secs(secs: u64) -> Result<()> {
         );
     })?;
     log_toml_write(&format!("poll interval {secs}s"));
+    Ok(())
+}
+
+/// Persist the debug-log per-file line cap (`log_max_lines`). Callers
+/// should follow up with [`crate::debug_log::set_max_lines`] so the
+/// running process applies it without a restart; other processes pick
+/// it up at their next startup.
+pub fn set_log_max_lines(lines: u64) -> Result<()> {
+    edit_config_table(move |t| {
+        t.insert("log_max_lines".to_string(), toml::Value::Integer(lines as i64));
+    })?;
+    log_toml_write(&format!("log max lines {lines}"));
     Ok(())
 }
 

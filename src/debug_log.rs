@@ -1,5 +1,5 @@
-//! Structured debug logger with an in-memory ring buffer and a
-//! file-backed, size-rotated log on disk.
+//! Structured debug logger with an in-memory ring buffer and a single
+//! line-capped, front-trimmed log file on disk.
 //!
 //! Every event is tagged with a [`LogOrigin`] (which subsystem) and a
 //! [`LogKind`] (what kind of thing happened), plus a free-form
@@ -13,31 +13,112 @@
 //! panel polls via [`recent`] and [`ring_version`]. The ring is pure
 //! process memory, never touches disk, and can't fail.
 //!
-//! In parallel, each event is best-effort appended as a line to
-//! `~/.cache/mewxi/logs/mewxi-XXXX.log`:
-//! `2026-07-09T12:34:56.789Z [origin] [kind] message`. The file
-//! rotates to a new index once the current one hits
-//! `MAX_LINES_PER_FILE` lines, and keeps at most `MAX_FILES` files —
-//! oldest are removed when a new one is created. Disabled silently if
-//! the cache dir can't be created, or if `MEWXI_LOG=0` is set.
+//! In parallel, each event is best-effort appended as a line to a
+//! single shared file, `~/.cache/mewxi/logs/mewxi-XXXX.log`:
+//! `2026-07-09T12:34:56.789Z [origin] [kind] message`. Every mewxi
+//! process — including the short-lived `mewxi status` invocations
+//! Claude Code's statusline spawns every few seconds — adopts the
+//! newest existing log file rather than minting its own on launch
+//! (leftovers from older rotating builds are deleted at init). The file
+//! never rotates: once its line count hits the cap, the oldest lines
+//! are trimmed in place and new lines keep appending at the end — a
+//! ring buffer on disk. Disabled silently if the cache dir can't be
+//! created, or if `MEWXI_LOG=0` is set.
 //!
-//! On disk this bounds growth to `MAX_FILES` * `MAX_LINES_PER_FILE`
-//! (20 * 10,000 = 200,000 lines); in memory it's capped at
-//! `RING_CAP` (1000) entries. Logging never panics and never bubbles
-//! errors — the point of the logger is to help diagnose other bugs,
-//! it must never become a bug source itself.
+//! The cap defaults to `DEFAULT_MAX_LINES_PER_FILE` (10,000) but is
+//! configurable via `log_max_lines` in
+//! `~/.config/mewxi/accounts.toml` (floored at
+//! `MIN_MAX_LINES_PER_FILE` = 100 so a typo can't turn every log line
+//! into a trim). Every log event cheaply re-checks accounts.toml's
+//! mtime and re-reads the cap when it moves (the same pattern as the
+//! usage tuning cache in `live_usage`), so a cap edit — from the TUI's
+//! Config row or by hand — applies to every running process without a
+//! restart.
+//!
+//! Because several processes may append to the same file concurrently,
+//! each process's in-memory `line_count` only sees the lines *it*
+//! wrote, not siblings' — trim timing is therefore approximate by
+//! design (a shared file may run a bit past the cap before any one
+//! process notices and trims, and each trim re-syncs the trimmer's
+//! count to the file's real length). This is bounded staleness, never
+//! corruption: every write is a single flushed line under `O_APPEND`,
+//! so concurrent appends interleave cleanly rather than clobbering
+//! each other.
+//!
+//! On disk this bounds growth to roughly the line cap; in memory it's
+//! capped at `RING_CAP` (1000) entries. Logging never panics and never
+//! bubbles errors — the point of the logger is to help diagnose other
+//! bugs, it must never become a bug source itself.
 
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-const MAX_LINES_PER_FILE: usize = 10_000;
-const MAX_FILES: usize = 20;
+/// Built-in per-file line cap; override with `log_max_lines` in
+/// `accounts.toml`, applied via [`set_max_lines`].
+pub const DEFAULT_MAX_LINES_PER_FILE: usize = 10_000;
+/// Floor for the configurable cap — a typo'd `log_max_lines = 1` must
+/// not turn every log line into a whole-file trim.
+pub const MIN_MAX_LINES_PER_FILE: usize = 100;
 const RING_CAP: usize = 1000;
+
+/// Configured per-file line cap; 0 means "not set, use the default".
+static MAX_LINES_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+/// accounts.toml mtime as of the last time the cap was refreshed from
+/// config; 0 = never checked, `u64::MAX` = config missing — the same
+/// sentinel scheme as `live_usage`'s tuning cache.
+static CONFIG_STAMP: AtomicU64 = AtomicU64::new(0);
+
+/// Re-read `log_max_lines` whenever accounts.toml's mtime moves, so a
+/// cap edit made by any process (the TUI's Config row, a hand edit)
+/// reaches every running process on its next log event — the same
+/// mtime-stamp pattern as `live_usage::tuning()`. One `stat` per event,
+/// no read+parse in the steady state.
+///
+/// Two ordering constraints keep this deadlock- and recursion-free:
+/// it runs BEFORE `log_event` takes the logger mutex (the accounts
+/// getters must never end up logging while that mutex is held), and the
+/// stamp is stored before the config is read, so an accidental nested
+/// `log_event` sees a matching stamp instead of recursing.
+fn refresh_max_lines_from_config() {
+    let stamp = match crate::accounts::config_mtime() {
+        Some(t) => t
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        None => u64::MAX,
+    };
+    if CONFIG_STAMP.load(Ordering::Relaxed) == stamp {
+        return;
+    }
+    CONFIG_STAMP.store(stamp, Ordering::Relaxed);
+    set_max_lines(crate::accounts::log_max_lines_setting());
+}
+
+/// Apply the configurable per-file line cap. `None` restores the
+/// built-in default. Kept public for the TUI's Config row, which calls
+/// it right after persisting: [`refresh_max_lines_from_config`] already
+/// covers cross-process pickup, but mtime has only 1-second resolution,
+/// so a same-process write-then-log pair inside the same second could
+/// miss the stamp check — this is the belt to that braces.
+pub fn set_max_lines(lines: Option<u64>) {
+    let v = lines
+        .map(|l| (l as usize).max(MIN_MAX_LINES_PER_FILE))
+        .unwrap_or(0);
+    MAX_LINES_OVERRIDE.store(v, Ordering::Relaxed);
+}
+
+fn max_lines_per_file() -> usize {
+    match MAX_LINES_OVERRIDE.load(Ordering::Relaxed) {
+        0 => DEFAULT_MAX_LINES_PER_FILE,
+        n => n,
+    }
+}
 
 /// Which subsystem an event came from.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -124,9 +205,8 @@ pub struct LogEntry {
 }
 
 struct Logger {
-    dir: PathBuf,
+    path: PathBuf,
     file: Option<BufWriter<File>>,
-    file_idx: u64,
     line_count: usize,
 }
 
@@ -138,15 +218,27 @@ fn enabled_via_env() -> bool {
     std::env::var("MEWXI_LOG").ok().as_deref() != Some("0")
 }
 
+/// Count newline bytes in `path` without loading assumptions about
+/// line endings beyond `\n` — best-effort, `None` if the file is
+/// missing or unreadable (caller treats that the same as "start
+/// fresh").
+fn count_lines(path: &std::path::Path) -> Option<usize> {
+    let bytes = fs::read(path).ok()?;
+    Some(bytes.iter().filter(|&&b| b == b'\n').count())
+}
+
 fn init_logger() -> Option<Mutex<Logger>> {
     if !enabled_via_env() {
         return None;
     }
     let dir = dirs::cache_dir()?.join("mewxi").join("logs");
     fs::create_dir_all(&dir).ok()?;
-    // Pick up where the previous run left off so a fresh launch
-    // doesn't overwrite the prior session's tail. Start one index past
-    // the highest existing file.
+    // Adopt the newest existing file — left by a prior run, an earlier
+    // rotating build, or a concurrently-running sibling process — so
+    // every process shares one log instead of minting its own per
+    // launch (short-lived `mewxi status` invocations used to churn the
+    // dir with thousands of near-empty files). An empty dir starts at
+    // `mewxi-0001.log`.
     let max_idx = fs::read_dir(&dir)
         .ok()?
         .flatten()
@@ -158,13 +250,33 @@ fn init_logger() -> Option<Mutex<Logger>> {
                 .and_then(|n| n.parse::<u64>().ok())
         })
         .max()
-        .unwrap_or(0);
+        .unwrap_or(1);
+    let path = dir.join(format!("mewxi-{max_idx:04}.log"));
+    let line_count = count_lines(&path).unwrap_or(0);
+    prune_legacy(&dir, &path);
     Some(Mutex::new(Logger {
-        dir,
+        path,
         file: None,
-        file_idx: max_idx,
-        line_count: MAX_LINES_PER_FILE, // forces rotate on first write
+        line_count,
     }))
+}
+
+/// The single front-trimmed file is the whole on-disk story now, but
+/// earlier rotating builds left up to `20` numbered siblings behind (and
+/// their per-process churn could leave thousands). Best-effort delete of
+/// every `mewxi-*.log` other than the adopted one, once per init.
+fn prune_legacy(dir: &std::path::Path, keep: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        let is_log = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("mewxi-") && n.ends_with(".log"));
+        if is_log && p != *keep {
+            let _ = fs::remove_file(&p);
+        }
+    }
 }
 
 fn logger() -> Option<&'static Mutex<Logger>> {
@@ -177,61 +289,72 @@ fn ring() -> &'static Mutex<VecDeque<LogEntry>> {
 
 impl Logger {
     /// Write an already-formatted line (timestamp + tags + message)
-    /// verbatim, rotating first if needed.
+    /// verbatim, front-trimming the file first if it's at the cap.
     fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        if self.file.is_none() || self.line_count >= MAX_LINES_PER_FILE {
-            self.rotate()?;
+        if self.file.is_none() {
+            // `append`, never `write + truncate`: several processes
+            // share this file, and O_APPEND makes each flushed line
+            // land at the current end instead of clobbering siblings'.
+            let f = OpenOptions::new().create(true).append(true).open(&self.path)?;
+            self.file = Some(BufWriter::new(f));
         }
-        let writer = self
-            .file
-            .as_mut()
-            .expect("file is Some after rotate()");
+        if self.line_count >= max_lines_per_file() {
+            self.trim();
+        }
+        let writer = self.file.as_mut().expect("file opened above");
         writeln!(writer, "{line}")?;
         writer.flush()?;
         self.line_count += 1;
         Ok(())
     }
 
-    fn rotate(&mut self) -> std::io::Result<()> {
-        self.file_idx = self.file_idx.saturating_add(1);
-        let path = self.dir.join(format!("mewxi-{:04}.log", self.file_idx));
-        let f = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)?;
-        self.file = Some(BufWriter::new(f));
-        self.line_count = 0;
-        self.prune();
-        Ok(())
-    }
-
-    /// Delete the oldest files when more than `MAX_FILES` exist, so
-    /// long-running sessions don't fill the disk.
-    fn prune(&self) {
-        let Ok(entries) = fs::read_dir(&self.dir) else { return };
-        let mut idxs: Vec<(u64, PathBuf)> = entries
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                let idx = p
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .and_then(|n| n.strip_prefix("mewxi-"))
-                    .and_then(|n| n.strip_suffix(".log"))
-                    .and_then(|n| n.parse::<u64>().ok())?;
-                Some((idx, p))
-            })
-            .collect();
-        if idxs.len() <= MAX_FILES {
+    /// Drop the file's oldest lines in place so the newest ~90% of the
+    /// cap remain, then keep appending — the file behaves as a ring, no
+    /// rotation. Trimming to 90% rather than cap-1 amortizes the
+    /// read+rewrite over ~cap/10 appends instead of running per line.
+    ///
+    /// Best-effort: on any error the file and count are left as-is, so
+    /// the next write simply retries. The in-place `fs::write` keeps
+    /// the inode, so our own and siblings' O_APPEND handles stay valid
+    /// and append at the new end; a sibling line landing inside the
+    /// trim window can end up out of order but never torn, since every
+    /// append is a single flushed write.
+    fn trim(&mut self) {
+        let cap = max_lines_per_file();
+        let Ok(bytes) = fs::read(&self.path) else { return };
+        let total = bytes.iter().filter(|&&b| b == b'\n').count();
+        if total < cap {
+            // Our per-process count drifted past the file's real length
+            // — a sibling already trimmed, or the file was removed and
+            // recreated. Adopt the real count and skip the rewrite.
+            self.line_count = total;
             return;
         }
-        idxs.sort_by_key(|(i, _)| *i);
-        let drop_count = idxs.len() - MAX_FILES;
-        for (_, p) in idxs.iter().take(drop_count) {
-            let _ = fs::remove_file(p);
+        let keep = cap - (cap / 10).max(1);
+        let start = tail_offset(&bytes, total - keep);
+        if fs::write(&self.path, &bytes[start..]).is_ok() {
+            self.line_count = keep;
         }
     }
+}
+
+/// Byte offset where the content after the first `drop_lines` lines of
+/// `bytes` starts — `bytes.len()` when asked to drop more lines than
+/// exist. Pure so the trim boundary is unit-testable.
+fn tail_offset(bytes: &[u8], drop_lines: usize) -> usize {
+    if drop_lines == 0 {
+        return 0;
+    }
+    let mut seen = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            seen += 1;
+            if seen == drop_lines {
+                return i + 1;
+            }
+        }
+    }
+    bytes.len()
 }
 
 /// Push an entry onto the in-memory ring, dropping the oldest once
@@ -248,9 +371,10 @@ fn push_ring(entry: LogEntry) {
 }
 
 /// Append a structured event: pushed to the in-memory ring (always,
-/// even when file logging is disabled) and appended to the rotating
-/// file (best-effort).
+/// even when file logging is disabled) and appended to the shared
+/// front-trimmed file (best-effort).
 pub fn log_event(origin: LogOrigin, kind: LogKind, message: &str) {
+    refresh_max_lines_from_config();
     let ts = Utc::now();
 
     push_ring(LogEntry {
@@ -483,6 +607,52 @@ mod tests {
         log_event(LogOrigin::Setup, LogKind::Info, &marker("version"));
         let after = ring_version();
         assert!(after > before);
+    }
+
+    /// Unique path under `std::env::temp_dir()` for a single test, so
+    /// concurrent test runs don't collide.
+    fn temp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "mewxi-debug-log-test-{tag}-{:?}-{}.log",
+            std::thread::current().id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ))
+    }
+
+    #[test]
+    fn count_lines_counts_newlines_in_a_written_file() {
+        let path = temp_path("count-n");
+        fs::write(&path, "line1\nline2\nline3\n").unwrap();
+        assert_eq!(count_lines(&path), Some(3));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn count_lines_of_empty_file_is_zero() {
+        let path = temp_path("count-empty");
+        fs::write(&path, "").unwrap();
+        assert_eq!(count_lines(&path), Some(0));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn count_lines_missing_file_is_none() {
+        let path = temp_path("count-missing");
+        // Deliberately never created.
+        assert_eq!(count_lines(&path), None);
+    }
+
+    #[test]
+    fn tail_offset_drops_requested_lines() {
+        let bytes = b"a\nbb\nccc\ndddd\n";
+        assert_eq!(tail_offset(bytes, 0), 0);
+        assert_eq!(tail_offset(bytes, 1), 2);
+        assert_eq!(tail_offset(bytes, 2), 5);
+        assert_eq!(&bytes[tail_offset(bytes, 3)..], b"dddd\n");
+        assert_eq!(tail_offset(bytes, 4), bytes.len());
+        // Asking to drop more lines than exist empties the file rather
+        // than panicking or wrapping.
+        assert_eq!(tail_offset(bytes, 9), bytes.len());
     }
 
     #[test]

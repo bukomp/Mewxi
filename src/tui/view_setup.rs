@@ -51,6 +51,9 @@ pub enum ConfigItem {
     /// between live usage-endpoint probes (`live_refresh_interval_secs`
     /// in accounts.toml).
     LivePollInterval,
+    /// Steps (or, via inline edit, sets exactly) the per-file line cap
+    /// for `crate::debug_log` (`log_max_lines` in accounts.toml).
+    LogMaxLines,
     /// Toggles the `— Tool(arg)` suffix on sub-agent row captions
     /// (`subagent_tool_action` in accounts.toml).
     SubagentToolActionToggle,
@@ -203,6 +206,60 @@ pub fn fmt_poll_secs(secs: u64) -> String {
     }
 }
 
+/// Fixed step size for the "log file max lines" row — Enter always
+/// advances to the next multiple of this many lines.
+pub const LOG_LINES_STEP: u64 = 1_000;
+/// Floor for both the stepped cycle and hand-typed custom values.
+pub const LOG_LINES_MIN: u64 = 500;
+/// Ceiling for both the stepped cycle and hand-typed custom values.
+pub const LOG_LINES_MAX: u64 = 100_000;
+
+/// Next 1,000-line grid point strictly above `current`, capped at
+/// `LOG_LINES_MAX` and wrapping back to `LOG_LINES_MIN` once `current`
+/// has reached (or somehow exceeds) the ceiling. Off-grid values snap up
+/// to the next multiple of 1,000 rather than adding a full step on top,
+/// so repeated presses always land exactly on the grid.
+pub fn next_log_lines_step(current: u64) -> u64 {
+    if current >= LOG_LINES_MAX {
+        return LOG_LINES_MIN;
+    }
+    let next = (current / LOG_LINES_STEP + 1) * LOG_LINES_STEP;
+    next.min(LOG_LINES_MAX)
+}
+
+/// Parses a user-typed line cap from the inline edit box. Accepts
+/// (trimmed, case-insensitive) a plain integer (`"5000"`) or a
+/// thousands suffix (`"5k"`). Rejects anything outside
+/// `[LOG_LINES_MIN, LOG_LINES_MAX]` with a message the row can show
+/// verbatim as the edit hint.
+pub fn parse_log_lines_input(s: &str) -> Result<u64, String> {
+    let trimmed = s.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let lines = if let Some(k) = lower.strip_suffix('k') {
+        k.parse::<u64>().ok().and_then(|v| v.checked_mul(1_000))
+    } else {
+        lower.parse::<u64>().ok()
+    }
+    .ok_or_else(|| format!("can't parse '{s}' — try 5000 or 5k"))?;
+    if !(LOG_LINES_MIN..=LOG_LINES_MAX).contains(&lines) {
+        return Err(format!(
+            "line cap must be between {LOG_LINES_MIN} and {LOG_LINES_MAX}"
+        ));
+    }
+    Ok(lines)
+}
+
+/// `10_000` → `"10k"`, `5_500` → `"5500"` — round thousands collapse to
+/// the short form, anything else renders as the raw number so
+/// hand-edited/custom values always render exactly.
+pub fn fmt_log_lines(n: u64) -> String {
+    if n != 0 && n.is_multiple_of(1_000) {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
+    }
+}
+
 /// Actionable rows, in display order. Accounts come first so the
 /// existing account-oriented shortcuts (`s`, `i`) keep indexing
 /// naturally.
@@ -219,6 +276,7 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
     v.push(ConfigItem::DefaultView);
     v.push(ConfigItem::DefocusToggle);
     v.push(ConfigItem::LivePollInterval);
+    v.push(ConfigItem::LogMaxLines);
     v.push(ConfigItem::SubagentToolActionToggle);
     v.push(ConfigItem::StatusLineComposer);
     v
@@ -256,6 +314,14 @@ pub struct LivePollUi<'a> {
     pub edit: Option<&'a str>,
 }
 
+/// Line-cap state for the "log file max lines" Config row, built each
+/// frame by the event loop. Mirrors `LivePollUi`.
+#[derive(Clone, Copy)]
+pub struct LogMaxLinesUi<'a> {
+    pub lines: u64,
+    pub edit: Option<&'a str>,
+}
+
 /// Logs-panel state owned by the TUI event loop.
 pub struct LogsUi<'a> {
     /// Full recent ring snapshot, oldest → newest (filtering happens here in the view).
@@ -283,6 +349,7 @@ pub fn render(
     subagent_tool_action: bool,
     default_view: DefaultView,
     live_poll: LivePollUi,
+    log_max_lines: LogMaxLinesUi,
     update: &UpdateUi,
     logs: &LogsUi,
     setup_rect: &mut Option<Rect>,
@@ -310,8 +377,8 @@ pub fn render(
 
     render_header(f, rows[0], snap, update);
     *setup_rect = Some(rows[1]);
-    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, live_poll, update);
-    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, live_poll, update, last_message);
+    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, live_poll, log_max_lines, update);
+    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, live_poll, log_max_lines, update, last_message);
     render_logs(f, rows[3], logs);
     render_footer(
         f,
@@ -487,6 +554,7 @@ fn build_lines(
     subagent_tool_action: bool,
     default_view: DefaultView,
     live_poll: LivePollUi,
+    log_max_lines: LogMaxLinesUi,
     update: &UpdateUi,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
     let mut lines: Vec<Line> = Vec::new();
@@ -715,6 +783,23 @@ fn build_lines(
                 lines.push(row(i, "usage poll interval".to_string(), bold(format!("{txt:<16}"), color), extra));
                 owners.push(Some(i));
             }
+            ConfigItem::LogMaxLines => {
+                let (txt, color, extra) = if let Some(edit) = log_max_lines.edit {
+                    (
+                        format!("{edit}▏"),
+                        Color::Yellow,
+                        "Enter save · Esc cancel · e.g. 5000, 5k".to_string(),
+                    )
+                } else {
+                    (
+                        fmt_log_lines(log_max_lines.lines),
+                        Color::Magenta,
+                        "line cap for the debug-log file — oldest trimmed (default 10k)".to_string(),
+                    )
+                };
+                lines.push(row(i, "log file max lines".to_string(), bold(format!("{txt:<16}"), color), extra));
+                owners.push(Some(i));
+            }
             ConfigItem::SubagentToolActionToggle => {
                 let (txt, color) = if subagent_tool_action {
                     ("✓ on", Color::Green)
@@ -757,6 +842,7 @@ fn render_list(
     subagent_tool_action: bool,
     default_view: DefaultView,
     live_poll: LivePollUi,
+    log_max_lines: LogMaxLinesUi,
     update: &UpdateUi,
 ) {
     let block = Block::default().borders(Borders::ALL).title("Settings");
@@ -772,8 +858,16 @@ fn render_list(
         return;
     }
 
-    let (lines, owners) =
-        build_lines(snap, selected, defocus, subagent_tool_action, default_view, live_poll, update);
+    let (lines, owners) = build_lines(
+        snap,
+        selected,
+        defocus,
+        subagent_tool_action,
+        default_view,
+        live_poll,
+        log_max_lines,
+        update,
+    );
 
     // Edge-triggered scrolling: the cursor moves freely inside the visible
     // window and the list only scrolls once the cursor reaches the top or
@@ -802,6 +896,7 @@ fn render_list(
 
 /// What Enter will do on the selected row — shown before the user
 /// presses it so no action is a surprise.
+#[allow(clippy::too_many_arguments)]
 fn action_hint(
     snap: Option<&SetupSnapshot>,
     selected: usize,
@@ -809,6 +904,7 @@ fn action_hint(
     subagent_tool_action: bool,
     default_view: DefaultView,
     live_poll: LivePollUi,
+    log_max_lines: LogMaxLinesUi,
     update: &UpdateUi,
 ) -> String {
     let list = items(snap);
@@ -906,6 +1002,19 @@ fn action_hint(
                 )
             }
         }
+        ConfigItem::LogMaxLines => {
+            if log_max_lines.edit.is_some() {
+                format!(
+                    "type a line cap ({LOG_LINES_MIN}–{LOG_LINES_MAX}) — Enter: save · Esc: cancel"
+                )
+            } else {
+                format!(
+                    "Enter: cap at {} lines instead (currently {}) · e: type a custom cap ({LOG_LINES_MIN}–{LOG_LINES_MAX}) — caps the debug-log file's line count, trimming the oldest lines to make room for new ones (default 10k); every running mewxi process picks it up on its next log write",
+                    fmt_log_lines(next_log_lines_step(log_max_lines.lines)),
+                    fmt_log_lines(log_max_lines.lines)
+                )
+            }
+        }
         ConfigItem::SubagentToolActionToggle => if subagent_tool_action {
             "Enter: hide the — Tool(arg) suffix on sub-agent captions".to_string()
         } else {
@@ -929,10 +1038,20 @@ fn render_info(
     subagent_tool_action: bool,
     default_view: DefaultView,
     live_poll: LivePollUi,
+    log_max_lines: LogMaxLinesUi,
     update: &UpdateUi,
     last_message: Option<&str>,
 ) {
-    let hint = action_hint(snap, selected, defocus, subagent_tool_action, default_view, live_poll, update);
+    let hint = action_hint(
+        snap,
+        selected,
+        defocus,
+        subagent_tool_action,
+        default_view,
+        live_poll,
+        log_max_lines,
+        update,
+    );
     let msg_line = match last_message {
         Some(m) => Line::from(Span::styled(m.to_string(), Style::default().fg(Color::Cyan))),
         None => Line::from(Span::styled(
@@ -1009,10 +1128,11 @@ mod tests {
         assert_eq!(list[9], ConfigItem::DefaultView);
         assert_eq!(list[10], ConfigItem::DefocusToggle);
         assert_eq!(list[11], ConfigItem::LivePollInterval);
-        assert_eq!(list[12], ConfigItem::SubagentToolActionToggle);
-        assert_eq!(list[13], ConfigItem::StatusLineComposer);
+        assert_eq!(list[12], ConfigItem::LogMaxLines);
+        assert_eq!(list[13], ConfigItem::SubagentToolActionToggle);
+        assert_eq!(list[14], ConfigItem::StatusLineComposer);
         // No snapshot yet → only the fixed rows.
-        assert_eq!(items(None).len(), 12);
+        assert_eq!(items(None).len(), 13);
     }
 
     #[test]
@@ -1071,6 +1191,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fmt_log_lines_formats_thousands_and_raw() {
+        assert_eq!(fmt_log_lines(500), "500");
+        assert_eq!(fmt_log_lines(1_000), "1k");
+        assert_eq!(fmt_log_lines(5_500), "5500");
+        assert_eq!(fmt_log_lines(10_000), "10k");
+        assert_eq!(fmt_log_lines(100_000), "100k");
+    }
+
+    #[test]
+    fn next_log_lines_step_advances_by_1000_and_wraps() {
+        assert_eq!(next_log_lines_step(1_000), 2_000);
+        // Off-grid values snap up to the next multiple of 1,000.
+        assert_eq!(next_log_lines_step(1_500), 2_000);
+        assert_eq!(next_log_lines_step(99_000), 100_000);
+        assert_eq!(next_log_lines_step(99_500), 100_000);
+        // Wraps past the ceiling back to the floor.
+        assert_eq!(next_log_lines_step(100_000), 500);
+        // Below the floor, still snaps up to the next 1,000 grid point
+        // (the floor only kicks in once the ceiling wraps around).
+        assert_eq!(next_log_lines_step(200), 1_000);
+    }
+
+    #[test]
+    fn parse_log_lines_input_accepts_plain_and_k_suffix() {
+        assert_eq!(parse_log_lines_input("5000"), Ok(5000));
+        assert_eq!(parse_log_lines_input("5k"), Ok(5000));
+        assert_eq!(parse_log_lines_input(" 10K "), Ok(10_000));
+        assert_eq!(parse_log_lines_input("500"), Ok(500));
+    }
+
+    #[test]
+    fn parse_log_lines_input_rejects_out_of_range_and_garbage() {
+        assert_eq!(
+            parse_log_lines_input("499"),
+            Err("line cap must be between 500 and 100000".to_string())
+        );
+        assert_eq!(
+            parse_log_lines_input("100001"),
+            Err("line cap must be between 500 and 100000".to_string())
+        );
+        assert_eq!(
+            parse_log_lines_input("abc"),
+            Err("can't parse 'abc' — try 5000 or 5k".to_string())
+        );
+        assert_eq!(
+            parse_log_lines_input(""),
+            Err("can't parse '' — try 5000 or 5k".to_string())
+        );
+    }
+
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
         render_to_text_full(selected, status, &[], None, None, 0, false)
     }
@@ -1113,6 +1284,7 @@ mod tests {
                     false,
                     DefaultView::All,
                     LivePollUi { secs: 60, edit: None },
+                    LogMaxLinesUi { lines: 10_000, edit: None },
                     &update_ui(status.as_ref()),
                     &logs,
                     &mut rect,
@@ -1148,6 +1320,7 @@ mod tests {
             "Preferences",
             "defocus input after send",
             "usage poll interval",
+            "log file max lines",
             "Status line",
             "status line blocks",
             "did a thing",
