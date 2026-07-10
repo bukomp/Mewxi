@@ -47,8 +47,9 @@ pub enum ConfigItem {
     UpdateCheckNow,
     DefaultView,
     DefocusToggle,
-    /// Cycles the minimum time between live usage-endpoint probes
-    /// (`live_refresh_interval_secs` in accounts.toml).
+    /// Steps (or, via inline edit, sets exactly) the minimum time
+    /// between live usage-endpoint probes (`live_refresh_interval_secs`
+    /// in accounts.toml).
     LivePollInterval,
     /// Toggles the `— Tool(arg)` suffix on sub-agent row captions
     /// (`subagent_tool_action` in accounts.toml).
@@ -108,26 +109,97 @@ impl DefaultView {
     }
 }
 
-/// Presets the "usage poll interval" row cycles through, in seconds.
-/// A hand-edited value between presets renders as-is and cycles to the
-/// next larger preset (wrapping past the largest).
-pub const LIVE_POLL_PRESETS: &[u64] = &[30, 60, 120, 300, 600];
+/// Fixed step size for the "usage poll interval" row — Enter always
+/// advances to the next multiple of this many seconds.
+pub const LIVE_POLL_STEP_SECS: u64 = 30;
+/// Floor for both the stepped cycle and hand-typed custom values.
+/// Probing more often than this would hammer the usage endpoint for no
+/// real benefit.
+pub const LIVE_POLL_MIN_SECS: u64 = 30;
+/// Ceiling for both the stepped cycle and hand-typed custom values (15
+/// minutes) — anything rarer than this defeats the point of a "live"
+/// view.
+pub const LIVE_POLL_MAX_SECS: u64 = 900;
 
-pub fn next_live_poll_preset(current: u64) -> u64 {
-    LIVE_POLL_PRESETS
-        .iter()
-        .copied()
-        .find(|&p| p > current)
-        .unwrap_or(LIVE_POLL_PRESETS[0])
+/// Next 30-second grid point strictly above `current`, capped at
+/// `LIVE_POLL_MAX_SECS` and wrapping back to `LIVE_POLL_MIN_SECS` once
+/// `current` has reached (or somehow exceeds) the ceiling. Off-grid
+/// values — e.g. a hand-typed 45s — snap up to the next multiple of 30
+/// rather than adding a full step on top, so repeated presses always
+/// land exactly on the grid.
+pub fn next_live_poll_step(current: u64) -> u64 {
+    if current >= LIVE_POLL_MAX_SECS {
+        return LIVE_POLL_MIN_SECS;
+    }
+    let next = (current / LIVE_POLL_STEP_SECS + 1) * LIVE_POLL_STEP_SECS;
+    next.min(LIVE_POLL_MAX_SECS)
 }
 
-/// `90` → `"90s"`, `120` → `"2m"` — whole minutes collapse, everything
-/// else stays in seconds so hand-edited values render faithfully.
-pub fn fmt_poll_secs(secs: u64) -> String {
-    if secs >= 60 && secs % 60 == 0 {
-        format!("{}m", secs / 60)
+/// Parses `lower` (already trimmed + lowercased) as `"90"`, `"90s"`,
+/// `"2m"`, or `"1m30s"` into a whole number of seconds. `None` for
+/// anything that doesn't match one of those shapes.
+fn parse_duration_secs(lower: &str) -> Option<u64> {
+    if lower.is_empty() {
+        return None;
+    }
+    if let Ok(v) = lower.parse::<u64>() {
+        return Some(v);
+    }
+    let (min_str, sec_str) = match lower.split_once('m') {
+        Some((m, rest)) => (Some(m), rest),
+        None => (None, lower),
+    };
+    // The part after the (optional) minutes is either empty — no
+    // seconds — or must end in 's'; anything else is garbage.
+    let sec_str = if sec_str.is_empty() {
+        None
     } else {
-        format!("{secs}s")
+        Some(sec_str.strip_suffix('s')?)
+    };
+    // A bare "s" strips down to nothing — with no minutes part either,
+    // there isn't a single digit in the input; that's garbage, not 0s.
+    if min_str.is_none() && sec_str.is_none_or(str::is_empty) {
+        return None;
+    }
+    let mins: u64 = match min_str {
+        Some(m) => m.parse().ok()?,
+        None => 0,
+    };
+    let secs: u64 = match sec_str {
+        Some(s) if !s.is_empty() => s.parse().ok()?,
+        _ => 0,
+    };
+    Some(mins * 60 + secs)
+}
+
+/// Parses a user-typed poll interval from the inline edit box. Accepts
+/// (trimmed, case-insensitive) a plain integer of seconds (`"90"`), or
+/// `"90s"`, `"2m"`, `"1m30s"` shapes. Rejects anything outside
+/// `[LIVE_POLL_MIN_SECS, LIVE_POLL_MAX_SECS]` with a message the row
+/// can show verbatim as the edit hint.
+pub fn parse_poll_input(s: &str) -> Result<u64, String> {
+    let trimmed = s.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let secs = parse_duration_secs(&lower)
+        .ok_or_else(|| format!("can't parse '{s}' — try 90s, 2m or 1m30s"))?;
+    if !(LIVE_POLL_MIN_SECS..=LIVE_POLL_MAX_SECS).contains(&secs) {
+        return Err("interval must be between 30s and 15m".to_string());
+    }
+    Ok(secs)
+}
+
+/// `45` → `"45s"`, `120` → `"2m"`, `90` → `"1m30s"` — whole minutes
+/// collapse, a leftover remainder of seconds is appended so
+/// hand-edited/custom values always render exactly.
+pub fn fmt_poll_secs(secs: u64) -> String {
+    let mins = secs / 60;
+    let rem = secs % 60;
+    if mins == 0 {
+        format!("{rem}s")
+    } else if rem == 0 {
+        format!("{mins}m")
+    } else {
+        format!("{mins}m{rem}s")
     }
 }
 
@@ -173,6 +245,17 @@ pub struct UpdateUi<'a> {
     pub error: Option<&'a str>,
 }
 
+/// Poll-interval state for the "usage poll interval" Config row, built
+/// each frame by the event loop. Mirrors the `UpdateUi::build_dir_edit`
+/// pattern used for the build-dir row: `edit` is `Some` only while the
+/// user is mid-typing a custom value and holds the in-progress buffer
+/// (this view appends the trailing cursor marker itself).
+#[derive(Clone, Copy)]
+pub struct LivePollUi<'a> {
+    pub secs: u64,
+    pub edit: Option<&'a str>,
+}
+
 /// Logs-panel state owned by the TUI event loop.
 pub struct LogsUi<'a> {
     /// Full recent ring snapshot, oldest → newest (filtering happens here in the view).
@@ -199,7 +282,7 @@ pub fn render(
     defocus_input_after_send: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
-    live_poll_secs: u64,
+    live_poll: LivePollUi,
     update: &UpdateUi,
     logs: &LogsUi,
     setup_rect: &mut Option<Rect>,
@@ -227,8 +310,8 @@ pub fn render(
 
     render_header(f, rows[0], snap, update);
     *setup_rect = Some(rows[1]);
-    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, live_poll_secs, update);
-    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, live_poll_secs, update, last_message);
+    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, live_poll, update);
+    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, live_poll, update, last_message);
     render_logs(f, rows[3], logs);
     render_footer(
         f,
@@ -403,7 +486,7 @@ fn build_lines(
     defocus: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
-    live_poll_secs: u64,
+    live_poll: LivePollUi,
     update: &UpdateUi,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
     let mut lines: Vec<Line> = Vec::new();
@@ -616,12 +699,20 @@ fn build_lines(
                 owners.push(Some(i));
             }
             ConfigItem::LivePollInterval => {
-                lines.push(row(
-                    i,
-                    "usage poll interval".to_string(),
-                    bold(format!("{:<16}", fmt_poll_secs(live_poll_secs)), Color::Magenta),
-                    "min time between usage-endpoint probes (per account)".to_string(),
-                ));
+                let (txt, color, extra) = if let Some(edit) = live_poll.edit {
+                    (
+                        format!("{edit}▏"),
+                        Color::Yellow,
+                        "Enter save · Esc cancel · e.g. 90s, 2m, 1m30s".to_string(),
+                    )
+                } else {
+                    (
+                        fmt_poll_secs(live_poll.secs),
+                        Color::Magenta,
+                        "min time between usage-endpoint probes (per account)".to_string(),
+                    )
+                };
+                lines.push(row(i, "usage poll interval".to_string(), bold(format!("{txt:<16}"), color), extra));
                 owners.push(Some(i));
             }
             ConfigItem::SubagentToolActionToggle => {
@@ -665,7 +756,7 @@ fn render_list(
     defocus: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
-    live_poll_secs: u64,
+    live_poll: LivePollUi,
     update: &UpdateUi,
 ) {
     let block = Block::default().borders(Borders::ALL).title("Settings");
@@ -682,7 +773,7 @@ fn render_list(
     }
 
     let (lines, owners) =
-        build_lines(snap, selected, defocus, subagent_tool_action, default_view, live_poll_secs, update);
+        build_lines(snap, selected, defocus, subagent_tool_action, default_view, live_poll, update);
 
     // Edge-triggered scrolling: the cursor moves freely inside the visible
     // window and the list only scrolls once the cursor reaches the top or
@@ -717,7 +808,7 @@ fn action_hint(
     defocus: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
-    live_poll_secs: u64,
+    live_poll: LivePollUi,
     update: &UpdateUi,
 ) -> String {
     let list = items(snap);
@@ -804,11 +895,17 @@ fn action_hint(
         } else {
             "Enter: unfocus the prompt box after sending (keys go back to navigation)".to_string()
         },
-        ConfigItem::LivePollInterval => format!(
-            "Enter: probe the usage endpoint at most every {} instead (currently {})",
-            fmt_poll_secs(next_live_poll_preset(live_poll_secs)),
-            fmt_poll_secs(live_poll_secs)
-        ),
+        ConfigItem::LivePollInterval => {
+            if live_poll.edit.is_some() {
+                "type an interval (30s–15m) — Enter: save · Esc: cancel".to_string()
+            } else {
+                format!(
+                    "Enter: probe every {} instead (currently {}) · e: type a custom interval (30s–15m)",
+                    fmt_poll_secs(next_live_poll_step(live_poll.secs)),
+                    fmt_poll_secs(live_poll.secs)
+                )
+            }
+        }
         ConfigItem::SubagentToolActionToggle => if subagent_tool_action {
             "Enter: hide the — Tool(arg) suffix on sub-agent captions".to_string()
         } else {
@@ -831,11 +928,11 @@ fn render_info(
     defocus: bool,
     subagent_tool_action: bool,
     default_view: DefaultView,
-    live_poll_secs: u64,
+    live_poll: LivePollUi,
     update: &UpdateUi,
     last_message: Option<&str>,
 ) {
-    let hint = action_hint(snap, selected, defocus, subagent_tool_action, default_view, live_poll_secs, update);
+    let hint = action_hint(snap, selected, defocus, subagent_tool_action, default_view, live_poll, update);
     let msg_line = match last_message {
         Some(m) => Line::from(Span::styled(m.to_string(), Style::default().fg(Color::Cyan))),
         None => Line::from(Span::styled(
@@ -919,15 +1016,59 @@ mod tests {
     }
 
     #[test]
-    fn live_poll_presets_cycle_and_format() {
-        assert_eq!(next_live_poll_preset(60), 120);
-        // Wraps past the largest preset.
-        assert_eq!(next_live_poll_preset(600), 30);
-        // Hand-edited off-preset values advance to the next larger one.
-        assert_eq!(next_live_poll_preset(90), 120);
+    fn fmt_poll_secs_formats_minutes_and_seconds() {
         assert_eq!(fmt_poll_secs(30), "30s");
-        assert_eq!(fmt_poll_secs(90), "90s");
+        assert_eq!(fmt_poll_secs(45), "45s");
+        assert_eq!(fmt_poll_secs(90), "1m30s");
         assert_eq!(fmt_poll_secs(120), "2m");
+        assert_eq!(fmt_poll_secs(630), "10m30s");
+        assert_eq!(fmt_poll_secs(900), "15m");
+    }
+
+    #[test]
+    fn next_live_poll_step_advances_by_30s_and_wraps() {
+        assert_eq!(next_live_poll_step(30), 60);
+        // Off-grid values snap up to the next multiple of 30.
+        assert_eq!(next_live_poll_step(45), 60);
+        assert_eq!(next_live_poll_step(870), 900);
+        assert_eq!(next_live_poll_step(890), 900);
+        // Wraps past the ceiling back to the floor.
+        assert_eq!(next_live_poll_step(900), 30);
+        assert_eq!(next_live_poll_step(10), 30);
+    }
+
+    #[test]
+    fn parse_poll_input_accepts_seconds_and_minute_shapes() {
+        assert_eq!(parse_poll_input("90"), Ok(90));
+        assert_eq!(parse_poll_input("90s"), Ok(90));
+        assert_eq!(parse_poll_input("2m"), Ok(120));
+        assert_eq!(parse_poll_input("1m30s"), Ok(90));
+        assert_eq!(parse_poll_input(" 15M "), Ok(900));
+    }
+
+    #[test]
+    fn parse_poll_input_rejects_out_of_range_and_garbage() {
+        assert_eq!(
+            parse_poll_input("29"),
+            Err("interval must be between 30s and 15m".to_string())
+        );
+        assert_eq!(
+            parse_poll_input("16m"),
+            Err("interval must be between 30s and 15m".to_string())
+        );
+        assert_eq!(
+            parse_poll_input("abc"),
+            Err("can't parse 'abc' — try 90s, 2m or 1m30s".to_string())
+        );
+        // No digits at all — a parse failure, not a 0s range failure.
+        assert_eq!(
+            parse_poll_input("s"),
+            Err("can't parse 's' — try 90s, 2m or 1m30s".to_string())
+        );
+        assert_eq!(
+            parse_poll_input(""),
+            Err("can't parse '' — try 90s, 2m or 1m30s".to_string())
+        );
     }
 
     fn render_to_text(selected: usize, status: Option<UpdateStatus>) -> String {
@@ -971,7 +1112,7 @@ mod tests {
                     true,
                     false,
                     DefaultView::All,
-                    60,
+                    LivePollUi { secs: 60, edit: None },
                     &update_ui(status.as_ref()),
                     &logs,
                     &mut rect,

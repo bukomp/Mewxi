@@ -1394,6 +1394,9 @@ fn run_loop<B: ratatui::backend::Backend>(
     // While Some, the Config view's build-dir row is in text-edit mode
     // and keys go to this input instead of navigation.
     let mut update_build_dir_edit: Option<text_input::TextInput> = None;
+    // While Some, the Config view's usage-poll-interval row is in
+    // text-edit mode and keys go to this input instead of navigation.
+    let mut live_poll_edit: Option<text_input::TextInput> = None;
     // Current `live_refresh_interval_secs` for the Config view's cycling
     // row — seeded from the resolved (clamped/defaulted) value so the row
     // always shows what's actually in effect.
@@ -1934,6 +1937,11 @@ fn run_loop<B: ratatui::backend::Backend>(
             expanded: log_expanded,
         };
 
+        let live_poll_ui = view_setup::LivePollUi {
+            secs: live_poll_secs,
+            edit: live_poll_edit.as_ref().map(|i| i.as_str()),
+        };
+
         terminal.draw(|f| {
             render(
                 f,
@@ -1966,7 +1974,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 defocus_input_after_send,
                 subagent_tool_action,
                 default_view_pref,
-                live_poll_secs,
+                live_poll_ui,
                 &update_ui,
                 &logs_ui,
                 live_error,
@@ -2501,6 +2509,49 @@ fn run_loop<B: ratatui::backend::Backend>(
                             KeyCode::Esc => {
                                 update_build_dir_edit = None;
                                 setup_message = Some("build dir edit cancelled".into());
+                            }
+                            _ => {
+                                let _ = input.handle_edit_key(k);
+                            }
+                        }
+                        continue;
+                    }
+                    // Live-poll-interval edit on the Config view owns every
+                    // keystroke while active: Enter saves, Esc cancels,
+                    // everything else edits the value.
+                    if let Some(input) = live_poll_edit.as_mut() {
+                        match k.code {
+                            KeyCode::Enter => {
+                                match view_setup::parse_poll_input(input.as_str()) {
+                                    Ok(secs) => {
+                                        live_poll_edit = None;
+                                        match accounts::set_live_refresh_interval_secs(secs) {
+                                            Ok(()) => {
+                                                live_poll_secs = secs;
+                                                // Without this, the change would
+                                                // only apply after a restart —
+                                                // the pollers cache the tunables.
+                                                live_usage::reload_tuning();
+                                                setup_message = Some(format!(
+                                                    "probe usage at most every {}",
+                                                    view_setup::fmt_poll_secs(secs)
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(msg) => {
+                                        setup_message = Some(msg);
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                live_poll_edit = None;
+                                setup_message = Some("interval edit cancelled".into());
                             }
                             _ => {
                                 let _ = input.handle_edit_key(k);
@@ -3479,6 +3530,16 @@ fn run_loop<B: ratatui::backend::Backend>(
                             setup_message = toggle_watcher(&mut setup_snapshot, no_live);
                             setup_snapshot = setup::inspect(no_live).ok();
                         }
+                        KeyCode::Char('e') if mode == ViewMode::Setup => {
+                            if let Some(view_setup::ConfigItem::LivePollInterval) =
+                                view_setup::items(setup_snapshot.as_ref()).get(selected_setup)
+                            {
+                                live_poll_edit = Some(text_input::TextInput::from_str(
+                                    &view_setup::fmt_poll_secs(live_poll_secs),
+                                ));
+                                setup_message = None;
+                            }
+                        }
                         KeyCode::Char('a') if mode == ViewMode::Setup => {
                             setup_message = Some(apply_all_action(no_live));
                             setup_snapshot = setup::inspect(no_live).ok();
@@ -3814,7 +3875,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         }
                                     }
                                     Some(view_setup::ConfigItem::LivePollInterval) => {
-                                        let next = view_setup::next_live_poll_preset(live_poll_secs);
+                                        let next = view_setup::next_live_poll_step(live_poll_secs);
                                         match accounts::set_live_refresh_interval_secs(next) {
                                             Ok(()) => {
                                                 live_poll_secs = next;
@@ -4290,7 +4351,7 @@ fn render(
     defocus_input_after_send: bool,
     subagent_tool_action: bool,
     default_view: view_setup::DefaultView,
-    live_poll_secs: u64,
+    live_poll: view_setup::LivePollUi,
     update_ui: &view_setup::UpdateUi,
     logs_ui: &view_setup::LogsUi,
     live_error: Option<&str>,
@@ -4379,7 +4440,7 @@ fn render(
             defocus_input_after_send,
             subagent_tool_action,
             default_view,
-            live_poll_secs,
+            live_poll,
             update_ui,
             logs_ui,
             setup_rect,
