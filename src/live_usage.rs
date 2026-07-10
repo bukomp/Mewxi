@@ -41,9 +41,11 @@ const MIN_TUNABLE_SECS: u64 = 10;
 
 /// Minimum age of a cached response before we'll refetch on demand.
 /// `live_refresh_interval_secs` in `accounts.toml`; defaults to
-/// [`DEFAULT_REFRESH_INTERVAL`]. Read once per process — the statusline
-/// spawns fresh per invocation so edits apply immediately there; the
-/// long-lived TUI picks them up on restart.
+/// [`DEFAULT_REFRESH_INTERVAL`]. Cached per process but invalidated
+/// whenever `accounts.toml`'s mtime changes (see [`tuning`]) — the
+/// statusline spawns fresh per invocation so edits apply immediately
+/// there, and a long-lived process such as `mewxi watch` or the TUI now
+/// picks up an edited value on its next poll, without needing a restart.
 pub fn refresh_interval() -> Duration {
     tuning().0
 }
@@ -60,18 +62,61 @@ fn tunable_duration(configured: Option<u64>, default: Duration) -> Duration {
 }
 
 // Cached tunables, in seconds; 0 = not read yet (MIN_TUNABLE_SECS keeps
-// real values from ever being 0). Plain atomics rather than OnceLock so
-// the Config view can invalidate them after writing a new value —
-// otherwise a running TUI would keep the old cadence until restart.
+// real values from ever being 0). `CONFIG_STAMP` records accounts.toml's
+// mtime (see `config_stamp`) as of the last time these were populated.
+// `tuning()` re-stats the config on every call and re-reads it whenever
+// the live stamp no longer matches, so a long-running process (e.g.
+// `mewxi watch`) picks up a config edit made by *another* process —
+// including the TUI's Config view — on its next poll, without a
+// restart. `reload_tuning()` still exists for same-process immediacy:
+// see its doc for why the stamp check alone isn't quite enough there.
 static TUNED_REFRESH_SECS: AtomicU64 = AtomicU64::new(0);
 static TUNED_BACKOFF_SECS: AtomicU64 = AtomicU64::new(0);
+static CONFIG_STAMP: AtomicU64 = AtomicU64::new(0);
+
+/// Sentinel stamp for "accounts.toml doesn't exist or its mtime couldn't
+/// be read". Kept distinct from any real mtime-derived stamp (which for
+/// a sane system clock is seconds since 1970 — nowhere near `u64::MAX`)
+/// so "no config" is its own stable state rather than aliasing onto an
+/// ordinary timestamp.
+const MISSING_CONFIG_STAMP: u64 = u64::MAX;
+
+/// Map an optional file mtime to a `u64` that's stable for a given mtime
+/// and comparable across calls. Pure (no I/O) so the mapping is
+/// unit-testable without touching the real `~/.config/mewxi/accounts.toml`;
+/// the I/O lives in [`config_stamp`].
+fn stamp_from_mtime(mtime: Option<std::time::SystemTime>) -> u64 {
+    match mtime {
+        Some(t) => t
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        None => MISSING_CONFIG_STAMP,
+    }
+}
+
+/// Current stamp for `accounts.toml`: one `stat` via
+/// [`crate::accounts::config_mtime`], no read+parse. Cheap enough to call
+/// on every [`tuning`] invocation — a missing or unreadable config must
+/// not degrade into a full config read on every call, and one stat is
+/// negligible next to the HTTP calls this whole module exists to pace.
+fn config_stamp() -> u64 {
+    stamp_from_mtime(crate::accounts::config_mtime())
+}
 
 fn tuning() -> (Duration, Duration) {
+    let stamp = config_stamp();
     // Acquire pairs with the Release below: a reader that sees a
-    // non-zero refresh value is guaranteed to see the backoff written
-    // before it.
+    // non-zero refresh value is guaranteed to see both the backoff value
+    // and the config stamp that were written before it (both stored with
+    // Relaxed ordering, ahead of the Release store to
+    // `TUNED_REFRESH_SECS`, in the population branch below).
+    // A populated cache with a stale stamp means accounts.toml's mtime
+    // moved since we cached — someone (the TUI, a hand edit, or another
+    // process entirely) changed the config. Fall through and re-read it,
+    // just like a fresh process or an explicit `reload_tuning()` call.
     let refresh = TUNED_REFRESH_SECS.load(Ordering::Acquire);
-    if refresh != 0 {
+    if refresh != 0 && CONFIG_STAMP.load(Ordering::Relaxed) == stamp {
         return (
             Duration::from_secs(refresh),
             Duration::from_secs(TUNED_BACKOFF_SECS.load(Ordering::Relaxed)),
@@ -81,12 +126,21 @@ fn tuning() -> (Duration, Duration) {
     let refresh = tunable_duration(refresh, DEFAULT_REFRESH_INTERVAL);
     let backoff = tunable_duration(backoff, DEFAULT_BACKOFF_AFTER_429);
     TUNED_BACKOFF_SECS.store(backoff.as_secs(), Ordering::Relaxed);
+    CONFIG_STAMP.store(stamp, Ordering::Relaxed);
     TUNED_REFRESH_SECS.store(refresh.as_secs(), Ordering::Release);
     (refresh, backoff)
 }
 
-/// Drop the cached tunables so the next read re-parses `accounts.toml`.
-/// Called by the TUI's Config view after persisting a new value.
+/// Drop the cached tunables so the next read re-parses `accounts.toml`,
+/// regardless of what [`config_stamp`] reports. Called by the TUI's
+/// Config view right after persisting a new value.
+///
+/// [`tuning`]'s own mtime check already covers *other* processes — a
+/// long-running `mewxi watch` notices the edit on its next poll — but
+/// mtime has only 1-second resolution on most filesystems, so a
+/// same-process write-then-read pair (exactly what the Config view does)
+/// can land inside the same mtime second and be missed by the stamp
+/// check alone. This is the belt to that braces.
 pub fn reload_tuning() {
     TUNED_REFRESH_SECS.store(0, Ordering::Release);
 }
@@ -417,6 +471,12 @@ pub fn save_cached(account: &Account, u: &LiveUsage) {
 //    the check-then-touch race window is microseconds wide, versus the
 //    seconds-wide synchronized herd it suppresses; a leftover marker
 //    from a crashed process ages out after 15s.
+//  * `live-<slug>.skipnote` — touched when a "fetch skipped" line is
+//    logged. While younger than `refresh_interval()`, further skip lines
+//    are suppressed: the TUI poller, the watcher, and every statusline
+//    re-exec all probe the same backoff marker many times a second in
+//    aggregate, and per-probe logging floods the log for the entire
+//    backoff window even though nothing new happened.
 
 /// On-disk shape of `live-<slug>.backoff.json`.
 #[derive(Serialize, Deserialize)]
@@ -447,12 +507,48 @@ fn attempt_path(account: &Account) -> Option<PathBuf> {
     cache_path(account).map(|p| p.with_extension("attempt"))
 }
 
+fn skip_note_path(account: &Account) -> Option<PathBuf> {
+    cache_path(account).map(|p| p.with_extension("skipnote"))
+}
+
+/// True when it's time to log another "fetch skipped" line for this
+/// account — at most one per `refresh_interval()` across all processes.
+/// In-memory throttling can't work here: the statusline is a fresh
+/// process per invocation, so the note lives on disk like the other
+/// markers. Touches the note when it returns true; the check-then-touch
+/// race is as benign as the attempt marker's (worst case one duplicate
+/// line). A future mtime (clock skew) reads as "log it" — the safe
+/// failure mode is a noisy log, never a permanently silent one.
+fn should_log_skip(account: &Account) -> bool {
+    let Some(p) = skip_note_path(account) else { return true };
+    let noted_recently = fs::metadata(&p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|mtime| mtime.elapsed().ok())
+        .map(|age| age < refresh_interval())
+        .unwrap_or(false);
+    if noted_recently {
+        return false;
+    }
+    if let Some(parent) = p.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&p, b"");
+    true
+}
+
 fn write_backoff(account: &Account, kind: &str, reason: &str) {
     let Some(p) = backoff_path(account) else { return };
     write_backoff_marker(&p, kind, reason);
 }
 
 fn clear_backoff(account: &Account) {
+    // A stale skip note must not swallow the first skip line of the *next*
+    // backoff window, so it goes when the marker goes. Silent: unlike the
+    // marker, the note carries no state worth an audit trail.
+    if let Some(np) = skip_note_path(account) {
+        let _ = fs::remove_file(&np);
+    }
     if let Some(p) = backoff_path(account) {
         let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         match fs::remove_file(&p) {
@@ -507,16 +603,11 @@ fn write_backoff_marker(p: &Path, kind: &str, reason: &str) {
 }
 
 fn read_backoff_marker(p: &Path, max_age: Duration) -> Option<Backoff> {
-    // A missing marker is the common, expected steady state (no backoff in
-    // effect) — not logged to avoid noise; only a successful read (an
-    // active or recently-expired marker) is worth recording.
+    // Not logged in either direction: a missing marker is the expected
+    // steady state, and while a backoff is active every poller probes the
+    // marker several times a second in aggregate — the throttled "fetch
+    // skipped" line is the record that a marker was seen.
     let bytes = fs::read(p).ok()?;
-    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    crate::debug_log::log_event(
-        crate::debug_log::LogOrigin::Usage,
-        crate::debug_log::LogKind::FileRead,
-        &format!("read {file_name}"),
-    );
     let marker: BackoffMarker = serde_json::from_slice(&bytes).ok()?;
     let delta = chrono::Duration::from_std(max_age).ok()?;
     let elapsed = Utc::now() - marker.at;
@@ -636,21 +727,25 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
     // absent, precisely when the backoff matters most.
     match recent_backoff(account) {
         // 429 backoff is non-negotiable even with `force` — we don't want
-        // to hammer the endpoint after it told us to back off. This is the
-        // only place a manual `r` refresh during backoff produces any
-        // visible trace: no HTTP call happens, so `fetch_live`'s own
-        // logging never fires (and the original 429 may even have been
-        // observed by a different process, e.g. the watcher).
+        // to hammer the endpoint after it told us to back off. No HTTP
+        // call happens, so `fetch_live`'s own logging never fires (and the
+        // original 429 may even have been observed by a different process,
+        // e.g. the watcher); the skip line below is the only log trace,
+        // throttled because every poller in every process lands here for
+        // the whole backoff window. A manual `r` refresh still gets its
+        // feedback through the returned `FetchOutcome::RateLimited`.
         Some(Backoff::RateLimited { remaining }) => {
-            crate::debug_log::log_event(
-                crate::debug_log::LogOrigin::Usage,
-                crate::debug_log::LogKind::Error,
-                &format!(
-                    "fetch skipped — 429 backoff · {}s left · {}",
-                    remaining.as_secs(),
-                    account.name
-                ),
-            );
+            if should_log_skip(account) {
+                crate::debug_log::log_event(
+                    crate::debug_log::LogOrigin::Usage,
+                    crate::debug_log::LogKind::Error,
+                    &format!(
+                        "fetch skipped — 429 backoff · {}s left · {}",
+                        remaining.as_secs(),
+                        account.name
+                    ),
+                );
+            }
             return FetchOutcome::RateLimited(cached);
         }
         // 401/403 won't be reconsidered by the endpoint until something
@@ -665,15 +760,17 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
             } else {
                 "denied"
             };
-            crate::debug_log::log_event(
-                crate::debug_log::LogOrigin::Usage,
-                crate::debug_log::LogKind::Error,
-                &format!(
-                    "fetch skipped — {code} backoff · {}s left · {}",
-                    remaining.as_secs(),
-                    account.name
-                ),
-            );
+            if should_log_skip(account) {
+                crate::debug_log::log_event(
+                    crate::debug_log::LogOrigin::Usage,
+                    crate::debug_log::LogKind::Error,
+                    &format!(
+                        "fetch skipped — {code} backoff · {}s left · {}",
+                        remaining.as_secs(),
+                        account.name
+                    ),
+                );
+            }
             return FetchOutcome::Failed { reason, cached };
         }
         _ => {}
@@ -842,6 +939,26 @@ mod tests {
             tunable_duration(Some(1), DEFAULT_REFRESH_INTERVAL),
             Duration::from_secs(MIN_TUNABLE_SECS)
         );
+    }
+
+    #[test]
+    fn stamp_from_mtime_distinguishes_missing_and_tracks_changes() {
+        use std::time::{Duration as StdDuration, UNIX_EPOCH};
+
+        // Missing config gets the dedicated sentinel, not an aliasable
+        // real timestamp.
+        assert_eq!(stamp_from_mtime(None), MISSING_CONFIG_STAMP);
+
+        let t1 = UNIX_EPOCH + StdDuration::from_secs(1_700_000_000);
+        let t2 = UNIX_EPOCH + StdDuration::from_secs(1_700_000_001);
+
+        // Same mtime → same stamp (the no-op path `tuning()` relies on
+        // to skip re-reading the config).
+        assert_eq!(stamp_from_mtime(Some(t1)), stamp_from_mtime(Some(t1)));
+        // Different mtime → different stamp (the edit-detection path).
+        assert_ne!(stamp_from_mtime(Some(t1)), stamp_from_mtime(Some(t2)));
+        // Neither collides with the "missing" sentinel.
+        assert_ne!(stamp_from_mtime(Some(t1)), MISSING_CONFIG_STAMP);
     }
 
     #[test]
