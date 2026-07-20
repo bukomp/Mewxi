@@ -974,7 +974,8 @@ fn render_session_table(f: &mut Frame, area: Rect, s: &SessionRef) {
         )
     };
     let sep = || Span::styled("  ·  ", Style::default().fg(Color::DarkGray));
-    let line = Line::from(vec![
+    // msgs · in · out · cache r/w · value (nominal token cost at API rates) · price (est. extra-usage spend, in account currency)
+    let mut line_spans = vec![
         label("msgs "),
         val(fmt_num(t.messages)),
         sep(),
@@ -991,9 +992,20 @@ fn render_session_table(f: &mut Frame, area: Rect, s: &SessionRef) {
             fmt_tokens_compact(t.cache_write_5m + t.cache_write_1h)
         )),
         sep(),
-        label("cost "),
+        label("value "),
         val(format!("${:.4}", t.cost_usd)),
-    ]);
+    ];
+    line_spans.push(sep());
+    line_spans.push(label("price "));
+    let sym = widgets::currency_symbol(s.price_currency.as_deref());
+    if s.price > 0.005 {
+        line_spans.push(val(format!("~{sym}{:.2}", s.price)));
+        line_spans.push(Span::styled(" · extra", Style::default().fg(Color::DarkGray)));
+    } else {
+        line_spans.push(val(format!("{sym}0.00")));
+        line_spans.push(Span::styled(" · plan", Style::default().fg(Color::DarkGray)));
+    }
+    let line = Line::from(line_spans);
     f.render_widget(
         Paragraph::new(line)
             .block(Block::default().borders(Borders::ALL).title("Tokens this session")),
@@ -1025,12 +1037,24 @@ fn render_meta_panel(f: &mut Frame, area: Rect, s: &SessionRef) {
         }
         _ => Span::styled("n/a", Style::default().fg(Color::DarkGray)),
     };
+    // Share of the 5h / weekly usage limit this session has consumed (live plan data; "—" if unavailable).
+    let fmt_share = |p: Option<f64>| match p {
+        Some(v) if v < 9.95 => format!("{v:.1}%"),
+        Some(v) => format!("{v:.0}%"),
+        None => "—".to_string(),
+    };
     let mut spans = vec![
         Span::styled("context ", Style::default().fg(Color::DarkGray)),
         ctx_span,
         Span::raw("    "),
         Span::styled("last active ", Style::default().fg(Color::DarkGray)),
         Span::styled(fmt_age(age), Style::default().fg(Color::Yellow)),
+        Span::raw("    "),
+        Span::styled("limit ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("5h {} · wk {}", fmt_share(s.limit_5h_pct), fmt_share(s.limit_wk_pct)),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("    "),
         Span::styled("folder ", Style::default().fg(Color::DarkGray)),
         Span::styled(

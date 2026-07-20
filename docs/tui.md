@@ -97,3 +97,26 @@ sub-agent's own model and live activity (it often runs a different model
 than the main agent). The rows are display-only: `↑ ↓` still steps
 session-to-session, and a sub-agent disappears once its delegation
 returns. Detection lives in `src/subagents.rs`.
+
+Each row also shows **price**, prefixed with the account's currency
+symbol (`€`, `$`, `£`, …): `0.00` (dimmed) unless some of the row's
+tokens were produced while the account was actually consuming
+pay-per-use extra usage, in which case it shows an estimated
+`~<sym>X.XX` (green). Attribution is causal, not a proportional smear:
+mewxi records every observed increase in the account's extra-usage
+spend (seen through its roughly 60-second usage polls) into a small
+on-disk ledger, and splits each increment across the sessions that
+were active during that interval. A session that ran entirely within
+plan limits always reads `0.00`. The honest caveat: extra spend that
+existed before mewxi started watching stays unattributed. The price is
+in the account's extra-usage currency (e.g. EUR), not necessarily USD.
+On wide terminals (width ≥ 98) two more columns appear, **5h%** and
+**wk%**, showing that session's estimated share of the account's
+5-hour and weekly limits — calibrated by scaling the session's local
+cost proportion against the live utilization the OAuth `/usage`
+endpoint reports for the account. (This is why 5h%/wk% now appear
+before the in/out token columns at width ≥ 112 and the cache column at
+width ≥ 121 — limit share outranks token-flow detail on narrow
+screens.) The Session view (`2`) shows this same price, in the
+account's currency, next to the token-value-at-API-rates figure,
+relabelled "value".

@@ -813,6 +813,13 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
             save_cached(account, &fresh);
             clear_backoff(account);
             clear_error_entry(&account.name);
+            // Record any increase in pay-per-use "extra usage" credits
+            // into the on-disk delta ledger, tagged with this poll's
+            // observation interval, so pricing can causally attribute the
+            // spend to the sessions active during it. `cached` is the
+            // pre-fetch value (the previous successful poll). Best-effort:
+            // never blocks or fails the fetch path.
+            crate::limit_attr::record_extra_delta(account, cached.as_ref(), &fresh);
             FetchOutcome::Fetched(fresh)
         }
         Err(FetchError::RateLimited) => {

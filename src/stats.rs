@@ -117,6 +117,11 @@ pub struct Aggregate {
     /// Chronologically ordered records in the current 5h block (oldest first).
     /// Used to compute overage cost against a configurable cap.
     pub five_h_records: Vec<UsageRecord>,
+    /// Nominal API-rate cost of all records in the trailing 7 days
+    /// (now - 7d, rolling — approximates the API's weekly window).
+    pub trailing_7d_cost_usd: f64,
+    /// Per-session slice of `trailing_7d_cost_usd`, keyed by session_id.
+    pub trailing_7d_cost_by_session: HashMap<String, f64>,
 }
 
 fn floor_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
@@ -484,6 +489,7 @@ pub fn aggregate(records: &[UsageRecord]) -> Aggregate {
     let mut by_model: HashMap<String, UsageTotals> = HashMap::new();
     let mut by_project: HashMap<String, UsageTotals> = HashMap::new();
     let mut by_day: HashMap<NaiveDate, UsageTotals> = HashMap::new();
+    let trailing_7d_cutoff = Utc::now() - chrono::Duration::days(7);
 
     for r in records {
         agg.all.add(r);
@@ -500,6 +506,10 @@ pub fn aggregate(records: &[UsageRecord]) -> Aggregate {
         }
         if local_date.year() == year && local_date.month() == month {
             agg.this_month.add(r);
+        }
+        if r.timestamp >= trailing_7d_cutoff {
+            agg.trailing_7d_cost_usd += r.cost_usd;
+            *agg.trailing_7d_cost_by_session.entry(r.session_id.clone()).or_insert(0.0) += r.cost_usd;
         }
         by_model.entry(r.model.clone()).or_default().add(r);
         by_project.entry(r.project.clone()).or_default().add(r);
@@ -565,11 +575,19 @@ pub fn aggregate(records: &[UsageRecord]) -> Aggregate {
     agg
 }
 
-pub fn load_and_aggregate_for(account: &Account) -> Result<Aggregate> {
+/// One-shot scan + aggregate, also returning the raw deduped
+/// chronological records for callers that need per-record attribution
+/// (see `limit_attr::session_prices`).
+pub fn load_records_and_aggregate_for(account: &Account) -> Result<(Vec<UsageRecord>, Aggregate)> {
     let root = account.projects_dir();
     let cache = cache_path_for(account);
     let records = scan_all(&root, cache.as_deref())?;
-    Ok(aggregate(&records))
+    let agg = aggregate(&records);
+    Ok((records, agg))
+}
+
+pub fn load_and_aggregate_for(account: &Account) -> Result<Aggregate> {
+    Ok(load_records_and_aggregate_for(account)?.1)
 }
 
 pub struct SessionContext {
@@ -809,6 +827,11 @@ pub fn fmt_num(n: u64) -> String {
 mod native_1m_tests {
     use super::native_1m_context;
 
+    // These read the live LiteLLM table (same network dependency as
+    // pricing::tests::end_to_end_fetch_and_lookup), so the exact set of
+    // "native 1M" versions is whatever LiteLLM currently reports — that's
+    // the point: nothing here is a version threshold we maintain by hand.
+
     #[test]
     fn versions_litellm_reports_over_200k_are_native_1m() {
         assert!(native_1m_context("claude-fable-5"));
@@ -823,9 +846,58 @@ mod native_1m_tests {
         assert!(!native_1m_context("claude-sonnet-4-5"));
         assert!(!native_1m_context("claude-haiku-4-5-20251001"));
     }
-}
-    // These read the live LiteLLM table (same network dependency as
-    // pricing::tests::end_to_end_fetch_and_lookup), so the exact set of
-    // "native 1M" versions is whatever LiteLLM currently reports — that's
-    // the point: nothing here is a version threshold we maintain by hand.
 
+    #[test]
+    fn version_not_yet_in_the_table_defaults_to_not_native() {
+        assert!(!native_1m_context("claude-opus-99-9"));
+    }
+}
+
+#[cfg(test)]
+mod trailing_tests {
+    use super::*;
+
+    fn record(session_id: &str, message_id: &str, cost_usd: f64, timestamp: DateTime<Utc>) -> UsageRecord {
+        UsageRecord {
+            timestamp,
+            session_id: session_id.to_string(),
+            project: "proj".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
+            input: 100,
+            output: 50,
+            cache_read: 0,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cost_usd,
+            message_id: message_id.to_string(),
+            is_sidechain: false,
+        }
+    }
+
+    #[test]
+    fn trailing_7d_cost_by_session() {
+        let now = Utc::now();
+        let one_day_ago = now - chrono::Duration::days(1);
+        let ten_days_ago = now - chrono::Duration::days(10);
+
+        let records = vec![
+            record("session-a", "m1", 1.5, now),
+            record("session-a", "m2", 2.5, one_day_ago),
+            record("session-b", "m3", 4.0, one_day_ago),
+            // Outside the trailing 7d window, but may or may not fall in the
+            // current calendar month depending on when the test runs.
+            record("session-b", "m4", 9.0, ten_days_ago),
+        ];
+
+        let agg = aggregate(&records);
+
+        // trailing_7d_cost_usd sums only records within the last 7 days,
+        // excluding the 10-days-ago record.
+        assert!((agg.trailing_7d_cost_usd - (1.5 + 2.5 + 4.0)).abs() < 1e-9);
+
+        // Per-session split of the trailing window.
+        assert!((agg.trailing_7d_cost_by_session["session-a"] - 4.0).abs() < 1e-9);
+        assert!((agg.trailing_7d_cost_by_session["session-b"] - 4.0).abs() < 1e-9);
+        assert!(!agg.trailing_7d_cost_by_session.contains_key("nonexistent-session"));
+    }
+}

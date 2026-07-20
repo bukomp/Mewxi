@@ -77,6 +77,10 @@ pub struct PerAccount {
     pub agg: Aggregate,
     pub live: Option<LiveUsage>,
     pub live_sessions: Vec<LiveSession>,
+    /// Estimated real price per session id, in the account's extra-usage
+    /// currency — built by `limit_attr::session_prices` from the on-disk
+    /// extra-usage delta ledger. Sessions absent from the map paid nothing.
+    pub price_by_session: HashMap<String, f64>,
 }
 
 /// Flat session reference used by view 1's table and view 2's drill-down.
@@ -96,7 +100,6 @@ pub struct SessionRef {
     /// claude has internally diverged from the user's pick.
     pub active_model: String,
     pub tokens: u64,
-    pub cost_usd: f64,
     pub totals: UsageTotals,
     pub current_context: Option<u64>,
     pub context_cap: Option<u64>,
@@ -128,6 +131,21 @@ pub struct SessionRef {
     /// parent's (sort key only — a sub-agent has no process of its own,
     /// which is why the kill path refuses them).
     pub subagent: Option<SubAgentTag>,
+    /// Estimated share of the account's 5h limit consumed by this
+    /// session's current-block activity, percent (includes records its
+    /// sub-agents wrote under the same session id). None when live limit
+    /// data is unavailable; always None on sub-agent and killing rows.
+    pub limit_5h_pct: Option<f64>,
+    /// Same estimate for the weekly (7-day) limit over the trailing window.
+    pub limit_wk_pct: Option<f64>,
+    /// Estimated amount the user actually paid for this row's tokens, in
+    /// `price_currency` units: 0.0 unless some of its tokens were produced
+    /// while the account was consuming pay-per-use extra-usage credits
+    /// (attributed causally via the extra-usage delta ledger).
+    pub price: f64,
+    /// Currency code for `price`, from the live extra-usage data (e.g.
+    /// "EUR"). None renders as "$".
+    pub price_currency: Option<String>,
 }
 
 /// Identity + label data for a sub-agent row. See [`SessionRef::subagent`].
@@ -1172,11 +1190,19 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut per_account: Vec<PerAccount> = view
         .accounts
         .iter()
-        .map(|a| PerAccount {
-            account: a.clone(),
-            agg: stats::load_and_aggregate_for(a).unwrap_or_default(),
-            live: live_usage::load_cached(a),
-            live_sessions: live_session::scan(a, &alive, &[]),
+        .map(|a| {
+            let (records, agg) =
+                stats::load_records_and_aggregate_for(a).unwrap_or_default();
+            PerAccount {
+                account: a.clone(),
+                agg,
+                live: live_usage::load_cached(a),
+                live_sessions: live_session::scan(a, &alive, &[]),
+                price_by_session: crate::limit_attr::session_prices(
+                    &records,
+                    &crate::limit_attr::load_ledger(a),
+                ),
+            }
         })
         .collect();
 
@@ -2172,7 +2198,13 @@ fn run_loop<B: ratatui::backend::Backend>(
                     continue;
                 }
                 if let Some(pa) = per_account.iter_mut().find(|p| p.account.name == name) {
-                    pa.agg = stats::load_and_aggregate_for(&pa.account).unwrap_or_default();
+                    let (records, agg) =
+                        stats::load_records_and_aggregate_for(&pa.account).unwrap_or_default();
+                    pa.agg = agg;
+                    pa.price_by_session = crate::limit_attr::session_prices(
+                        &records,
+                        &crate::limit_attr::load_ledger(&pa.account),
+                    );
                     pa.live_sessions = live_session::scan(&pa.account, &alive, &pa.live_sessions);
                     last_reload.insert(name.clone(), Instant::now());
                 }
@@ -4816,7 +4848,6 @@ fn killing_placeholder(key: &(String, String), entry: &KillingEntry) -> SessionR
         model: String::new(),
         active_model: String::new(),
         tokens: 0,
-        cost_usd: 0.0,
         totals: UsageTotals::default(),
         current_context: None,
         context_cap: None,
@@ -4826,6 +4857,10 @@ fn killing_placeholder(key: &(String, String), entry: &KillingEntry) -> SessionR
         effort: None,
         killing: true,
         subagent: None,
+        limit_5h_pct: None,
+        limit_wk_pct: None,
+        price: 0.0,
+        price_currency: None,
     }
 }
 
@@ -4841,6 +4876,13 @@ fn flatten_sessions(
     let mut out: Vec<SessionRef> = accounts
         .iter()
         .flat_map(|pa| {
+            // Currency for this account's per-session prices, from the live
+            // extra-usage data — None renders as "$" downstream.
+            let price_currency = pa
+                .live
+                .as_ref()
+                .and_then(|l| l.extra_usage.as_ref())
+                .and_then(|e| e.currency.clone());
             pa.live_sessions.iter().flat_map(move |ls| {
                 let key = (ls.account_name.clone(), ls.session_id.clone());
                 let opt = optimistic.get(&key);
@@ -4895,6 +4937,11 @@ fn flatten_sessions(
                 // for the child rows — suppressed per-child when the
                 // agent's own model has no effort support (Haiku).
                 let parent_effort = effort.clone();
+                let share = crate::limit_attr::session_limit_share(
+                    &pa.agg,
+                    pa.live.as_ref(),
+                    &ls.session_id,
+                );
                 let parent = SessionRef {
                     account_name: ls.account_name.clone(),
                     session_id: ls.session_id.clone(),
@@ -4907,7 +4954,6 @@ fn flatten_sessions(
                     model,
                     active_model: ls.active_model.clone(),
                     tokens: ls.session_tokens.total_tokens(),
-                    cost_usd: ls.session_tokens.cost_usd,
                     totals: ls.session_tokens.clone(),
                     current_context: ls.current_context,
                     context_cap: ls.context_cap,
@@ -4917,6 +4963,14 @@ fn flatten_sessions(
                     effort,
                     killing: false,
                     subagent: None,
+                    limit_5h_pct: share.five_h_pct,
+                    limit_wk_pct: share.weekly_pct,
+                    price: pa
+                        .price_by_session
+                        .get(&ls.session_id)
+                        .copied()
+                        .unwrap_or(0.0),
+                    price_currency: price_currency.clone(),
                 };
                 // Sub-agents follow their parent as first-class rows so
                 // they're selectable and inspectable like sessions. They
@@ -4936,9 +4990,6 @@ fn flatten_sessions(
                     model: sub.model.clone(),
                     active_model: sub.model.clone(),
                     tokens: sub.tokens,
-                    // Cost is rolled into the account aggregate via the
-                    // parent's project; view 1 dashes it out on these rows.
-                    cost_usd: sub.totals.cost_usd,
                     totals: sub.totals.clone(),
                     current_context: sub.current_context,
                     context_cap: sub.context_cap,
@@ -4963,6 +5014,14 @@ fn flatten_sessions(
                         status_label: sub.status_label.clone(),
                         depth: sub.depth,
                     }),
+                    limit_5h_pct: None,
+                    limit_wk_pct: None,
+                    price: pa
+                        .price_by_session
+                        .get(&sub.agent_id)
+                        .copied()
+                        .unwrap_or(0.0),
+                    price_currency: price_currency.clone(),
                 }));
                 rows
             })
@@ -5043,7 +5102,6 @@ mod tests {
             model: String::new(),
             active_model: String::new(),
             tokens: 0,
-            cost_usd: 0.0,
             totals: crate::stats::UsageTotals::default(),
             current_context: None,
             context_cap: None,
@@ -5062,6 +5120,10 @@ mod tests {
                 status_label: None,
                 depth: 1,
             }),
+            limit_5h_pct: None,
+            limit_wk_pct: None,
+            price: 0.0,
+            price_currency: None,
         }
     }
 

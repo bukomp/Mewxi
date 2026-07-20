@@ -22,6 +22,7 @@ mod agent_status;
 mod auth;
 mod chat_log;
 mod debug_log;
+mod limit_attr;
 mod live_session;
 mod live_usage;
 mod mcp;

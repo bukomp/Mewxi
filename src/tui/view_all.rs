@@ -225,7 +225,7 @@ fn render_one_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
         .map(|e| {
             let used = e.used_credits.unwrap_or(0.0) / 100.0;
             let limit = e.monthly_limit.unwrap_or(0.0) / 100.0;
-            let sym = currency_symbol(e.currency.as_deref());
+            let sym = super::widgets::currency_symbol(e.currency.as_deref());
             format!("{sym}{used:.2} / {sym}{limit:.2}")
         })
         .unwrap_or_default();
@@ -386,16 +386,6 @@ fn render_gauge_row(
     }
 }
 
-fn currency_symbol(code: Option<&str>) -> &'static str {
-    match code.map(|s| s.to_ascii_uppercase()).as_deref() {
-        Some("USD") => "$",
-        Some("EUR") => "€",
-        Some("GBP") => "£",
-        Some("JPY") => "¥",
-        _ => "$",
-    }
-}
-
 fn render_sessions_table(
     f: &mut Frame,
     area: Rect,
@@ -435,12 +425,18 @@ fn render_sessions_table(
     // Base columns need ~61 chars (6 columns + 5 spacers + 2 borders, with
     // the model column at 21); each extra column adds (length + 1 spacer).
     // Thresholds include a small buffer so columns don't appear right at
-    // the edge of fitting and crop the rightmost `state` column.
+    // the edge of fitting and crop the rightmost `state` column. On
+    // narrower screens, limit share outranks token-flow detail, so
+    // `show_limits` now gates in at width ≥ 98, ahead of `show_io`
+    // (≥ 112) and `show_cache` (≥ 121). The 5h%/wk% rate-limit columns
+    // still render positionally right after `price`, regardless of when
+    // they gate in.
     let w = area.width;
     let show_ctx = w >= 72;
     let show_status = w >= 84;
-    let show_io = w >= 98;
-    let show_cache = w >= 107;
+    let show_limits = w >= 98;
+    let show_io = w >= 112;
+    let show_cache = w >= 121;
 
     // `sessions` is already grouped by project (alphabetical), with
     // pid ascending within each group — sort lives in flatten_sessions
@@ -449,12 +445,13 @@ fn render_sessions_table(
 
     let now = Utc::now();
     // Compute column count up front so header rows pad correctly.
-    // Base: account, age, tokens, cost, model, state = 6.
+    // Base: account, age, tokens, price, model, state = 6.
     let mut col_count = 6;
     if show_status { col_count += 1; }
     if show_ctx { col_count += 1; }
     if show_io { col_count += 1; }
     if show_cache { col_count += 1; }
+    if show_limits { col_count += 2; }
 
     // Pad project names to the widest one so the "x/y active" count
     // lines up vertically across all group headers regardless of name
@@ -540,7 +537,7 @@ fn render_sessions_table(
             if s.subagent.is_some() {
                 session_rows.push(rows.len());
                 rows.push(subagent_row(
-                    s, now, is_selected, show_status, show_ctx, show_io, show_cache,
+                    s, now, is_selected, show_status, show_ctx, show_io, show_cache, show_limits,
                 ));
                 continue;
             }
@@ -565,7 +562,11 @@ fn render_sessions_table(
                 cells.push(dash()); // tokens
                 if show_io { cells.push(dash()); }
                 if show_cache { cells.push(dash()); }
-                cells.push(dash()); // cost
+                cells.push(dash()); // price
+                if show_limits {
+                    cells.push(dash()); // 5h%
+                    cells.push(dash()); // wk%
+                }
                 cells.push(dash()); // model
                 cells.push(dash()); // state
                 let style = if is_selected {
@@ -614,7 +615,39 @@ fn render_sessions_table(
             if show_cache {
                 cells.push(Cell::from(fmt_tokens_compact(s.totals.cache_read)));
             }
-            cells.push(Cell::from(format!("${:.2}", s.cost_usd)));
+            let sym = super::widgets::currency_symbol(s.price_currency.as_deref());
+            if s.price > 0.005 {
+                let text = format!("~{sym}{:.2}", s.price);
+                cells.push(if is_selected {
+                    Cell::from(text)
+                } else {
+                    Cell::from(Span::styled(text, Style::default().fg(Color::Green)))
+                });
+            } else {
+                let text = format!("{sym}0.00");
+                cells.push(if is_selected {
+                    Cell::from(text)
+                } else {
+                    Cell::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
+                });
+            }
+            if show_limits {
+                let limit_cell = |v: Option<f64>| -> Cell<'static> {
+                    match v {
+                        None => Cell::from(Span::styled("—", Style::default().fg(Color::DarkGray))),
+                        Some(v) => {
+                            let text = if v >= 9.95 { format!("{v:.0}%") } else { format!("{v:.1}%") };
+                            if v < 0.05 {
+                                Cell::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
+                            } else {
+                                Cell::from(text)
+                            }
+                        }
+                    }
+                };
+                cells.push(limit_cell(s.limit_5h_pct));
+                cells.push(limit_cell(s.limit_wk_pct));
+            }
             // Model + thinking budget, e.g. `opus:xhigh` / `sonnet-4-6[1M]:medium`.
             // The effort suffix is omitted when the model has no effort
             // support (Haiku) or nothing is configured, and coloured on the
@@ -668,8 +701,14 @@ fn render_sessions_table(
         header_labels.push("cache");
         constraints.push(Constraint::Length(7));
     }
-    header_labels.push("cost");
+    header_labels.push("price");
     constraints.push(Constraint::Length(9));
+    if show_limits {
+        header_labels.push("5h%");
+        constraints.push(Constraint::Length(6));
+        header_labels.push("wk%");
+        constraints.push(Constraint::Length(6));
+    }
     header_labels.push("model");
     // Worst case is `sonnet-4-6[1M]:medium` (21 chars); size to fit so the
     // thinking-budget suffix never gets clipped.
@@ -796,6 +835,7 @@ fn subagent_row(
     show_ctx: bool,
     show_io: bool,
     show_cache: bool,
+    show_limits: bool,
 ) -> Row<'static> {
     let (dim, text) = if is_selected {
         let sel = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
@@ -910,10 +950,20 @@ fn subagent_row(
             text,
         )));
     }
-    // Cost of the sub-agent's own transcript. Doesn't overlap the parent
-    // session row's figure (zero sidechain records land in the parent),
-    // so showing both never double-counts within the table.
-    cells.push(Cell::from(Span::styled(format!("${:.2}", s.cost_usd), text)));
+    // Price of the sub-agent's own transcript ($0.00 while the account
+    // is within plan limits). Doesn't overlap the parent session row's
+    // figure (zero sidechain records land in the parent), so showing
+    // both never double-counts within the table.
+    let sym = super::widgets::currency_symbol(s.price_currency.as_deref());
+    if s.price > 0.005 {
+        cells.push(Cell::from(Span::styled(format!("~{sym}{:.2}", s.price), text)));
+    } else {
+        cells.push(Cell::from(Span::styled(format!("{sym}0.00"), dim)));
+    }
+    if show_limits {
+        cells.push(Cell::from(Span::styled("—", dim)));
+        cells.push(Cell::from(Span::styled("—", dim)));
+    }
     // Model + thinking budget (`haiku-4.5` / `sonnet-4.6:high`), same shape
     // as a session row. The effort is the parent's level the agent inherits;
     // absent when the agent's model has no effort support.
