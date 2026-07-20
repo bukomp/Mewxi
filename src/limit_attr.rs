@@ -64,7 +64,9 @@ pub fn session_limit_share(agg: &Aggregate, live: Option<&LiveUsage>, session_id
             .sum();
         let acct = agg.rolling_5h.cost_usd;
         if acct > 1e-6 {
-            Some(u * sess / acct)
+            // An empty f64 sum is -0.0 (std's float additive identity),
+            // which would render as "-0.0%"; clamp keeps the share ≥ +0.0.
+            Some((u * sess / acct).max(0.0))
         } else {
             None
         }
@@ -79,7 +81,7 @@ pub fn session_limit_share(agg: &Aggregate, live: Option<&LiveUsage>, session_id
             .unwrap_or(0.0);
         let acct = agg.trailing_7d_cost_usd;
         if acct > 1e-6 {
-            Some(u * sess / acct)
+            Some((u * sess / acct).max(0.0))
         } else {
             None
         }
@@ -387,7 +389,11 @@ mod tests {
 
         let l = live(Some(WindowUsage { utilization: 50.0, resets_at: None }), None, None);
         let share = session_limit_share(&agg, Some(&l), "sess-a");
-        approx(share.five_h_pct.expect("expected Some"), 0.0);
+        let pct = share.five_h_pct.expect("expected Some");
+        approx(pct, 0.0);
+        // Regression: an empty record sum is -0.0 in Rust, which used to
+        // leak through and render as "-0.0%" in the sessions table.
+        assert!(!pct.is_sign_negative(), "share must not be negative zero");
     }
 
     #[test]
