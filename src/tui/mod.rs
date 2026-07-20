@@ -1268,6 +1268,11 @@ fn run_loop<B: ratatui::backend::Backend>(
     // and is being held visible until the user clicks again.
     let mut chat_selection: Option<view_session::ChatSelection> = None;
     let mut chat_selection_dragging: bool = false;
+    // Active mouse-drag text selection over the Detail pane, mirroring
+    // the chat-log selection above. Same `ChatSelection` type (anchor/
+    // cursor screen cells); cleared whenever the Detail content shifts.
+    let mut detail_selection: Option<view_session::ChatSelection> = None;
+    let mut detail_selection_dragging: bool = false;
     // Last known mouse position (terminal cells), updated on any mouse
     // event including hover (motion with no button). The chat view uses
     // it to highlight the code block under the cursor.
@@ -1605,6 +1610,12 @@ fn run_loop<B: ratatui::backend::Backend>(
         // text without re-loading the transcript.
         let mut chat_inner: Option<Rect> = None;
         let mut chat_visible: Vec<String> = Vec::new();
+        // Inner rect and per-row plaintext of the Detail pane, written by
+        // the renderer so the Detail drag-selection handler can map screen
+        // cells to text. `detail_inner` stays None when the pane doesn't
+        // render (narrow layout / no rows).
+        let mut detail_inner: Option<Rect> = None;
+        let mut detail_visible: Vec<String> = Vec::new();
         // Code blocks visible in the chat-log this frame, in screen-row
         // coordinates, so a click can map to the block under it and copy
         // its untruncated source. Repopulated every frame by the renderer.
@@ -1803,6 +1814,8 @@ fn run_loop<B: ratatui::backend::Backend>(
             // points at unrelated text. Drop it.
             chat_selection = None;
             chat_selection_dragging = false;
+            detail_selection = None;
+            detail_selection_dragging = false;
             last_pinned_session = pinned_session.clone();
         }
         // Selection only exists in view 2; if the user navigated away,
@@ -1810,6 +1823,10 @@ fn run_loop<B: ratatui::backend::Backend>(
         if mode != ViewMode::SessionDetail && chat_selection.is_some() {
             chat_selection = None;
             chat_selection_dragging = false;
+        }
+        if mode != ViewMode::SessionDetail && detail_selection.is_some() {
+            detail_selection = None;
+            detail_selection_dragging = false;
         }
 
         // Terminal-overlay detection. Sweep every driven session's vt100
@@ -2015,6 +2032,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                 &mut chat_visible,
                 &mut chat_code_blocks,
                 &mut detail_copy_blocks,
+                detail_selection,
+                &mut detail_inner,
+                &mut detail_visible,
                 mouse_pos,
                 visible_selection,
                 selected_account,
@@ -2291,6 +2311,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                     // is about to change.
                     chat_selection = None;
                     chat_selection_dragging = false;
+                    detail_selection = None;
+                    detail_selection_dragging = false;
                     handle_scroll(
                         dir,
                         m.column,
@@ -2415,33 +2437,113 @@ fn run_loop<B: ratatui::backend::Backend>(
                         }
                     }
 
-                    // Click-to-copy a single Bash command part in the
-                    // Detail pane. Each rendered segment is a clickable
-                    // region (projected to screen rows by the renderer);
-                    // clicking one drops just that part's runnable text on
-                    // the clipboard. Gated on `detail_rect` so a same-row
-                    // click in the chat pane to the left can't match it.
-                    if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-                        if hit(detail_rect, m.column, m.row) {
-                            if let Some(region) = detail_copy_blocks
-                                .iter()
-                                .find(|b| m.row >= b.top && m.row <= b.bottom)
-                            {
-                                let src = region.source.clone();
-                                let chars = src.chars().count();
-                                match arboard::Clipboard::new()
-                                    .and_then(|mut c| c.set_text(src))
-                                {
-                                    Ok(()) => {
-                                        toasts.success(format!(
-                                            "copied command part ({chars} chars)"
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        toasts.error(format!("clipboard error: {e}"));
+                    // Drag-select text in the Detail pane, mirroring the
+                    // chat-pane machinery above but clamped to the Detail
+                    // inner rect. A plain click (zero-extent selection)
+                    // falls back to copying the command part under it.
+                    if let Some(inner) = detail_inner {
+                        let in_detail = m.column >= inner.x
+                            && m.column < inner.x + inner.width
+                            && m.row >= inner.y
+                            && m.row < inner.y + inner.height;
+                        let clamp = |col: u16, row: u16| -> (u16, u16) {
+                            let c = col
+                                .clamp(inner.x, inner.x + inner.width.saturating_sub(1));
+                            let r = row
+                                .clamp(inner.y, inner.y + inner.height.saturating_sub(1));
+                            (c, r)
+                        };
+                        match m.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if in_detail {
+                                    // Starting a Detail selection drops any
+                                    // chat highlight (only one pane owns the
+                                    // active selection at a time).
+                                    chat_selection = None;
+                                    chat_selection_dragging = false;
+                                    let p = clamp(m.column, m.row);
+                                    detail_selection = Some(
+                                        view_session::ChatSelection {
+                                            anchor: p,
+                                            cursor: p,
+                                        },
+                                    );
+                                    detail_selection_dragging = true;
+                                } else {
+                                    detail_selection = None;
+                                    detail_selection_dragging = false;
+                                }
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                if detail_selection_dragging {
+                                    if let Some(sel) = detail_selection.as_mut() {
+                                        sel.cursor = clamp(m.column, m.row);
                                     }
                                 }
                             }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                if detail_selection_dragging {
+                                    detail_selection_dragging = false;
+                                    if let Some(sel) = detail_selection {
+                                        if sel.anchor != sel.cursor {
+                                            // Real drag → copy highlighted text.
+                                            let text = extract_chat_selection_text(
+                                                &detail_visible,
+                                                inner,
+                                                sel,
+                                            );
+                                            if !text.is_empty() {
+                                                match arboard::Clipboard::new()
+                                                    .and_then(|mut c| c.set_text(text.clone()))
+                                                {
+                                                    Ok(()) => {
+                                                        toasts.success(format!(
+                                                            "copied {} chars",
+                                                            text.chars().count()
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        toasts.error(format!(
+                                                            "clipboard error: {e}"
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // Zero-extent = plain click → copy
+                                            // the command part under the cursor.
+                                            if let Some(region) = detail_copy_blocks
+                                                .iter()
+                                                .find(|b| {
+                                                    sel.cursor.1 >= b.top
+                                                        && sel.cursor.1 <= b.bottom
+                                                })
+                                            {
+                                                let src = region.source.clone();
+                                                let chars = src.chars().count();
+                                                match arboard::Clipboard::new()
+                                                    .and_then(|mut c| c.set_text(src))
+                                                {
+                                                    Ok(()) => {
+                                                        toasts.success(format!(
+                                                            "copied command part ({chars} chars)"
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        toasts.error(format!(
+                                                            "clipboard error: {e}"
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            // A zero-extent selection must not
+                                            // linger as a stray highlight.
+                                            detail_selection = None;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -4076,12 +4178,16 @@ fn run_loop<B: ratatui::backend::Backend>(
                             detail_scroll = 0;
                             chat_selection = None;
                             chat_selection_dragging = false;
+                            detail_selection = None;
+                            detail_selection_dragging = false;
                         }
                         KeyCode::Char('k') if mode == ViewMode::SessionDetail => {
                             let tail = last_change_count.saturating_sub(1);
                             let cur = changes_selection.unwrap_or(tail);
                             changes_selection = Some(cur.saturating_sub(1));
                             detail_scroll = 0;
+                            detail_selection = None;
+                            detail_selection_dragging = false;
                         }
                         KeyCode::Char('j') if mode == ViewMode::SessionDetail => {
                             let tail = last_change_count.saturating_sub(1);
@@ -4089,20 +4195,30 @@ fn run_loop<B: ratatui::backend::Backend>(
                             let next = (cur + 1).min(tail);
                             changes_selection = Some(next);
                             detail_scroll = 0;
+                            detail_selection = None;
+                            detail_selection_dragging = false;
                         }
                         KeyCode::Char('g') if mode == ViewMode::SessionDetail => {
                             changes_selection = Some(0);
                             detail_scroll = 0;
+                            detail_selection = None;
+                            detail_selection_dragging = false;
                         }
                         KeyCode::Char('G') if mode == ViewMode::SessionDetail => {
                             changes_selection = None;
                             detail_scroll = 0;
+                            detail_selection = None;
+                            detail_selection_dragging = false;
                         }
                         KeyCode::Char('J') if mode == ViewMode::SessionDetail => {
                             detail_scroll = detail_scroll.saturating_add(1);
+                            detail_selection = None;
+                            detail_selection_dragging = false;
                         }
                         KeyCode::Char('K') if mode == ViewMode::SessionDetail => {
                             detail_scroll = detail_scroll.saturating_sub(1);
+                            detail_selection = None;
+                            detail_selection_dragging = false;
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') => {
                             // Open the picker. The actual spawn happens
@@ -4472,6 +4588,9 @@ fn render(
     chat_visible: &mut Vec<String>,
     chat_code_blocks: &mut Vec<view_session::CodeBlockRegion>,
     detail_copy_blocks: &mut Vec<view_session::DetailCopyRegion>,
+    detail_selection: Option<view_session::ChatSelection>,
+    detail_inner: &mut Option<Rect>,
+    detail_visible: &mut Vec<String>,
     mouse_pos: Option<(u16, u16)>,
     visible_session_selection: Option<usize>,
     selected_account: usize,
@@ -4553,6 +4672,9 @@ fn render(
             chat_visible,
             chat_code_blocks,
             detail_copy_blocks,
+            detail_selection,
+            detail_inner,
+            detail_visible,
             mouse_pos,
             driver,
             pending,

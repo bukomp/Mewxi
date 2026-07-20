@@ -39,6 +39,11 @@ Press `n` anywhere to begin.
 The full flow, keybinds, and caveats live in
 [Agent sessions](sessions.md).
 
+## Session view (2)
+
+Drag across text in the Detail pane to select and copy it on release,
+same as the chat-log pane; click a command part to copy just that part.
+
 ## Config view (4)
 
 One navigable list, grouped into sections. `↑/↓` selects a row, `Enter`

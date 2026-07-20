@@ -134,6 +134,9 @@ pub fn render(
     chat_visible_out: &mut Vec<String>,
     chat_code_blocks_out: &mut Vec<CodeBlockRegion>,
     detail_copy_out: &mut Vec<DetailCopyRegion>,
+    detail_selection: Option<ChatSelection>,
+    detail_inner_out: &mut Option<Rect>,
+    detail_visible_out: &mut Vec<String>,
     mouse_pos: Option<(u16, u16)>,
     driver: Option<&mut DriverPane<'_>>,
     pending: Option<&PendingPane>,
@@ -265,6 +268,9 @@ pub fn render(
         chat_visible_out,
         chat_code_blocks_out,
         detail_copy_out,
+        detail_selection,
+        detail_inner_out,
+        detail_visible_out,
         mouse_pos,
     );
     let default_hint =
@@ -1234,6 +1240,9 @@ fn render_chat_log(
     chat_visible_out: &mut Vec<String>,
     chat_code_blocks_out: &mut Vec<CodeBlockRegion>,
     detail_copy_out: &mut Vec<DetailCopyRegion>,
+    detail_selection: Option<ChatSelection>,
+    detail_inner_out: &mut Option<Rect>,
+    detail_visible_out: &mut Vec<String>,
     mouse_pos: Option<(u16, u16)>,
 ) {
     let entries = chat_log::read(&s.transcript_path);
@@ -1411,9 +1420,10 @@ fn render_chat_log(
     chat_visible_out.clear();
     chat_code_blocks_out.clear();
     // Cleared here (not in render_changes_detail) so the narrow layout —
-    // which never renders the Detail pane — leaves no stale regions for
-    // the click handler to match against.
+    // which never renders the Detail pane — leaves no stale regions or
+    // rows for the click/selection handler to match against.
     detail_copy_out.clear();
+    detail_visible_out.clear();
     if entries.is_empty() {
         let hint = Paragraph::new(Line::from(Span::styled(
             "no chat content yet — waiting for transcript",
@@ -1528,6 +1538,9 @@ fn render_chat_log(
             detail_scroll,
             &s.cwd,
             detail_copy_out,
+            detail_selection,
+            detail_inner_out,
+            detail_visible_out,
             mouse_pos,
         );
         render_tasks_panel(f, outer_rows[1], &tasks);
@@ -1732,6 +1745,9 @@ fn render_changes_detail(
     detail_scroll: &mut usize,
     cwd: &Path,
     detail_copy_out: &mut Vec<DetailCopyRegion>,
+    detail_selection: Option<ChatSelection>,
+    detail_inner_out: &mut Option<Rect>,
+    detail_visible_out: &mut Vec<String>,
     mouse_pos: Option<(u16, u16)>,
 ) {
     let Some(row) = rows.get(selection) else {
@@ -1812,8 +1828,11 @@ fn render_changes_detail(
         format!("Detail · {}{}", row.name, status)
     };
     // Advertise click-to-copy only when there are parts to copy (Bash
-    // rows); other tools just get the scroll hint.
+    // rows); other tools just get the scroll hint. Drag-to-select is
+    // always available, mirroring the chat-log pane.
     let mut hint_spans = vec![Span::raw(" ")];
+    hint_spans.push(Span::styled("drag", Style::default().fg(Color::Yellow)));
+    hint_spans.push(Span::styled(" select · ", Style::default().fg(Color::DarkGray)));
     if !parts.is_empty() {
         hint_spans.push(Span::styled("click", Style::default().fg(Color::Yellow)));
         hint_spans.push(Span::styled(" copy · ", Style::default().fg(Color::DarkGray)));
@@ -1826,6 +1845,7 @@ fn render_changes_detail(
         .title(title)
         .title(hint);
     let inner = block.inner(area);
+    *detail_inner_out = Some(inner);
     f.render_widget(block, area);
 
     // Project each command part onto the visible window's screen rows so
@@ -1860,10 +1880,24 @@ fn render_changes_detail(
     }
 
     let mut visible: Vec<Line<'static>> = lines.drain(start..end).collect();
+    // Stash plain text for each visible row (one entry per row) so the
+    // parent can extract selected text without re-walking the buffer.
+    for line in &visible {
+        let mut s = String::new();
+        for span in &line.spans {
+            s.push_str(&span.content);
+        }
+        detail_visible_out.push(s);
+    }
     // Subtle hover fill on the command part under the cursor — a hint
     // that it's clickable to copy, mirroring the chat-log code blocks.
     if let Some((lo, hi)) = hover_rows {
         apply_code_hover(&mut visible, lo, hi, inner.width as usize);
+    }
+    // Selection highlight on top of any hover fill, so an active
+    // drag-selection reads over it — mirroring the chat pane's ordering.
+    if let Some(sel) = detail_selection {
+        apply_selection_highlight(&mut visible, inner, sel);
     }
     f.render_widget(Paragraph::new(visible), inner);
 }
