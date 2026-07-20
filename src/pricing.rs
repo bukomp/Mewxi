@@ -52,14 +52,60 @@ pub fn price_for(model: &str) -> ModelPrice {
     }
 }
 
-fn table() -> &'static Table {
-    static T: OnceLock<Table> = OnceLock::new();
-    T.get_or_init(load_table)
+/// Max input-token context window LiteLLM reports for an exact Claude
+/// `family`/`major`/`minor` version (e.g. `("opus", 4, 8)`,
+/// `("fable", 5, 0)`), or `None` if that exact version isn't in the
+/// table yet. Pinned to the exact version — unlike pricing, context
+/// windows can jump between adjacent releases, so we don't want the
+/// "pick the newest for this family" fallback [`price_for`] uses.
+///
+/// Sourced from the same auto-refreshing LiteLLM table as [`price_for`]
+/// so new model releases get the right context window automatically,
+/// with no per-model code changes needed here.
+pub fn context_window_for(family: &str, major: u32, minor: u32) -> Option<u64> {
+    let obj = raw_table()?;
+    let mut candidates = Vec::new();
+    if minor > 0 {
+        candidates.push(format!("claude-{family}-{major}-{minor}"));
+    }
+    candidates.push(format!("claude-{family}-{major}"));
+    let key = candidates.iter().find_map(|c| find_key(obj, c))?;
+    obj[&key].get("max_input_tokens").and_then(|v| v.as_u64())
 }
 
-fn load_table() -> Table {
-    let raw = load_or_fetch_raw();
-    raw.as_deref().and_then(parse_table).unwrap_or_default()
+// Find a bare `claude-<candidate>[-...]` (or `anthropic.claude-<candidate>`)
+// key, skipping region-prefixed Bedrock entries — same filtering
+// [`best_key_for`] uses, but pinned to an exact version rather than
+// picking the highest one available for the family.
+fn find_key(obj: &serde_json::Map<String, Value>, candidate: &str) -> Option<String> {
+    for key in obj.keys() {
+        let k = key.to_ascii_lowercase();
+        if k.starts_with("us.") || k.starts_with("eu.") || k.starts_with("au.") || k.starts_with("apac.") {
+            continue;
+        }
+        if !(k.starts_with("anthropic.") || k.starts_with("claude-")) {
+            continue;
+        }
+        let bare = k.strip_prefix("anthropic.").unwrap_or(&k);
+        if bare == candidate || bare.starts_with(&format!("{candidate}-")) {
+            return Some(key.clone());
+        }
+    }
+    None
+}
+
+fn table() -> &'static Table {
+    static T: OnceLock<Table> = OnceLock::new();
+    T.get_or_init(|| raw_table().map(parse_table).unwrap_or_default())
+}
+
+fn raw_table() -> Option<&'static serde_json::Map<String, Value>> {
+    static RAW: OnceLock<Option<serde_json::Map<String, Value>>> = OnceLock::new();
+    RAW.get_or_init(|| {
+        let raw = load_or_fetch_raw()?;
+        serde_json::from_str::<Value>(&raw).ok()?.as_object().cloned()
+    })
+    .as_ref()
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -97,12 +143,10 @@ fn fetch_remote() -> Option<String> {
         .ok()
 }
 
-fn parse_table(raw: &str) -> Option<Table> {
-    let v: Value = serde_json::from_str(raw).ok()?;
-    let obj = v.as_object()?;
+fn parse_table(obj: &serde_json::Map<String, Value>) -> Table {
     let mut t = Table::default();
     for family in ["opus", "sonnet", "haiku"] {
-        let key = best_key_for(obj, family)?;
+        let Some(key) = best_key_for(obj, family) else { continue };
         if let Some(price) = extract_price(&obj[&key]) {
             match family {
                 "opus" => t.opus = Some(price),
@@ -112,7 +156,7 @@ fn parse_table(raw: &str) -> Option<Table> {
             }
         }
     }
-    Some(t)
+    t
 }
 
 // Pick the bare `anthropic.claude-<family>-…` (or `claude-<family>-…`)

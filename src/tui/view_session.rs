@@ -2554,10 +2554,11 @@ mod tests {
         // segments stay.
         assert_eq!(trim_model("claude-fable-5"), "fable-5");
         // Opus 4.8 is natively 1M, so the tier suffix is dropped entirely;
-        // a 200K family on the opt-in tier keeps the capitalized badge —
-        // with the date stamp gone in both cases.
+        // a 200K version on the opt-in tier keeps the capitalized badge —
+        // with the date stamp gone in both cases. (Native-1M status comes
+        // from the live LiteLLM table, not a hard-coded version list.)
         assert_eq!(trim_model("claude-opus-4-8[1m]"), "opus-4-8");
-        assert_eq!(trim_model("claude-sonnet-4-6[1m]"), "sonnet-4-6[1M]");
+        assert_eq!(trim_model("claude-sonnet-4-5[1m]"), "sonnet-4-5[1M]");
         assert_eq!(trim_model("claude-haiku-4-5-20251001[1m]"), "haiku-4-5[1M]");
     }
 

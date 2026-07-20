@@ -644,21 +644,32 @@ pub fn extended_context_from_settings(account: &Account) -> bool {
     false
 }
 
-/// True for model families whose native context window is already 1M,
-/// which makes an explicit `[1M]` tier badge redundant (Fable, Opus 4.8+).
-/// Accepts either an api id (`claude-opus-4-8`) or a display name
-/// (`Opus 4.8 (1M context)`) — version digits are read regardless of the
-/// separator. Sonnet/Haiku default to 200K, so they keep the badge.
+/// True for model versions whose native context window is already 1M,
+/// which makes an explicit `[1M]` tier badge redundant. Accepts either an
+/// api id (`claude-opus-4-8`) or a display name (`Opus 4.8 (1M context)`)
+/// — version digits are read regardless of the separator.
+///
+/// Looks the exact version up in the LiteLLM price/context table (see
+/// [`crate::pricing::context_window_for`]) instead of hard-coding which
+/// family/version crossed the 1M threshold — that table refreshes on its
+/// own, so a newly released model gets the right answer here without a
+/// mewxi code change. An unrecognized family or a version not yet in the
+/// table conservatively reports not-native (200K).
 pub fn native_1m_context(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
-    if lower.contains("fable") {
-        return true;
-    }
-    if lower.contains("opus") {
-        let (major, minor) = leading_version(&lower);
-        return major > 4 || (major == 4 && minor >= 8);
-    }
-    false
+    let family = if lower.contains("fable") {
+        "fable"
+    } else if lower.contains("opus") {
+        "opus"
+    } else if lower.contains("sonnet") {
+        "sonnet"
+    } else if lower.contains("haiku") {
+        "haiku"
+    } else {
+        return false;
+    };
+    let (major, minor) = leading_version(&lower);
+    crate::pricing::context_window_for(family, major, minor).is_some_and(|ctx| ctx > 200_000)
 }
 
 /// First two digit runs of a string as `(major, minor)` — tolerant of any
@@ -799,18 +810,22 @@ mod native_1m_tests {
     use super::native_1m_context;
 
     #[test]
-    fn fable_and_opus_48_are_native_1m() {
+    fn versions_litellm_reports_over_200k_are_native_1m() {
         assert!(native_1m_context("claude-fable-5"));
         assert!(native_1m_context("Fable 5 (1M context)"));
         assert!(native_1m_context("claude-opus-4-8[1m]"));
         assert!(native_1m_context("Opus 4.8 (1M context)"));
-        assert!(native_1m_context("claude-opus-5-0"));
     }
 
     #[test]
-    fn older_opus_and_other_families_are_not() {
-        assert!(!native_1m_context("claude-opus-4-7[1m]"));
-        assert!(!native_1m_context("claude-sonnet-4-6"));
+    fn versions_still_on_200k_default_are_not() {
+        assert!(!native_1m_context("claude-opus-4-5"));
+        assert!(!native_1m_context("claude-sonnet-4-5"));
         assert!(!native_1m_context("claude-haiku-4-5-20251001"));
     }
 }
+    // These read the live LiteLLM table (same network dependency as
+    // pricing::tests::end_to_end_fetch_and_lookup), so the exact set of
+    // "native 1M" versions is whatever LiteLLM currently reports — that's
+    // the point: nothing here is a version threshold we maintain by hand.
+
