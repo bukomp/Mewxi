@@ -19,11 +19,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-/// Mouse-drag text selection within the chat log. Coordinates are
+/// Mouse-drag text selection within a pane. Coordinates are
 /// terminal-screen cells (the same frame crossterm's mouse events use)
 /// so highlight and copy share one frame of reference. `anchor` is
 /// where the drag started; `cursor` follows the mouse. Either ordering
-/// is allowed — [`rect`] normalizes to top-left → bottom-right.
+/// is allowed — [`row_span`] normalizes to reading order and models the
+/// selection stream-style, like a text editor: the first line runs from
+/// the start column to the end of the line, middle lines are covered
+/// fully, the last line runs up to and including the end column.
+///
+/// [`row_span`]: ChatSelection::row_span
 #[derive(Clone, Copy, Debug)]
 pub struct ChatSelection {
     pub anchor: (u16, u16),
@@ -31,24 +36,40 @@ pub struct ChatSelection {
 }
 
 impl ChatSelection {
-    /// Returns `(col_start, row_start, col_end_exclusive, row_end)`
-    /// with start <= end on both axes. The end column is exclusive so
-    /// a zero-length selection (anchor == cursor) yields an empty
-    /// range and won't render a stray highlight.
-    pub fn rect(&self) -> (u16, u16, u16, u16) {
+    /// Endpoints in reading order — the earlier of anchor/cursor by
+    /// (row, col) comes first. Returned as `(col, row)` cells.
+    fn ordered(&self) -> ((u16, u16), (u16, u16)) {
         let (a_col, a_row) = self.anchor;
         let (c_col, c_row) = self.cursor;
-        let (col_start, col_end) = if a_col <= c_col {
-            (a_col, c_col + 1)
+        if (a_row, a_col) <= (c_row, c_col) {
+            (self.anchor, self.cursor)
         } else {
-            (c_col, a_col + 1)
-        };
-        let (row_start, row_end) = if a_row <= c_row {
-            (a_row, c_row)
+            (self.cursor, self.anchor)
+        }
+    }
+
+    /// Inclusive screen-row range the selection touches.
+    pub fn rows(&self) -> (u16, u16) {
+        let ((_, row_start), (_, row_end)) = self.ordered();
+        (row_start, row_end)
+    }
+
+    /// The absolute-column span `[lo, hi)` the selection covers on
+    /// screen `row`, or `None` when the row lies outside it. A span
+    /// reaching the end of the line reports `hi == u16::MAX`; callers
+    /// clamp to their pane / row length.
+    pub fn row_span(&self, row: u16) -> Option<(u16, u16)> {
+        let ((s_col, s_row), (e_col, e_row)) = self.ordered();
+        if row < s_row || row > e_row {
+            return None;
+        }
+        let lo = if row == s_row { s_col } else { 0 };
+        let hi = if row == e_row {
+            e_col.saturating_add(1)
         } else {
-            (c_row, a_row)
+            u16::MAX
         };
-        (col_start, row_start, col_end, row_end)
+        Some((lo, hi))
     }
 }
 
@@ -1119,7 +1140,8 @@ fn collect_change_rows(entries: &[ChatEntry]) -> Vec<ChangeRow> {
 }
 
 /// Splits each visible chat line at the selection boundary and
-/// REVERSE-modifies the spans that fall inside the rectangle. Column
+/// REVERSE-modifies the spans that fall inside the stream-style
+/// selection (per-row spans from [`ChatSelection::row_span`]). Column
 /// math uses `chars().count()` — accurate for ASCII / Latin text and
 /// only slightly off for wide-character runs, which the chat log
 /// rarely contains.
@@ -1128,27 +1150,36 @@ fn apply_selection_highlight(
     inner: Rect,
     sel: ChatSelection,
 ) {
-    let (col_start, row_start, col_end, row_end) = sel.rect();
     // Clamp the selection to the inner area; nothing outside it can
     // be highlighted (or copied) by design.
     let inner_x_end = inner.x.saturating_add(inner.width);
-    let inner_y_end = inner.y.saturating_add(inner.height);
-    let cs = col_start.max(inner.x).min(inner_x_end);
-    let ce = col_end.max(inner.x).min(inner_x_end);
-    if ce <= cs {
+    let (row_start, row_end) = sel.rows();
+    let rs = row_start.max(inner.y);
+    let re = row_end.min(
+        inner
+            .y
+            .saturating_add(inner.height)
+            .saturating_sub(1),
+    );
+    if re < rs {
         return;
     }
-    let rs = row_start.max(inner.y).min(inner_y_end);
-    let re = row_end.max(inner.y).min(inner_y_end);
-    let i_start = rs.saturating_sub(inner.y) as usize;
-    let i_end = re.saturating_sub(inner.y) as usize;
-    let col_lo = cs.saturating_sub(inner.x) as usize;
-    let col_hi = ce.saturating_sub(inner.x) as usize;
-    for i in i_start..=i_end {
+    for row in rs..=re {
+        let Some((lo, hi)) = sel.row_span(row) else { continue };
+        let lo = lo.max(inner.x).min(inner_x_end);
+        let hi = hi.max(inner.x).min(inner_x_end);
+        if hi <= lo {
+            continue;
+        }
+        let i = (row - inner.y) as usize;
         if i >= visible.len() {
             break;
         }
-        visible[i] = highlight_line(&visible[i], col_lo, col_hi);
+        visible[i] = highlight_line(
+            &visible[i],
+            (lo - inner.x) as usize,
+            (hi - inner.x) as usize,
+        );
     }
 }
 

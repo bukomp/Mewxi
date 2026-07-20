@@ -4401,26 +4401,30 @@ fn extract_chat_selection_text(
     inner: Rect,
     sel: view_session::ChatSelection,
 ) -> String {
-    let (col_start, row_start, col_end, row_end) = sel.rect();
-    if col_end <= col_start {
-        return String::new();
-    }
-    let i_start = row_start.saturating_sub(inner.y) as usize;
-    let i_end = row_end.saturating_sub(inner.y) as usize;
-    let col_lo = col_start.saturating_sub(inner.x) as usize;
-    let col_hi = col_end.saturating_sub(inner.x) as usize;
+    // Stream-style extraction, like a text editor: per-row column
+    // spans come from `row_span` (first line from the start column,
+    // middle lines whole, last line up to the end column).
+    let (row_start, row_end) = sel.rows();
     let mut out = String::new();
-    for i in i_start..=i_end {
-        let Some(row) = visible.get(i) else { break };
-        let chars: Vec<char> = row.chars().collect();
-        let lo = col_lo.min(chars.len());
-        let hi = col_hi.min(chars.len());
-        if i > i_start {
+    let mut first = true;
+    for row in row_start.max(inner.y)..=row_end {
+        let i = (row - inner.y) as usize;
+        let Some(text) = visible.get(i) else { break };
+        let Some((lo, hi)) = sel.row_span(row) else { continue };
+        let chars: Vec<char> = text.chars().collect();
+        let lo = (lo.saturating_sub(inner.x) as usize).min(chars.len());
+        let hi = if hi == u16::MAX {
+            chars.len()
+        } else {
+            (hi.saturating_sub(inner.x) as usize).min(chars.len())
+        };
+        if !first {
             out.push('\n');
         }
-        // Trim trailing spaces so single-line selections don't drag
-        // padding from the right edge of the pane into the clipboard.
-        let slice: String = chars[lo..hi].iter().collect();
+        first = false;
+        // Trim trailing spaces so selections don't drag padding from
+        // the right edge of the pane into the clipboard.
+        let slice: String = chars[lo..hi.max(lo)].iter().collect();
         out.push_str(slice.trim_end());
     }
     out
