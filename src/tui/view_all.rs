@@ -429,14 +429,20 @@ fn render_sessions_table(
     // narrower screens, limit share outranks token-flow detail, so
     // `show_limits` now gates in at width ≥ 98, ahead of `show_io`
     // (≥ 112) and `show_cache` (≥ 121). The 5h%/wk% rate-limit columns
-    // still render positionally right after `price`, regardless of when
-    // they gate in.
+    // still render positionally right after `price` (when it's shown),
+    // regardless of when they gate in.
     let w = area.width;
     let show_ctx = w >= 72;
     let show_status = w >= 84;
     let show_limits = w >= 98;
     let show_io = w >= 112;
     let show_cache = w >= 121;
+    // Price is data-gated rather than width-gated: while the account is
+    // inside plan limits every session prices at 0, so a column of
+    // "€0.00" is pure noise — show it only once at least one row (session
+    // or sub-agent) carries a real price. Threshold matches the cell
+    // renderer's own zero test.
+    let show_price = sessions.iter().any(|s| s.price > 0.005);
 
     // `sessions` is already grouped by project (alphabetical), with
     // pid ascending within each group — sort lives in flatten_sessions
@@ -445,12 +451,13 @@ fn render_sessions_table(
 
     let now = Utc::now();
     // Compute column count up front so header rows pad correctly.
-    // Base: account, age, tokens, price, model, state = 6.
-    let mut col_count = 6;
+    // Base: account, age, tokens, model, state = 5.
+    let mut col_count = 5;
     if show_status { col_count += 1; }
     if show_ctx { col_count += 1; }
     if show_io { col_count += 1; }
     if show_cache { col_count += 1; }
+    if show_price { col_count += 1; }
     if show_limits { col_count += 2; }
 
     // Pad project names to the widest one so the "x/y active" count
@@ -537,7 +544,8 @@ fn render_sessions_table(
             if s.subagent.is_some() {
                 session_rows.push(rows.len());
                 rows.push(subagent_row(
-                    s, now, is_selected, show_status, show_ctx, show_io, show_cache, show_limits,
+                    s, now, is_selected, show_status, show_ctx, show_io, show_cache, show_price,
+                    show_limits,
                 ));
                 continue;
             }
@@ -562,7 +570,7 @@ fn render_sessions_table(
                 cells.push(dash()); // tokens
                 if show_io { cells.push(dash()); }
                 if show_cache { cells.push(dash()); }
-                cells.push(dash()); // price
+                if show_price { cells.push(dash()); } // price
                 if show_limits {
                     cells.push(dash()); // 5h%
                     cells.push(dash()); // wk%
@@ -615,21 +623,23 @@ fn render_sessions_table(
             if show_cache {
                 cells.push(Cell::from(fmt_tokens_compact(s.totals.cache_read)));
             }
-            let sym = super::widgets::currency_symbol(s.price_currency.as_deref());
-            if s.price > 0.005 {
-                let text = format!("~{sym}{:.2}", s.price);
-                cells.push(if is_selected {
-                    Cell::from(text)
+            if show_price {
+                let sym = super::widgets::currency_symbol(s.price_currency.as_deref());
+                if s.price > 0.005 {
+                    let text = format!("~{sym}{:.2}", s.price);
+                    cells.push(if is_selected {
+                        Cell::from(text)
+                    } else {
+                        Cell::from(Span::styled(text, Style::default().fg(Color::Green)))
+                    });
                 } else {
-                    Cell::from(Span::styled(text, Style::default().fg(Color::Green)))
-                });
-            } else {
-                let text = format!("{sym}0.00");
-                cells.push(if is_selected {
-                    Cell::from(text)
-                } else {
-                    Cell::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
-                });
+                    let text = format!("{sym}0.00");
+                    cells.push(if is_selected {
+                        Cell::from(text)
+                    } else {
+                        Cell::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
+                    });
+                }
             }
             if show_limits {
                 let limit_cell = |v: Option<f64>| -> Cell<'static> {
@@ -701,8 +711,10 @@ fn render_sessions_table(
         header_labels.push("cache");
         constraints.push(Constraint::Length(7));
     }
-    header_labels.push("price");
-    constraints.push(Constraint::Length(9));
+    if show_price {
+        header_labels.push("price");
+        constraints.push(Constraint::Length(9));
+    }
     if show_limits {
         header_labels.push("5h%");
         constraints.push(Constraint::Length(6));
@@ -835,6 +847,7 @@ fn subagent_row(
     show_ctx: bool,
     show_io: bool,
     show_cache: bool,
+    show_price: bool,
     show_limits: bool,
 ) -> Row<'static> {
     let (dim, text) = if is_selected {
@@ -954,11 +967,13 @@ fn subagent_row(
     // is within plan limits). Doesn't overlap the parent session row's
     // figure (zero sidechain records land in the parent), so showing
     // both never double-counts within the table.
-    let sym = super::widgets::currency_symbol(s.price_currency.as_deref());
-    if s.price > 0.005 {
-        cells.push(Cell::from(Span::styled(format!("~{sym}{:.2}", s.price), text)));
-    } else {
-        cells.push(Cell::from(Span::styled(format!("{sym}0.00"), dim)));
+    if show_price {
+        let sym = super::widgets::currency_symbol(s.price_currency.as_deref());
+        if s.price > 0.005 {
+            cells.push(Cell::from(Span::styled(format!("~{sym}{:.2}", s.price), text)));
+        } else {
+            cells.push(Cell::from(Span::styled(format!("{sym}0.00"), dim)));
+        }
     }
     if show_limits {
         cells.push(Cell::from(Span::styled("—", dim)));
