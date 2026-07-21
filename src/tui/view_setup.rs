@@ -7,6 +7,9 @@
 //!   the automatic-check toggle + interval, the startup prompt
 //!   toggle, and an on-demand check/install row.
 //! - Preferences — TUI behaviour toggles.
+//! - Mewxi view — the agent-activity visualizer, screen shake, streak
+//!   celebrations, fx intensity, and ascii art style used by the
+//!   Mewxi rave view.
 //! - Status line — the block composer.
 //! - Logs — a scrollable tail of recent `crate::debug_log` entries,
 //!   filterable by origin/kind, rendered in its own panel at the
@@ -57,6 +60,16 @@ pub enum ConfigItem {
     /// Toggles the `— Tool(arg)` suffix on sub-agent row captions
     /// (`subagent_tool_action` in accounts.toml).
     SubagentToolActionToggle,
+    /// Toggles the agent-activity visualizer in the Mewxi rave view.
+    MewxiVisualizerToggle,
+    /// Cycles the Mewxi view's screen-shake level (off · subtle · full).
+    MewxiShakeCycle,
+    /// Toggles win/output streak celebrations in the Mewxi rave view.
+    MewxiStreaksToggle,
+    /// Cycles the Mewxi view's fx intensity (chill · rave · insane).
+    MewxiFxIntensityCycle,
+    /// Cycles the Mewxi view's ascii art style (y2k · classic).
+    MewxiAsciiStyleCycle,
     /// Opens the status-line block composer modal.
     StatusLineComposer,
 }
@@ -70,6 +83,7 @@ pub enum DefaultView {
     Session,
     Account,
     Config,
+    Mewxi,
 }
 
 impl DefaultView {
@@ -78,6 +92,7 @@ impl DefaultView {
             Some("session" | "session_detail" | "2") => DefaultView::Session,
             Some("account" | "account_detail" | "3") => DefaultView::Account,
             Some("config" | "setup" | "4") => DefaultView::Config,
+            Some("mewxi" | "rave" | "5") => DefaultView::Mewxi,
             _ => DefaultView::All,
         }
     }
@@ -87,7 +102,8 @@ impl DefaultView {
             DefaultView::All => DefaultView::Session,
             DefaultView::Session => DefaultView::Account,
             DefaultView::Account => DefaultView::Config,
-            DefaultView::Config => DefaultView::All,
+            DefaultView::Config => DefaultView::Mewxi,
+            DefaultView::Mewxi => DefaultView::All,
         }
     }
 
@@ -98,6 +114,7 @@ impl DefaultView {
             DefaultView::Session => "session",
             DefaultView::Account => "account",
             DefaultView::Config => "config",
+            DefaultView::Mewxi => "mewxi",
         }
     }
 
@@ -108,6 +125,7 @@ impl DefaultView {
             DefaultView::Session => "session detail (view 2)",
             DefaultView::Account => "account detail (view 3)",
             DefaultView::Config => "config (view 4)",
+            DefaultView::Mewxi => "mewxi rave (view m)",
         }
     }
 }
@@ -136,6 +154,41 @@ pub fn next_live_poll_step(current: u64) -> u64 {
     }
     let next = (current / LIVE_POLL_STEP_SECS + 1) * LIVE_POLL_STEP_SECS;
     next.min(LIVE_POLL_MAX_SECS)
+}
+
+/// Cycles the Mewxi view's screen-shake level: off → subtle → full →
+/// off. Matching is trimmed + case-insensitive; unknown input is
+/// treated as the default (`"subtle"`), so the function returns the
+/// default's successor (`"full"`).
+pub fn next_shake_level(cur: &str) -> &'static str {
+    match cur.trim().to_ascii_lowercase().as_str() {
+        "off" => "subtle",
+        "full" => "off",
+        _ => "full", // "subtle" and anything unrecognized (default: subtle)
+    }
+}
+
+/// Cycles the Mewxi view's fx intensity: chill → rave → insane → chill.
+/// Matching is trimmed + case-insensitive; unknown input is treated as
+/// the default (`"rave"`), so the function returns the default's
+/// successor (`"insane"`).
+pub fn next_fx_intensity(cur: &str) -> &'static str {
+    match cur.trim().to_ascii_lowercase().as_str() {
+        "chill" => "rave",
+        "insane" => "chill",
+        _ => "insane", // "rave" and anything unrecognized (default: rave)
+    }
+}
+
+/// Cycles the Mewxi view's ascii art style: y2k → classic → y2k.
+/// Matching is trimmed + case-insensitive; unknown input is treated as
+/// the default (`"y2k"`), so the function returns the default's
+/// successor (`"classic"`).
+pub fn next_ascii_style(cur: &str) -> &'static str {
+    match cur.trim().to_ascii_lowercase().as_str() {
+        "classic" => "y2k",
+        _ => "classic", // "y2k" and anything unrecognized (default: y2k)
+    }
 }
 
 /// Parses `lower` (already trimmed + lowercased) as `"90"`, `"90s"`,
@@ -278,6 +331,11 @@ pub fn items(snap: Option<&SetupSnapshot>) -> Vec<ConfigItem> {
     v.push(ConfigItem::LivePollInterval);
     v.push(ConfigItem::LogMaxLines);
     v.push(ConfigItem::SubagentToolActionToggle);
+    v.push(ConfigItem::MewxiVisualizerToggle);
+    v.push(ConfigItem::MewxiShakeCycle);
+    v.push(ConfigItem::MewxiStreaksToggle);
+    v.push(ConfigItem::MewxiFxIntensityCycle);
+    v.push(ConfigItem::MewxiAsciiStyleCycle);
     v.push(ConfigItem::StatusLineComposer);
     v
 }
@@ -322,6 +380,25 @@ pub struct LogMaxLinesUi<'a> {
     pub edit: Option<&'a str>,
 }
 
+/// Current Mewxi-view settings the Config list renders, borrowed from
+/// the event loop each frame. Mirrors `LivePollUi`.
+#[derive(Clone, Copy)]
+pub struct MewxiRowsUi<'a> {
+    pub visualizer: bool,
+    pub shake: &'a str,
+    pub streaks: bool,
+    pub fx_intensity: &'a str,
+    pub ascii_style: &'a str,
+}
+impl MewxiRowsUi<'static> {
+    /// The settings' documented defaults: visualizer on, shake
+    /// "subtle", streaks on, fx "rave", ascii "y2k".
+    #[cfg(test)]
+    pub fn fallback() -> Self {
+        MewxiRowsUi { visualizer: true, shake: "subtle", streaks: true, fx_intensity: "rave", ascii_style: "y2k" }
+    }
+}
+
 /// Logs-panel state owned by the TUI event loop.
 pub struct LogsUi<'a> {
     /// Full recent ring snapshot, oldest → newest (filtering happens here in the view).
@@ -350,6 +427,7 @@ pub fn render(
     default_view: DefaultView,
     live_poll: LivePollUi,
     log_max_lines: LogMaxLinesUi,
+    mewxi: &MewxiRowsUi,
     update: &UpdateUi,
     logs: &LogsUi,
     setup_rect: &mut Option<Rect>,
@@ -377,14 +455,14 @@ pub fn render(
 
     render_header(f, rows[0], snap, update);
     *setup_rect = Some(rows[1]);
-    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, live_poll, log_max_lines, update);
-    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, live_poll, log_max_lines, update, last_message);
+    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, live_poll, log_max_lines, mewxi, update);
+    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, live_poll, log_max_lines, mewxi, update, last_message);
     render_logs(f, rows[3], logs);
     render_footer(
         f,
         rows[4],
         "4",
-        "↑/↓ select · Enter action · a fix all · i ignore account · R rescan · Esc back · o/y/L logs · PgUp/PgDn scroll logs",
+        "↑/↓ select · Enter action · a fix all · i ignore account · R rescan · Esc back · o/y/L logs · PgUp/PgDn scroll logs · ? help",
         true,
     );
 }
@@ -555,6 +633,7 @@ fn build_lines(
     default_view: DefaultView,
     live_poll: LivePollUi,
     log_max_lines: LogMaxLinesUi,
+    mewxi: &MewxiRowsUi,
     update: &UpdateUi,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
     let mut lines: Vec<Line> = Vec::new();
@@ -814,6 +893,63 @@ fn build_lines(
                 ));
                 owners.push(Some(i));
 
+                push_header(&mut lines, &mut owners, "Mewxi view", false);
+            }
+            ConfigItem::MewxiVisualizerToggle => {
+                let (txt, color) = if mewxi.visualizer {
+                    ("✓ on", Color::Green)
+                } else {
+                    ("off", Color::Yellow)
+                };
+                lines.push(row(
+                    i,
+                    "agent visualizer".to_string(),
+                    bold(format!("{txt:<16}"), color),
+                    "animate live agent activity in the rave view".to_string(),
+                ));
+                owners.push(Some(i));
+            }
+            ConfigItem::MewxiShakeCycle => {
+                lines.push(row(
+                    i,
+                    "screen shake".to_string(),
+                    bold(format!("{:<16}", mewxi.shake), Color::Magenta),
+                    "off · subtle · full".to_string(),
+                ));
+                owners.push(Some(i));
+            }
+            ConfigItem::MewxiStreaksToggle => {
+                let (txt, color) = if mewxi.streaks {
+                    ("✓ on", Color::Green)
+                } else {
+                    ("off", Color::Yellow)
+                };
+                lines.push(row(
+                    i,
+                    "streaks".to_string(),
+                    bold(format!("{txt:<16}"), color),
+                    "celebrate win/output streaks".to_string(),
+                ));
+                owners.push(Some(i));
+            }
+            ConfigItem::MewxiFxIntensityCycle => {
+                lines.push(row(
+                    i,
+                    "fx intensity".to_string(),
+                    bold(format!("{:<16}", mewxi.fx_intensity), Color::Magenta),
+                    "chill · rave · insane".to_string(),
+                ));
+                owners.push(Some(i));
+            }
+            ConfigItem::MewxiAsciiStyleCycle => {
+                lines.push(row(
+                    i,
+                    "ascii style".to_string(),
+                    bold(format!("{:<16}", mewxi.ascii_style), Color::Magenta),
+                    "y2k · classic".to_string(),
+                ));
+                owners.push(Some(i));
+
                 push_header(&mut lines, &mut owners, "Status line", false);
             }
             ConfigItem::StatusLineComposer => {
@@ -843,6 +979,7 @@ fn render_list(
     default_view: DefaultView,
     live_poll: LivePollUi,
     log_max_lines: LogMaxLinesUi,
+    mewxi: &MewxiRowsUi,
     update: &UpdateUi,
 ) {
     let block = Block::default().borders(Borders::ALL).title("Settings");
@@ -866,6 +1003,7 @@ fn render_list(
         default_view,
         live_poll,
         log_max_lines,
+        mewxi,
         update,
     );
 
@@ -905,6 +1043,7 @@ fn action_hint(
     default_view: DefaultView,
     live_poll: LivePollUi,
     log_max_lines: LogMaxLinesUi,
+    mewxi: &MewxiRowsUi,
     update: &UpdateUi,
 ) -> String {
     let list = items(snap);
@@ -1021,6 +1160,31 @@ fn action_hint(
             "Enter: show the agent's in-flight tool call after its caption — e.g. — Bash(cargo test)"
                 .to_string()
         },
+        ConfigItem::MewxiVisualizerToggle => if mewxi.visualizer {
+            "Enter: turn the agent-activity visualizer off".to_string()
+        } else {
+            "Enter: turn the agent-activity visualizer on".to_string()
+        },
+        ConfigItem::MewxiShakeCycle => format!(
+            "Enter: screen shake {} (currently {})",
+            next_shake_level(mewxi.shake),
+            mewxi.shake
+        ),
+        ConfigItem::MewxiStreaksToggle => if mewxi.streaks {
+            "Enter: stop celebrating streaks".to_string()
+        } else {
+            "Enter: celebrate win/output streaks".to_string()
+        },
+        ConfigItem::MewxiFxIntensityCycle => format!(
+            "Enter: fx intensity {} instead (currently {})",
+            next_fx_intensity(mewxi.fx_intensity),
+            mewxi.fx_intensity
+        ),
+        ConfigItem::MewxiAsciiStyleCycle => format!(
+            "Enter: ascii style {} instead (currently {})",
+            next_ascii_style(mewxi.ascii_style),
+            mewxi.ascii_style
+        ),
         ConfigItem::StatusLineComposer => {
             "Enter: open the status-line composer — reorder / toggle / add / edit blocks with a live preview"
                 .to_string()
@@ -1039,6 +1203,7 @@ fn render_info(
     default_view: DefaultView,
     live_poll: LivePollUi,
     log_max_lines: LogMaxLinesUi,
+    mewxi: &MewxiRowsUi,
     update: &UpdateUi,
     last_message: Option<&str>,
 ) {
@@ -1050,6 +1215,7 @@ fn render_info(
         default_view,
         live_poll,
         log_max_lines,
+        mewxi,
         update,
     );
     let msg_line = match last_message {
@@ -1130,9 +1296,14 @@ mod tests {
         assert_eq!(list[11], ConfigItem::LivePollInterval);
         assert_eq!(list[12], ConfigItem::LogMaxLines);
         assert_eq!(list[13], ConfigItem::SubagentToolActionToggle);
-        assert_eq!(list[14], ConfigItem::StatusLineComposer);
+        assert_eq!(list[14], ConfigItem::MewxiVisualizerToggle);
+        assert_eq!(list[15], ConfigItem::MewxiShakeCycle);
+        assert_eq!(list[16], ConfigItem::MewxiStreaksToggle);
+        assert_eq!(list[17], ConfigItem::MewxiFxIntensityCycle);
+        assert_eq!(list[18], ConfigItem::MewxiAsciiStyleCycle);
+        assert_eq!(list[19], ConfigItem::StatusLineComposer);
         // No snapshot yet → only the fixed rows.
-        assert_eq!(items(None).len(), 13);
+        assert_eq!(items(None).len(), 18);
     }
 
     #[test]
@@ -1257,10 +1428,12 @@ mod tests {
         expanded: bool,
     ) -> String {
         let snap = snapshot();
-        // Tall enough that the full settings list (21 lines across all
-        // sections) stays on-screen alongside the new logs panel row
-        // (3 header + list + 4 info + 9 logs + 1 footer).
-        let backend = TestBackend::new(100, 44);
+        // Tall enough that the full settings list (~28 lines across all
+        // sections, including the new "Mewxi view" section) stays
+        // on-screen alongside the logs panel (3 header + list + 4 info +
+        // 9 logs + 1 footer = 17 fixed rows; the list gets the flexible
+        // `Min(8)` share, so a total height of 52 gives it ~35 rows).
+        let backend = TestBackend::new(100, 52);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
@@ -1285,6 +1458,7 @@ mod tests {
                     DefaultView::All,
                     LivePollUi { secs: 60, edit: None },
                     LogMaxLinesUi { lines: 10_000, edit: None },
+                    &MewxiRowsUi::fallback(),
                     &update_ui(status.as_ref()),
                     &logs,
                     &mut rect,
@@ -1321,6 +1495,15 @@ mod tests {
             "defocus input after send",
             "usage poll interval",
             "log file max lines",
+            "Mewxi view",
+            "agent visualizer",
+            "screen shake",
+            "streaks",
+            "fx intensity",
+            "ascii style",
+            "subtle",
+            "rave",
+            "y2k",
             "Status line",
             "status line blocks",
             "did a thing",
@@ -1462,5 +1645,104 @@ mod tests {
             expanded.contains("entry 5"),
             "entry 5 should be visible once the logs panel expands:\n{expanded}"
         );
+    }
+
+    #[test]
+    fn mewxi_cycle_helpers() {
+        // Happy-path progression through the full cycle.
+        assert_eq!(next_shake_level("off"), "subtle");
+        assert_eq!(next_shake_level("subtle"), "full");
+        assert_eq!(next_shake_level("full"), "off");
+
+        assert_eq!(next_fx_intensity("chill"), "rave");
+        assert_eq!(next_fx_intensity("rave"), "insane");
+        assert_eq!(next_fx_intensity("insane"), "chill");
+
+        assert_eq!(next_ascii_style("y2k"), "classic");
+        assert_eq!(next_ascii_style("classic"), "y2k");
+
+        // Case-insensitivity (and surrounding whitespace is trimmed).
+        assert_eq!(next_shake_level("SUBTLE"), "full");
+        assert_eq!(next_shake_level(" Off "), "subtle");
+
+        // Unknown input ⇒ treated as the default, returns its successor.
+        assert_eq!(next_shake_level("nope"), "full"); // default "subtle" → "full"
+        assert_eq!(next_fx_intensity(""), "insane"); // default "rave" → "insane"
+        assert_eq!(next_ascii_style("zzz"), "classic"); // default "y2k" → "classic"
+    }
+
+    #[test]
+    fn default_view_mewxi() {
+        assert_eq!(DefaultView::from_config(Some("mewxi")), DefaultView::Mewxi);
+        assert_eq!(DefaultView::from_config(Some("rave")), DefaultView::Mewxi);
+        assert_eq!(DefaultView::from_config(Some("5")), DefaultView::Mewxi);
+        assert_eq!(DefaultView::Config.cycled(), DefaultView::Mewxi);
+        assert_eq!(DefaultView::Mewxi.cycled(), DefaultView::All);
+        assert_eq!(DefaultView::Mewxi.as_str(), "mewxi");
+    }
+
+    fn render_to_text_mewxi(selected: usize, mewxi: &MewxiRowsUi) -> String {
+        let snap = snapshot();
+        // Same generous height as `render_to_text_full` so the whole
+        // settings list (including the Mewxi view section) fits without
+        // windowing.
+        let backend = TestBackend::new(100, 52);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let mut rect = None;
+                let mut scroll = 0usize;
+                let logs = LogsUi {
+                    entries: &[],
+                    origin_filter: None,
+                    kind_filter: None,
+                    scroll: 0,
+                    expanded: false,
+                };
+                render(
+                    f,
+                    f.area(),
+                    Some(&snap),
+                    selected,
+                    &mut scroll,
+                    Some("did a thing"),
+                    true,
+                    false,
+                    DefaultView::All,
+                    LivePollUi { secs: 60, edit: None },
+                    LogMaxLinesUi { lines: 10_000, edit: None },
+                    mewxi,
+                    &update_ui(None),
+                    &logs,
+                    &mut rect,
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn mewxi_section_renders() {
+        let mewxi = MewxiRowsUi {
+            visualizer: false,
+            shake: "full",
+            streaks: false,
+            fx_intensity: "insane",
+            ascii_style: "classic",
+        };
+        let text = render_to_text_mewxi(0, &mewxi);
+        assert!(text.contains("Mewxi view"), "section header missing:\n{text}");
+        assert!(text.contains("full"), "shake value missing:\n{text}");
+        assert!(text.contains("insane"), "fx intensity value missing:\n{text}");
+        assert!(text.contains("classic"), "ascii style value missing:\n{text}");
+        assert!(text.contains("off"), "visualizer-off row missing:\n{text}");
     }
 }

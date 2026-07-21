@@ -116,6 +116,12 @@ Press **`Delete`** to kill the driven session. A confirmation modal
 appears — `Enter` / `y` confirms, `Esc` / `n` cancels. For a graceful
 end, prefer `Ctrl-D` in the composer.
 
+`Delete` (and the other driving shortcuts — `i`, `m`, `/`, `Shift-Tab`,
+`Ctrl-C`, `Ctrl-D`) only act on sessions **mewxi started itself**. For a
+session discovered from another terminal, `Delete` declines with a note
+that kill is mewxi-only and `m` nudges you to drive it first (`n`) —
+mewxi never kills or sends input to a process it didn't spawn.
+
 ## Caveats and known rough edges
 
 - **Overlay detection can miss or misfire.** It keys off visual

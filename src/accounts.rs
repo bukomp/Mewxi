@@ -420,6 +420,24 @@ struct AccountsConfig {
     /// costs caption width.
     #[serde(default)]
     subagent_tool_action: Option<bool>,
+    /// Toggles the agent-activity visualizer in the Mewxi view. Default: true.
+    #[serde(default)]
+    mewxi_visualizer: Option<bool>,
+    /// Screen-shake intensity for the Mewxi view: `"off"` / `"subtle"`
+    /// (default) / `"full"`. Raw string, parsed by the view.
+    #[serde(default)]
+    mewxi_shake: Option<String>,
+    /// Toggles streak effects in the Mewxi view. Default: true.
+    #[serde(default)]
+    mewxi_streaks: Option<bool>,
+    /// FX intensity for the Mewxi view: `"chill"` / `"rave"` (default) /
+    /// `"insane"`. Raw string, parsed by the view.
+    #[serde(default)]
+    mewxi_fx_intensity: Option<String>,
+    /// ASCII art style for the Mewxi view: `"y2k"` (default) /
+    /// `"classic"`. Raw string, parsed by the view.
+    #[serde(default)]
+    mewxi_ascii_style: Option<String>,
     /// Folder of user statusline blocks. Files here (override built-in
     /// blocks by id, or add new ones) feed the composable status line.
     /// `~` expands. Default: `<dir(accounts.toml)>/blocks/`
@@ -497,6 +515,23 @@ pub struct AccountsView {
     /// (`— Bash(cargo test)`). `subagent_tool_action` in accounts.toml;
     /// defaults to false.
     pub subagent_tool_action: bool,
+    /// Agent-activity visualizer on/off in the Mewxi view.
+    /// `mewxi_visualizer` in accounts.toml; defaults to true.
+    pub mewxi_visualizer: bool,
+    /// Streak effects on/off in the Mewxi view. `mewxi_streaks` in
+    /// accounts.toml; defaults to true.
+    pub mewxi_streaks: bool,
+    /// Raw `mewxi_shake` value from `accounts.toml`
+    /// (`"off"` / `"subtle"` / `"full"`); parsed by the Mewxi view.
+    /// `None` = subtle.
+    pub mewxi_shake: Option<String>,
+    /// Raw `mewxi_fx_intensity` value from `accounts.toml`
+    /// (`"chill"` / `"rave"` / `"insane"`); parsed by the Mewxi view.
+    /// `None` = rave.
+    pub mewxi_fx_intensity: Option<String>,
+    /// Raw `mewxi_ascii_style` value from `accounts.toml`
+    /// (`"y2k"` / `"classic"`); parsed by the Mewxi view. `None` = y2k.
+    pub mewxi_ascii_style: Option<String>,
     /// User statusline blocks folder (tilde-expanded). `None` falls back
     /// to [`default_status_blocks_dir`].
     pub status_blocks_dir: Option<PathBuf>,
@@ -602,6 +637,11 @@ pub fn load_accounts() -> Result<AccountsView> {
     let mut status_blocks_dir: Option<PathBuf> = None;
     let mut status_blocks: Option<Vec<(String, bool)>> = None;
     let mut subagent_tool_action: bool = false;
+    let mut mewxi_visualizer: bool = true;
+    let mut mewxi_streaks: bool = true;
+    let mut mewxi_shake: Option<String> = None;
+    let mut mewxi_fx_intensity: Option<String> = None;
+    let mut mewxi_ascii_style: Option<String> = None;
 
     if let Some(cfg_path) = config_path() {
         if cfg_path.exists() {
@@ -657,6 +697,15 @@ pub fn load_accounts() -> Result<AccountsView> {
             if let Some(v) = cfg.subagent_tool_action {
                 subagent_tool_action = v;
             }
+            if let Some(v) = cfg.mewxi_visualizer {
+                mewxi_visualizer = v;
+            }
+            if let Some(v) = cfg.mewxi_streaks {
+                mewxi_streaks = v;
+            }
+            mewxi_shake = cfg.mewxi_shake;
+            mewxi_fx_intensity = cfg.mewxi_fx_intensity;
+            mewxi_ascii_style = cfg.mewxi_ascii_style;
             for entry in cfg.accounts {
                 accounts.push(Account {
                     name: entry.name,
@@ -724,6 +773,11 @@ pub fn load_accounts() -> Result<AccountsView> {
         update_repo_dir,
         update_build_dir,
         subagent_tool_action,
+        mewxi_visualizer,
+        mewxi_streaks,
+        mewxi_shake,
+        mewxi_fx_intensity,
+        mewxi_ascii_style,
         status_blocks_dir,
         status_blocks,
     })
@@ -1046,6 +1100,68 @@ pub fn set_subagent_tool_action(enabled: bool) -> Result<()> {
         );
     })?;
     log_toml_write(if enabled { "subagent tool action on" } else { "subagent tool action off" });
+    Ok(())
+}
+
+/// Persist whether the Mewxi view's agent-activity visualizer is on.
+pub fn set_mewxi_visualizer(enabled: bool) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert(
+            "mewxi_visualizer".to_string(),
+            toml::Value::Boolean(enabled),
+        );
+    })?;
+    log_toml_write(if enabled { "mewxi visualizer on" } else { "mewxi visualizer off" });
+    Ok(())
+}
+
+/// Persist whether the Mewxi view's streak effects are on.
+pub fn set_mewxi_streaks(enabled: bool) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert(
+            "mewxi_streaks".to_string(),
+            toml::Value::Boolean(enabled),
+        );
+    })?;
+    log_toml_write(if enabled { "mewxi streaks on" } else { "mewxi streaks off" });
+    Ok(())
+}
+
+/// Persist the Mewxi view's screen-shake intensity
+/// (`"off"` / `"subtle"` / `"full"`).
+pub fn set_mewxi_shake(level: &str) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert(
+            "mewxi_shake".to_string(),
+            toml::Value::String(level.to_string()),
+        );
+    })?;
+    log_toml_write(&format!("mewxi shake {level}"));
+    Ok(())
+}
+
+/// Persist the Mewxi view's FX intensity
+/// (`"chill"` / `"rave"` / `"insane"`).
+pub fn set_mewxi_fx_intensity(level: &str) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert(
+            "mewxi_fx_intensity".to_string(),
+            toml::Value::String(level.to_string()),
+        );
+    })?;
+    log_toml_write(&format!("mewxi fx intensity {level}"));
+    Ok(())
+}
+
+/// Persist the Mewxi view's ASCII art style (`"y2k"` / `"classic"`).
+pub fn set_mewxi_ascii_style(style: &str) -> Result<()> {
+    edit_config_table(|t| {
+        t.insert(
+            "mewxi_ascii_style".to_string(),
+            toml::Value::String(style.to_string()),
+        );
+    })?;
+    log_toml_write(&format!("mewxi ascii style {style}"));
     Ok(())
 }
 
@@ -1378,5 +1494,22 @@ mod tests {
         set_default_effort(&acc, "low").unwrap();
         set_default_effort(&acc, "high").unwrap();
         assert_eq!(acc.default_effort().as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn mewxi_keys_deserialize() {
+        let raw = r#"
+            mewxi_visualizer = false
+            mewxi_shake = "full"
+            mewxi_streaks = false
+            mewxi_fx_intensity = "insane"
+            mewxi_ascii_style = "classic"
+        "#;
+        let cfg: AccountsConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.mewxi_visualizer, Some(false));
+        assert_eq!(cfg.mewxi_shake.as_deref(), Some("full"));
+        assert_eq!(cfg.mewxi_streaks, Some(false));
+        assert_eq!(cfg.mewxi_fx_intensity.as_deref(), Some("insane"));
+        assert_eq!(cfg.mewxi_ascii_style.as_deref(), Some("classic"));
     }
 }

@@ -370,6 +370,11 @@ mod tests {
             update_repo_dir: None,
             update_build_dir: None,
             subagent_tool_action: false,
+            mewxi_visualizer: true,
+            mewxi_streaks: true,
+            mewxi_shake: None,
+            mewxi_fx_intensity: None,
+            mewxi_ascii_style: None,
             status_blocks_dir: Some(dir),
             status_blocks,
         }

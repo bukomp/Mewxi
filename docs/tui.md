@@ -11,19 +11,34 @@ Claude Code writes JSONL.
 | `2` | **Session**       | Drill-down on the selected session: token breakdown, chat log, context.    |
 | `3` | **Account**       | Single-account dashboard — gauges + per-model / per-project / per-day.     |
 | `4` | **Config**        | statusLine wiring, watcher service, self-update channel, preferences.       |
+| `m` | **Mewxi rave**    | The Overview's data in Y2K-arcade dress: visualizer, streaks, screen shake. |
 
 The TUI opens on the Overview; set `default_view` in
 `~/.config/mewxi/accounts.toml` (`"overview"`, `"session"`, `"account"`,
-or `"config"`) to start somewhere else. First run still lands on Config
-until setup is complete.
+`"config"`, or `"mewxi"`) to start somewhere else. First run still lands
+on Config until setup is complete.
 
 ## Keys
 
 - `↑ ↓` — move selection in tables.
 - `1` / `2` / `3` / `4` — switch view.
 - `n` — create a new agent session (see below).
-- `q` or `Esc` — quit.
+- `?` — open the help modal. It lists **only** the shortcuts that
+  actually work in the current view and state — a session mewxi didn't
+  create won't show `Del kill` / `m model`. `?`, `Esc`, or `q` closes
+  it. While a driven session's input is focused or claude is asking,
+  `?` types into claude instead of opening help.
+- `q` — quit.
+- `Esc` — back to the sessions overview (view 1).
 - Dismiss the red error footer with the key the footer prints.
+
+Session-management shortcuts — `Del` (kill), `m` (model), `i` (type),
+`/` (skill), `Shift-Tab` (mode), `Ctrl-C` / `Ctrl-D` — only act on
+sessions **mewxi itself started** (via `n`, fresh or `--resume`). For an
+observed session started in another terminal they're unavailable: `Del`
+just explains that kill is mewxi-only, and `m` nudges you to drive the
+session (`n`) first. mewxi never sends input to or tears down a process
+it didn't spawn.
 
 ## Creating & driving sessions (beta)
 
@@ -57,6 +72,10 @@ what `Enter` will do before you press it.
   updates on startup, where updates clone + build (the OS temp dir by
   default), and a check/install row.
 - **Preferences** — TUI behaviour toggles.
+- **Mewxi view** — everything about the rave view (`m`): the agent
+  visualizer (on/off), screen shake (`off` · `subtle` · `full`), the
+  streak HUD (on/off), fx intensity (`chill` · `rave` · `insane`), and
+  ascii style (`y2k` · `classic`). `Enter` toggles or cycles each row.
 - **Status line** — open the **block composer** (`Enter` on "status line
   blocks") to reorder, toggle, add, and edit the pieces of the Claude
   Code status line, with a live preview. See
@@ -64,6 +83,60 @@ what `Enter` will do before you press it.
 
 Shortcuts: `a` fixes everything that's missing, `i` ignores/un-ignores
 the selected account, `R` rescans, `Esc` goes back.
+
+## Mewxi rave view (m)
+
+Press `m` from any view except Session (where `m` is the model picker).
+It shows the same accounts + live-sessions data as the Overview — the
+same gauges, the same project-grouped table with sub-agent rows, the
+same selection keys (`↑/↓` select, `Enter` open, `n` new, `Del` kill a
+driven session, `r` refresh) — restyled as a purple-pink Y2K arcade
+screen, plus:
+
+- **Agent visualizer** — a strip of jumping columns along the bottom of
+  the chrome column, one per running agent — sub-agents spawn their own
+  bar right beside their parent session's, and the bars stretch to fill
+  the strip's full width. Bars bounce high while an agent writes,
+  runs, or edits, settle to a mid-level while it thinks or reads, and
+  decay to an ember when it idles — a music visualizer that follows
+  your agents instead of music.
+- **Streak HUD** — an arcade band above the panels: COMBO (active
+  agents right now), STREAK (continuous time with ≥1 agent active, with
+  a 5s grace so brief gaps don't reset it), BEST (longest streak this
+  run), and SCORE (accumulated active-agent-seconds). On a tall enough
+  terminal the values render in the same big pixel font as the
+  headline; tighter screens fall back to a one-line HUD. Streak
+  tier-ups and combo highs flash the HUD.
+- **Screen shake** — a short pseudo-3D jolt (rows skew on a rolling
+  wave) fires on the events worth feeling: an agent coming online, a
+  session or sub-agent appearing or wrapping up, a burst of
+  writing/editing/running kicking in, and — hardest of all — streak
+  milestones. `subtle` keeps it to a 1-cell shimmy, `full` allows 3
+  cells plus vertical jitter, `off` disables it.
+- The animated cat mascot lives in the left chrome column under the
+  headline and HUD, bobbing and colour-cycling faster the more agents
+  are working.
+
+All of it is configurable from the Config view's **Mewxi view** section,
+or directly in `~/.config/mewxi/accounts.toml`:
+
+| Key                  | Values                          | Default  |
+| -------------------- | ------------------------------- | -------- |
+| `mewxi_visualizer`   | `true` / `false`                | `true`   |
+| `mewxi_shake`        | `off` / `subtle` / `full`       | `subtle` |
+| `mewxi_streaks`      | `true` / `false`                | `true`   |
+| `mewxi_fx_intensity` | `chill` / `rave` / `insane`     | `rave`   |
+| `mewxi_ascii_style`  | `y2k` / `classic`               | `y2k`    |
+
+`insane` adds a continuous low wobble while agents are active; `chill`
+tones every effect down. `classic` swaps the big pixel-font headline for
+a plain title but keeps the animations. The screen splits roughly 50/50
+into a left chrome column (headline, marquee, streak HUD, mascot, and
+the visualizer along its bottom edge) and a right data column (accounts
+over the sessions table, full height), with the key hints on the very
+bottom row like every other view. It degrades gracefully: narrow
+terminals drop the chrome column entirely, short ones drop the
+visualizer — the data panels always win.
 
 ## Updates
 

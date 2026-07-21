@@ -295,7 +295,7 @@ pub fn render(
         mouse_pos,
     );
     let default_hint =
-        "↑/↓ switch · PgUp/PgDn scroll · m model · Del kill · Esc back · j/k changes · J/K detail";
+        "↑/↓ switch · PgUp/PgDn scroll · Esc back · j/k changes · J/K detail · ? help";
     let driver_flags = driver.as_ref().map(|d| (d.overlay_active, d.focused));
     let footer_hint = match driver_flags {
         Some((true, _)) => "claude is asking — keys pass through · F10 dismiss",
@@ -303,7 +303,7 @@ pub fn render(
             "Enter send · Ctrl-E editor · Shift-Tab mode · Esc unfocus · Ctrl-D end · Ctrl-C cancel"
         }
         Some((false, false)) => {
-            "i type · m model · / skill · Shift-Tab mode · Ctrl-C cancel · Ctrl-D end · Del kill"
+            "i type · m model · / skill · Shift-Tab mode · Ctrl-C cancel · Ctrl-D end · Del kill · ? help"
         }
         None => default_hint,
     };

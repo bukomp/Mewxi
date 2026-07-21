@@ -35,7 +35,9 @@ them with the same live `/usage` endpoint the CLI itself uses, and gives you:
 
 - a **TUI dashboard** with 5-hour / weekly / extra-usage gauges, per-model
   and per-project breakdowns, and a live table of every running session
-  across every account,
+  across every account — plus a **rave view** (`m`) that dresses the same
+  data in Y2K-arcade chrome: an agent-activity visualizer, streak/combo
+  scoring, and configurable screen shake,
 - a one-line **statusLine** for Claude Code (`mewxi status`), kept hot by a
   small **watcher** daemon,
 - an **MCP server** (`mewxi mcp`) that exposes the same numbers as JSON-RPC

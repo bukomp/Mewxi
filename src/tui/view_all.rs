@@ -21,6 +21,7 @@ use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, Table
 /// Lines consumed by one account block: 1 header + 4 gauges + 1 spacer.
 const ROWS_PER_ACCOUNT: u16 = 6;
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     area: Rect,
@@ -29,6 +30,10 @@ pub fn render(
     selected: Option<usize>,
     sessions_rect: &mut Option<Rect>,
     table_state: &mut TableState,
+    // True when view 1's currently-selected row is a mewxi-driven session —
+    // the only case where `Del kill` applies (observed sessions can't be
+    // killed from mewxi).
+    selected_driven: bool,
 ) {
     // Reserve enough rows for every account block, capped so the
     // sessions table always gets at least 5 rows. On short terminals
@@ -57,13 +62,14 @@ pub fn render(
     render_account_stack(f, rows[0], accounts, compact);
     *sessions_rect = Some(rows[1]);
     render_sessions_table(f, rows[1], sessions, selected, table_state);
-    render_footer(
-        f,
-        rows[2],
-        "1",
-        "↑/↓ select · Enter open · n new · Del kill · r refresh limits",
-        true,
-    );
+    // `Del kill` only when the selected row is a mewxi-driven session —
+    // observed sessions can't be killed from mewxi. `? help` always.
+    let mut hint = String::from("↑/↓ select · Enter open · n new");
+    if selected_driven {
+        hint.push_str(" · Del kill");
+    }
+    hint.push_str(" · r refresh limits · ? help");
+    render_footer(f, rows[2], "1", &hint, true);
 }
 
 fn render_account_stack(f: &mut Frame, area: Rect, accounts: &[&PerAccount], compact: bool) {

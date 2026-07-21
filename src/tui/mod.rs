@@ -18,6 +18,7 @@
 //!    reloads to ≥500ms per account, and rescan live sessions.
 
 mod composer_modal;
+mod help_modal;
 mod kill_confirm_modal;
 mod markdown;
 mod model_picker_modal;
@@ -26,7 +27,6 @@ mod skill_picker_modal;
 mod terminal_overlay;
 mod text_input;
 mod toast;
-mod under_construction;
 mod update_prompt_modal;
 mod view_account;
 mod view_all;
@@ -402,6 +402,7 @@ impl ViewMode {
             Some("session" | "session_detail" | "2") => ViewMode::SessionDetail,
             Some("account" | "account_detail" | "3") => ViewMode::AccountDetail,
             Some("config" | "setup" | "4") => ViewMode::Setup,
+            Some("mewxi" | "rave" | "5") => ViewMode::Mewxi,
             _ => ViewMode::AllSessions,
         }
     }
@@ -1315,6 +1316,9 @@ fn run_loop<B: ratatui::backend::Backend>(
     // so the table follows the selection instead of clipping it once the
     // cursor moves past the visible window.
     let mut all_table_state = ratatui::widgets::TableState::default();
+    // Separate scroll state for the Mewxi rave view's sessions table so
+    // view 1 and view 5 each keep their own offset across switches.
+    let mut mewxi_table_state = ratatui::widgets::TableState::default();
     let mut last_reload: HashMap<String, Instant> = HashMap::new();
     let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut last_full_tick = Instant::now();
@@ -1344,6 +1348,24 @@ fn run_loop<B: ratatui::backend::Backend>(
     // tool call. Persisted as `subagent_tool_action` in accounts.toml,
     // toggleable from the Config view like `defocus_input_after_send`.
     let mut subagent_tool_action: bool = view.subagent_tool_action;
+    // Mewxi rave-view settings (view 5), persisted as `mewxi_*` keys in
+    // accounts.toml and adjustable from the Config view's "Mewxi view"
+    // section. The string ones are kept raw here — the Config rows cycle
+    // them by canonical name, the rave renderer parses them per frame.
+    let mut mewxi_visualizer: bool = view.mewxi_visualizer;
+    let mut mewxi_streaks: bool = view.mewxi_streaks;
+    let mut mewxi_shake: String = view
+        .mewxi_shake
+        .clone()
+        .unwrap_or_else(|| "subtle".to_string());
+    let mut mewxi_fx_intensity: String = view
+        .mewxi_fx_intensity
+        .clone()
+        .unwrap_or_else(|| "rave".to_string());
+    let mut mewxi_ascii_style: String = view
+        .mewxi_ascii_style
+        .clone()
+        .unwrap_or_else(|| "y2k".to_string());
     let mut default_view_pref =
         view_setup::DefaultView::from_config(view.default_view.as_deref());
     let mut driver_status: Option<(String, Instant)> = None;
@@ -1402,6 +1424,11 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut skill_picker: Option<SkillPickerModal> = None;
 
     let mut kill_confirm_modal: Option<KillConfirmModal> = None;
+
+    // `?` help modal. Owns every keystroke while open; contents are
+    // recomputed fresh each time it's opened from the current view/session
+    // context (see the `?` key arm below).
+    let mut help_modal_state: Option<help_modal::HelpModal> = None;
 
     // Status-line composer modal (opened from the Config view). Owns
     // every keystroke while open.
@@ -1564,6 +1591,13 @@ fn run_loop<B: ratatui::backend::Backend>(
         } else {
             None
         };
+
+        // Whether view 1's selected row is a mewxi-driven session — decides
+        // if the `Del kill` footer chip shows (kill only manages driven ones).
+        let selected_v1_driven = visible_sessions
+            .get(selected_session)
+            .map(|s| (s.account_name.clone(), s.session_id.clone()))
+            .is_some_and(|key| drivers.contains_key(&key));
 
         let raw_error = live_usage::most_recent_error()
             .map(|(acct, msg)| format!("[{acct}] {msg}"));
@@ -2010,6 +2044,24 @@ fn run_loop<B: ratatui::backend::Backend>(
             edit: log_max_lines_edit.as_ref().map(|i| i.as_str()),
         };
 
+        // Mewxi rave-view settings, in the two shapes the renderers
+        // want: raw strings for the Config rows, parsed enums for the
+        // rave view itself.
+        let mewxi_rows_ui = view_setup::MewxiRowsUi {
+            visualizer: mewxi_visualizer,
+            shake: &mewxi_shake,
+            streaks: mewxi_streaks,
+            fx_intensity: &mewxi_fx_intensity,
+            ascii_style: &mewxi_ascii_style,
+        };
+        let rave_cfg = view_mewxi::RaveConfig {
+            visualizer: mewxi_visualizer,
+            shake: view_mewxi::ShakeLevel::from_config(Some(&mewxi_shake)),
+            streaks: mewxi_streaks,
+            intensity: view_mewxi::FxIntensity::from_config(Some(&mewxi_fx_intensity)),
+            ascii_style: view_mewxi::AsciiStyle::from_config(Some(&mewxi_ascii_style)),
+        };
+
         terminal.draw(|f| {
             render(
                 f,
@@ -2037,6 +2089,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                 &mut detail_visible,
                 mouse_pos,
                 visible_selection,
+                selected_v1_driven,
                 selected_account,
                 selected_setup,
                 &mut setup_scroll,
@@ -2047,8 +2100,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                 default_view_pref,
                 live_poll_ui,
                 log_max_lines_ui,
+                &mewxi_rows_ui,
                 &update_ui,
                 &logs_ui,
+                &mut mewxi_table_state,
+                &rave_cfg,
                 live_error,
                 driver_pane.as_mut(),
                 pending_pane.as_ref(),
@@ -2079,6 +2135,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                 modal.render(f, f.area());
             }
             if let Some(modal) = update_prompt_modal.as_ref() {
+                modal.render(f, f.area());
+            }
+            if let Some(modal) = help_modal_state.as_ref() {
                 modal.render(f, f.area());
             }
             // Toasts sit on top of everything (including modals) so transient
@@ -2595,6 +2654,17 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                             continue;
                         }
+                    }
+                    // `?` help modal owns every keystroke while open — route first so no
+                    // shortcut fires underneath it.
+                    if let Some(modal) = help_modal_state.as_mut() {
+                        match modal.handle_key(k) {
+                            help_modal::HelpOutcome::Stay => {}
+                            help_modal::HelpOutcome::Close => {
+                                help_modal_state = None;
+                            }
+                        }
+                        continue;
                     }
                     // Update prompt modal owns every keystroke while open.
                     if let Some(modal) = update_prompt_modal.as_ref() {
@@ -3479,7 +3549,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                         // falls through naturally.
                         if matches!(k.code, KeyCode::Tab) {
                             match mode {
-                                ViewMode::AllSessions | ViewMode::SessionDetail => {
+                                ViewMode::AllSessions | ViewMode::SessionDetail | ViewMode::Mewxi => {
                                     if !sessions.is_empty() {
                                         selected_session = (selected_session + sessions.len() - 1)
                                             % sessions.len();
@@ -3503,9 +3573,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     if len > 0 {
                                         selected_setup = (selected_setup + len - 1) % len;
                                     }
-                                }
-                                ViewMode::Mewxi => {}
-                            }
+                                }                            }
                             continue;
                         }
                     }
@@ -3515,6 +3583,35 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 let _ = cmd_tx.send(LiveCmd::Stop);
                             }
                             break;
+                        }
+                        KeyCode::Char('?') => {
+                            let view = match mode {
+                                ViewMode::AllSessions => help_modal::ViewKind::AllSessions,
+                                ViewMode::SessionDetail => help_modal::ViewKind::SessionDetail,
+                                ViewMode::AccountDetail => help_modal::ViewKind::AccountDetail,
+                                ViewMode::Setup => help_modal::ViewKind::Setup,
+                                ViewMode::Mewxi => help_modal::ViewKind::Mewxi,
+                            };
+                            let selected_driven = visible_sessions
+                                .get(selected_session)
+                                .map(|s| (s.account_name.clone(), s.session_id.clone()))
+                                .is_some_and(|key| drivers.contains_key(&key));
+                            let session = if mode == ViewMode::SessionDetail {
+                                pinned_session.as_ref().map(|k| help_modal::SessionFlags {
+                                    driven: drivers.contains_key(k),
+                                    input_focused: driver_input_focused,
+                                    overlay_active: overlay_open.contains(k),
+                                })
+                            } else {
+                                None
+                            };
+                            let ctx = help_modal::HelpCtx {
+                                view,
+                                has_sessions: !visible_sessions.is_empty(),
+                                selected_driven,
+                                session,
+                            };
+                            help_modal_state = Some(help_modal::HelpModal::new(help_modal::sections_for(&ctx)));
                         }
                         KeyCode::Esc => match mode {
                             ViewMode::AllSessions => {}
@@ -3795,7 +3892,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             log_scroll = log_scroll.saturating_sub(5);
                         }
                         KeyCode::Tab => match mode {
-                            ViewMode::AllSessions | ViewMode::SessionDetail => {
+                            ViewMode::AllSessions | ViewMode::SessionDetail | ViewMode::Mewxi => {
                                 if !sessions.is_empty() {
                                     selected_session = (selected_session + 1) % sessions.len();
                                     last_session_select = Instant::now();
@@ -3816,16 +3913,14 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if len > 0 {
                                     selected_setup = (selected_setup + 1) % len;
                                 }
-                            }
-                            ViewMode::Mewxi => {}
-                        },
+                            }                        },
                         KeyCode::BackTab => match mode {
                             // Driven SessionDetail Shift-Tab is
                             // intercepted ahead of this match (forwards
                             // to claude's PTY). This arm only sees the
                             // observe-only case, so prev-session cycle
                             // is the right behaviour.
-                            ViewMode::AllSessions | ViewMode::SessionDetail => {
+                            ViewMode::AllSessions | ViewMode::SessionDetail | ViewMode::Mewxi => {
                                 if !sessions.is_empty() {
                                     selected_session = (selected_session + sessions.len() - 1)
                                         % sessions.len();
@@ -3848,11 +3943,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if len > 0 {
                                     selected_setup = (selected_setup + len - 1) % len;
                                 }
-                            }
-                            ViewMode::Mewxi => {}
-                        },
+                            }                        },
                         KeyCode::Down => match mode {
-                            ViewMode::AllSessions | ViewMode::SessionDetail => {
+                            ViewMode::AllSessions | ViewMode::SessionDetail | ViewMode::Mewxi => {
                                 if !sessions.is_empty() {
                                     selected_session = (selected_session + 1).min(sessions.len() - 1);
                                     last_session_select = Instant::now();
@@ -3874,11 +3967,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if len > 0 {
                                     selected_setup = (selected_setup + 1).min(len - 1);
                                 }
-                            }
-                            ViewMode::Mewxi => {}
-                        },
+                            }                        },
                         KeyCode::Up => match mode {
-                            ViewMode::AllSessions | ViewMode::SessionDetail => {
+                            ViewMode::AllSessions | ViewMode::SessionDetail | ViewMode::Mewxi => {
                                 if selected_session > 0 {
                                     selected_session -= 1;
                                     last_session_select = Instant::now();
@@ -3898,11 +3989,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if selected_setup > 0 {
                                     selected_setup -= 1;
                                 }
-                            }
-                            ViewMode::Mewxi => {}
-                        },
+                            }                        },
                         KeyCode::Enter => {
-                            if mode == ViewMode::AllSessions && !sessions.is_empty() {
+                            if matches!(mode, ViewMode::AllSessions | ViewMode::Mewxi)
+                                && !sessions.is_empty()
+                            {
                                 mode = ViewMode::SessionDetail;
                                 pinned_session = visible_sessions
                                     .get(selected_session)
@@ -4151,6 +4242,88 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         ));
                                         setup_message = None;
                                     }
+                                    Some(view_setup::ConfigItem::MewxiVisualizerToggle) => {
+                                        let next = !mewxi_visualizer;
+                                        match accounts::set_mewxi_visualizer(next) {
+                                            Ok(()) => {
+                                                mewxi_visualizer = next;
+                                                setup_message = Some(format!(
+                                                    "mewxi agent visualizer: {}",
+                                                    if next { "on" } else { "off" }
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Some(view_setup::ConfigItem::MewxiShakeCycle) => {
+                                        let next = view_setup::next_shake_level(&mewxi_shake);
+                                        match accounts::set_mewxi_shake(next) {
+                                            Ok(()) => {
+                                                mewxi_shake = next.to_string();
+                                                setup_message = Some(format!(
+                                                    "mewxi screen shake: {next}"
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Some(view_setup::ConfigItem::MewxiStreaksToggle) => {
+                                        let next = !mewxi_streaks;
+                                        match accounts::set_mewxi_streaks(next) {
+                                            Ok(()) => {
+                                                mewxi_streaks = next;
+                                                setup_message = Some(format!(
+                                                    "mewxi streak HUD: {}",
+                                                    if next { "on" } else { "off" }
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Some(view_setup::ConfigItem::MewxiFxIntensityCycle) => {
+                                        let next = view_setup::next_fx_intensity(&mewxi_fx_intensity);
+                                        match accounts::set_mewxi_fx_intensity(next) {
+                                            Ok(()) => {
+                                                mewxi_fx_intensity = next.to_string();
+                                                setup_message = Some(format!(
+                                                    "mewxi fx intensity: {next}"
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Some(view_setup::ConfigItem::MewxiAsciiStyleCycle) => {
+                                        let next = view_setup::next_ascii_style(&mewxi_ascii_style);
+                                        match accounts::set_mewxi_ascii_style(next) {
+                                            Ok(()) => {
+                                                mewxi_ascii_style = next.to_string();
+                                                setup_message = Some(format!(
+                                                    "mewxi ascii style: {next}"
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                setup_message = Some(format!(
+                                                    "failed to save preference: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
                                     None => {}
                                 }
                             }
@@ -4336,7 +4509,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             .iter()
                                             .find(|s| s.account_name == *acct && s.session_id == *sid)
                                     }),
-                                ViewMode::AllSessions => visible_sessions
+                                ViewMode::AllSessions | ViewMode::Mewxi => visible_sessions
                                     .get(selected_session),
                                 _ => None,
                             };
@@ -4351,11 +4524,21 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     ));
                                 }
                                 Some(s) => {
-                                    kill_confirm_modal = Some(KillConfirmModal::new(
-                                        s.account_name.clone(),
-                                        s.session_id.clone(),
-                                        s.pid,
-                                    ));
+                                    // Kill only manages mewxi-spawned sessions — an
+                                    // observed session's process isn't ours to tear down.
+                                    let key = (s.account_name.clone(), s.session_id.clone());
+                                    if drivers.contains_key(&key) {
+                                        kill_confirm_modal = Some(KillConfirmModal::new(
+                                            s.account_name.clone(),
+                                            s.session_id.clone(),
+                                            s.pid,
+                                        ));
+                                    } else {
+                                        driver_status = Some((
+                                            "kill is only available for sessions created by mewxi (n to drive)".into(),
+                                            Instant::now(),
+                                        ));
+                                    }
                                 }
                                 None => {
                                     driver_status = Some((
@@ -4492,7 +4675,7 @@ fn handle_scroll(
                 }
             }
         }
-        ViewMode::AllSessions => {
+        ViewMode::AllSessions | ViewMode::Mewxi => {
             if hit(sessions_rect, col, row) && sessions_len > 0 {
                 if dir < 0 {
                     *selected_session = selected_session.saturating_sub(1);
@@ -4514,7 +4697,7 @@ fn handle_scroll(
                 }
             }
         }
-        ViewMode::AccountDetail | ViewMode::Mewxi => {}
+        ViewMode::AccountDetail => {}
     }
 }
 
@@ -4597,6 +4780,7 @@ fn render(
     detail_visible: &mut Vec<String>,
     mouse_pos: Option<(u16, u16)>,
     visible_session_selection: Option<usize>,
+    selected_v1_driven: bool,
     selected_account: usize,
     selected_setup: usize,
     setup_scroll: &mut usize,
@@ -4607,8 +4791,11 @@ fn render(
     default_view: view_setup::DefaultView,
     live_poll: view_setup::LivePollUi,
     log_max_lines: view_setup::LogMaxLinesUi,
+    mewxi_rows: &view_setup::MewxiRowsUi,
     update_ui: &view_setup::UpdateUi,
     logs_ui: &view_setup::LogsUi,
+    mewxi_table_state: &mut ratatui::widgets::TableState,
+    rave_cfg: &view_mewxi::RaveConfig,
     live_error: Option<&str>,
     driver: Option<&mut view_session::DriverPane<'_>>,
     pending: Option<&view_session::PendingPane>,
@@ -4658,6 +4845,7 @@ fn render(
             visible_session_selection,
             sessions_rect,
             all_table_state,
+            selected_v1_driven,
         ),
         ViewMode::SessionDetail => view_session::render(
             f,
@@ -4700,11 +4888,22 @@ fn render(
             default_view,
             live_poll,
             log_max_lines,
+            mewxi_rows,
             update_ui,
             logs_ui,
             setup_rect,
         ),
-        ViewMode::Mewxi => view_mewxi::render(f, view_area, accounts, sessions),
+        ViewMode::Mewxi => view_mewxi::render(
+            f,
+            view_area,
+            accounts,
+            sessions,
+            visible_session_selection,
+            sessions_rect,
+            mewxi_table_state,
+            selected_v1_driven,
+            rave_cfg,
+        ),
     }
 }
 
@@ -5292,6 +5491,10 @@ mod tests {
         assert_eq!(ViewMode::from_config(Some("setup")), ViewMode::Setup);
         assert_eq!(ViewMode::from_config(Some("2")), ViewMode::SessionDetail);
         assert_eq!(ViewMode::from_config(Some(" Config ")), ViewMode::Setup);
+        assert_eq!(ViewMode::from_config(Some("mewxi")), ViewMode::Mewxi);
+        assert_eq!(ViewMode::from_config(Some("rave")), ViewMode::Mewxi);
+        assert_eq!(ViewMode::from_config(Some("5")), ViewMode::Mewxi);
+        assert_eq!(ViewMode::from_config(Some(" MEWXI ")), ViewMode::Mewxi);
     }
 
     #[test]
