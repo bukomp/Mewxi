@@ -701,11 +701,16 @@ fn leading_version(lower: &str) -> (u32, u32) {
 }
 
 /// Decide a model's context cap. The heuristics, in order of confidence:
-///  1. stdin alias from Claude Code containing `[1m]` → 1M
-///  2. A prior statusline call for this session saw `[1m]` (marker file) → 1M
-///  3. Any message in this session had >200K context → 1M
-///  4. The account's `settings.json` model is `…[1m]` → 1M
-///  5. Otherwise 200K (default for all current Claude models)
+///  1. The model's native context window is already 1M ([`native_1m_context`]) → 1M
+///  2. stdin alias from Claude Code containing `[1m]` → 1M
+///  3. A prior statusline call for this session saw `[1m]` (marker file) → 1M
+///  4. Any message in this session had >200K context → 1M
+///  5. The account's `settings.json` model is `…[1m]` → 1M
+///  6. Otherwise 200K (default for all current Claude models)
+///
+/// Natively-1M models (e.g. Fable 5) never get a `[1m]` alias suffix from
+/// Claude Code, so without heuristic 1 they'd show a 200K cap until a
+/// single message exceeded 200K tokens.
 ///
 /// `session_id` is optional and used to consult the persisted [1m] marker
 /// written by the statusline. Without it the TUI can't tell that the user
@@ -718,8 +723,8 @@ pub fn context_cap_for(
     account: &Account,
     session_id: Option<&str>,
 ) -> u64 {
-    let _ = api_model;
-    let one_m = stdin_alias.is_some_and(|s| s.contains("[1m]"))
+    let one_m = native_1m_context(api_model)
+        || stdin_alias.is_some_and(|s| s.contains("[1m]"))
         || session_id.is_some_and(|sid| extended_context_marked(account, sid))
         || max_observed > 200_000
         || extended_context_from_settings(account);
@@ -850,6 +855,34 @@ mod native_1m_tests {
     #[test]
     fn version_not_yet_in_the_table_defaults_to_not_native() {
         assert!(!native_1m_context("claude-opus-99-9"));
+    }
+}
+
+#[cfg(test)]
+mod context_cap_tests {
+    use super::context_cap_for;
+    use crate::accounts::{Account, TokenSource};
+
+    fn account(dir: &std::path::Path) -> Account {
+        Account {
+            name: "test".into(),
+            dir: dir.to_path_buf(),
+            token_source: TokenSource::Auto,
+        }
+    }
+
+    #[test]
+    fn natively_1m_model_gets_1m_cap_without_any_1m_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = context_cap_for("claude-fable-5", 49_000, Some("Fable 5"), &account(tmp.path()), None);
+        assert_eq!(cap, 1_000_000);
+    }
+
+    #[test]
+    fn model_on_200k_default_keeps_200k_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = context_cap_for("claude-opus-4-5", 49_000, Some("Opus 4.5"), &account(tmp.path()), None);
+        assert_eq!(cap, 200_000);
     }
 }
 
