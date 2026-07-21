@@ -121,6 +121,15 @@ screen, plus:
   peak streak, and when it ended; the box is larger now to fit the
   table. `Esc`, `q`, or `s` closes it; other keys are swallowed while
   it's open.
+- **Live ticker** — a scrolling one-line marquee under the pixel
+  headline: ` ░ `-separated segments, one per session that needs
+  attention or is working. Sessions waiting on a question or a
+  permission dialog lead the line as `⚠ <project> NEEDS INPUT`; busy
+  sessions follow as `<project> » <activity>`, appending ` +N⚡` and
+  the lead sub-agent's live caption (truncated to 40 chars) when
+  sub-agents are running underneath. At most 6 segments show, with the
+  rest folded into a trailing `+k more`. When nothing's running it
+  reads `agents.exe · idle — press n to spawn an agent`.
 - **Screen shake** — a short pseudo-3D jolt (rows skew on a rolling
   wave) fires on the events worth feeling: an agent coming online, a
   session or sub-agent appearing or wrapping up, a burst of
@@ -145,7 +154,7 @@ or directly in `~/.config/mewxi/accounts.toml`:
 `insane` adds a continuous low wobble while agents are active; `chill`
 tones every effect down. `classic` swaps the big pixel-font headline for
 a plain title but keeps the animations. The screen splits roughly 50/50
-into a left chrome column (headline, marquee, streak HUD, mascot, and
+into a left chrome column (headline, ticker, streak HUD, mascot, and
 the visualizer along its bottom edge) and a right data column (accounts
 over the sessions table, full height), with the key hints on the very
 bottom row like every other view. It degrades gracefully: narrow

@@ -17,6 +17,7 @@
 mod accounts_panel;
 mod font;
 mod fx;
+mod marquee;
 mod palette;
 mod score_store;
 pub(super) mod scores_modal;
@@ -429,7 +430,7 @@ fn render_chrome_column(
     }
     if marquee_h > 0 {
         let text = font::marquee(
-            "NOW PLAYING: agents.exe ",
+            &marquee::ticker_text(sessions),
             chunks[2].width as usize,
             marquee_offset,
         );
