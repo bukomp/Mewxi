@@ -23,6 +23,7 @@ mod kill_confirm_modal;
 mod markdown;
 mod model_picker_modal;
 mod new_session_modal;
+mod reloader;
 mod skill_picker_modal;
 mod terminal_overlay;
 mod text_input;
@@ -1234,6 +1235,18 @@ fn run_loop<B: ratatui::backend::Backend>(
     }
     drop(dirty_tx);
 
+    // Background reload worker: the heavy per-account reload wave (walkdir +
+    // aggregation + transcript scan + price attribution) runs off the UI
+    // thread so the 16ms mewxi frame loop never stalls on it. Seed it with
+    // each account's initial live_sessions so the first scan has a baseline
+    // to diff against.
+    let reloader = reloader::Reloader::spawn(
+        per_account
+            .iter()
+            .map(|p| (p.account.clone(), p.live_sessions.clone()))
+            .collect(),
+    );
+
     // Live poller per account, staggered so we don't burst the OAuth endpoint.
     let mut live_pollers: Vec<(Receiver<LiveMsg>, Sender<LiveCmd>)> = Vec::new();
     for (i, account) in view.accounts.iter().enumerate() {
@@ -1319,9 +1332,6 @@ fn run_loop<B: ratatui::backend::Backend>(
     // Separate scroll state for the Mewxi rave view's sessions table so
     // view 1 and view 5 each keep their own offset across switches.
     let mut mewxi_table_state = ratatui::widgets::TableState::default();
-    let mut last_reload: HashMap<String, Instant> = HashMap::new();
-    let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut last_full_tick = Instant::now();
     let mut setup_snapshot: Option<SetupSnapshot> = setup::inspect(no_live).ok();
     let mut setup_message: Option<String> = None;
     // Error footer auto-hide: track the currently-displayed error so we
@@ -2231,9 +2241,10 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
         }
 
-        // Drain filesystem events.
+        // Drain filesystem events — forward dirty account names to the
+        // background reload worker instead of reloading inline.
         while let Ok(name) = dirty_rx.try_recv() {
-            dirty.insert(name);
+            reloader.mark_dirty(name);
         }
 
         // Drain the self-update check result (at most one per spawn).
@@ -2256,42 +2267,26 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
         }
 
-        // Per-account debounced reload, plus a periodic safety-net refresh
-        // for live_sessions (mtime age changes purely by clock).
-        let force_tick = last_full_tick.elapsed() > Duration::from_secs(5);
-        if !dirty.is_empty() || force_tick {
-            let names: Vec<String> = if force_tick {
-                per_account.iter().map(|p| p.account.name.clone()).collect()
-            } else {
-                dirty.iter().cloned().collect()
-            };
-            // Snapshot live PIDs once per debounce wave so the marker
-            // liveness gate doesn't shell out per account.
-            let alive = live_session::alive_pids();
-            for name in names {
-                let stale = last_reload
-                    .get(&name)
-                    .map(|t| t.elapsed() > Duration::from_millis(500))
-                    .unwrap_or(true);
-                if !stale {
-                    continue;
-                }
-                if let Some(pa) = per_account.iter_mut().find(|p| p.account.name == name) {
-                    let (records, agg) =
-                        stats::load_records_and_aggregate_for(&pa.account).unwrap_or_default();
-                    pa.agg = agg;
-                    pa.price_by_session = crate::limit_attr::session_prices(
-                        &records,
-                        &crate::limit_attr::load_ledger(&pa.account),
-                    );
-                    pa.live_sessions = live_session::scan(&pa.account, &alive, &pa.live_sessions);
-                    last_reload.insert(name.clone(), Instant::now());
-                }
-                dirty.remove(&name);
+        // Apply any reload results ready from the background worker. The heavy
+        // reload wave (walkdir + aggregation + transcript scan + price
+        // attribution + the alive-PID shell-out) runs off-thread in
+        // `reloader`; here we only splice finished results into per_account.
+        // Same 500ms per-account debounce and 5s force-tick cadence as before,
+        // now enforced inside the worker; results apply on the next loop
+        // iteration (<=16ms in mewxi), which is imperceptible.
+        let mut applied_any = false;
+        while let Some(res) = reloader.try_recv() {
+            if let Some(pa) = per_account
+                .iter_mut()
+                .find(|p| p.account.name == res.account_name)
+            {
+                pa.agg = res.agg;
+                pa.price_by_session = res.price_by_session;
+                pa.live_sessions = res.live_sessions;
+                applied_any = true;
             }
-            if force_tick {
-                last_full_tick = Instant::now();
-            }
+        }
+        if applied_any {
             // Reconcile optimistic mode state: once the transcript moves
             // past the baseline snapshotted at command time, claude has
             // caught up and the optimistic guess is obsolete.
