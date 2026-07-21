@@ -223,6 +223,12 @@ impl Ctx {
             fields.insert("ctx_cap", cap);
         }
 
+        // --- git dirty-file count (hidden when cwd is None / not a repo) ---
+        let git_dirty = meta.cwd.and_then(super::git::dirty_count);
+        if let Some(n) = git_dirty {
+            fields.insert("git_dirty", n.to_string());
+        }
+
         Ctx {
             multi_account,
             billing_extra,
@@ -272,6 +278,7 @@ impl Ctx {
             "ctx_present" => self.fields.contains_key("ctx_pct"),
             "update_available" => self.fields.contains_key("update_segment"),
             "setup_incomplete" => self.fields.contains_key("hint_segment"),
+            "git_repo" => self.fields.contains_key("git_dirty"),
             _ => false,
         }
     }
@@ -394,6 +401,24 @@ mod tests {
         );
         // Absent field interpolates to nothing.
         assert_eq!(render_template(&ctx, "x{missing}y"), "xy");
+    }
+
+    #[test]
+    fn git_dirty_field_and_flag() {
+        let ctx = ctx_with(&[("git_dirty", "3")], false, false);
+        // Template interpolates the count.
+        assert_eq!(render_template(&ctx, "±{git_dirty}"), "±3");
+        // The git_repo flag is on when the field is present...
+        assert_eq!(
+            render_template_block(&ctx, &Condition::Flag("git_repo".into()), "±{git_dirty}"),
+            "±3"
+        );
+        // ...and off (block hidden) when it's absent.
+        let empty = ctx_with(&[], false, false);
+        assert_eq!(
+            render_template_block(&empty, &Condition::Flag("git_repo".into()), "±{git_dirty}"),
+            ""
+        );
     }
 
     #[test]

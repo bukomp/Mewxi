@@ -87,6 +87,9 @@ pub struct SessionMeta<'a> {
     pub thinking_enabled: bool,
     /// `effort.level` — reasoning effort: low|medium|high|xhigh|max.
     pub effort_level: Option<&'a str>,
+    /// `workspace.current_dir` (fallback `cwd`) — the session's working
+    /// directory. Drives the git_dirty block.
+    pub cwd: Option<&'a Path>,
 }
 
 /// Render the current usage as an ANSI-colored one-liner for Claude
@@ -586,6 +589,7 @@ mod golden_tests {
             model_display: Some("Opus 4.8 (1M context)"),
             thinking_enabled: true,
             effort_level: Some("high"),
+            cwd: None,
         };
         assert_identical(&account, true, None, meta, &agg, Some(&live));
     }

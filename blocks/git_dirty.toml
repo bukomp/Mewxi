@@ -1,0 +1,9 @@
+# Uncommitted-file count for the session's git repo, e.g. "| ±3".
+# {git_dirty} is how many files `git status --porcelain` reports
+# (staged + unstaged + untracked). Hidden when the session isn't inside
+# a git work tree, no session cwd is known (the watcher path), or git
+# doesn't answer within the timeout.
+id = "git_dirty"
+label = "git changes"
+when = "git_repo"
+template = " <grey>|</grey> <yellow>±{git_dirty}</yellow>"

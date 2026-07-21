@@ -13,6 +13,7 @@
 mod block;
 mod command;
 pub mod engine;
+mod git;
 
 pub use block::{parse_block, Block, BlockKind};
 
@@ -38,6 +39,7 @@ pub const DEFAULT_ORDER: &[&str] = &[
     "extra",
     "reset",
     "ctx",
+    "git_dirty",
 ];
 
 /// Parse the embedded default blocks into `(ordered default ids, by-id
@@ -225,10 +227,10 @@ pub fn new_block_skeleton(id: &str) -> String {
          #\n\
          # Fields: {{account}} {{model}} {{think}} {{five_h_segment}} {{reset_segment}}\n\
          #         {{ctx_pct}} {{ctx_cur}} {{ctx_cap}} {{extra_pct}} {{extra_amounts}}\n\
-         #         {{update_segment}} {{hint_segment}}\n\
+         #         {{update_segment}} {{hint_segment}} {{git_dirty}}\n\
          # Colors: <cyan> <grey> <yellow> <magenta> <red> <green> <blue> <white>\n\
          # when:   always · multi_account · model_present · five_h_visible · billing_extra\n\
-         #         reset_present · ctx_present · update_available · setup_incomplete\n\
+         #         reset_present · ctx_present · update_available · setup_incomplete · git_repo\n\
          #         (prefix with ! to negate, e.g. when = \"!billing_extra\")\n\
          label = \"{id}\"\n\
          when = \"always\"\n\
@@ -264,6 +266,7 @@ pub fn preview_ctx() -> Ctx {
     f.insert("ctx_pct", "\x1b[32m45%\x1b[0m".into());
     f.insert("ctx_cur", "90k".into());
     f.insert("ctx_cap", "200k".into());
+    f.insert("git_dirty", "3".into());
     Ctx::from_parts(true, false, f)
 }
 

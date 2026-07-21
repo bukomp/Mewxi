@@ -151,6 +151,7 @@ struct StatusPayload {
     model_display: Option<String>,
     thinking_enabled: bool,
     effort_level: Option<String>,
+    cwd: Option<std::path::PathBuf>,
 }
 
 /// Read Claude Code's statusLine JSON payload from stdin. Stdin may be
@@ -187,6 +188,9 @@ fn read_status_payload_from_stdin() -> StatusPayload {
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
         effort_level: str_at(&["effort", "level"]),
+        cwd: str_at(&["workspace", "current_dir"])
+            .or_else(|| str_at(&["cwd"]))
+            .map(std::path::PathBuf::from),
     }
 }
 
@@ -228,6 +232,7 @@ fn main() -> Result<()> {
                 model_display: p.model_display.as_deref(),
                 thinking_enabled: p.thinking_enabled,
                 effort_level: p.effort_level.as_deref(),
+                cwd: p.cwd.as_deref(),
             };
             let line = watch::render_status(p.transcript.as_deref(), meta, no_live);
             print!("{line}");

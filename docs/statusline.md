@@ -8,12 +8,14 @@ looks exactly as it always has; customize it only if you want to.
 A typical default line:
 
 ```
-[priv] Opus 4.8 · think:high | 5h 12.3% (live) → reset 14:30 (42m) | ctx 45% (90k/200k)
+[priv] Opus 4.8 · think:high | 5h 12.3% (live) → reset 14:30 (42m) | ctx 45% (90k/200k) | ±3
 ```
 
 Each segment above is a block: `prefix`, `model`, `five_hour`, `reset`,
-`ctx` — plus `hint`/`update` nudges and an `extra` (pay-as-you-go) meter
-that appears when you're billing past the 5h cap.
+`ctx` — plus `hint`/`update` nudges, an `extra` (pay-as-you-go) meter
+that appears when you're billing past the 5h cap, and `git_dirty`, the
+uncommitted-file count that appears last when the session is inside a
+git repo.
 
 ## The composer (easiest way)
 
@@ -99,16 +101,29 @@ template = " <grey>|</grey> <cyan>ctx</cyan> {ctx_pct} ({ctx_cur}/{ctx_cap})"
 | `{ctx_pct}` `{ctx_cur}` `{ctx_cap}` | context %, used tokens, cap |
 | `{extra_pct}` `{extra_amounts}` | extra-usage % and `($used/$limit)` |
 | `{update_segment}` `{hint_segment}` | the update / setup-incomplete nudges |
+| `{git_dirty}` | uncommitted-file count for the session's repo (staged + unstaged + untracked), as a plain number |
 
 **`when` conditions** (prefix with `!` to negate, e.g. `!billing_extra`):
 `always`, `multi_account`, `model_present`, `five_h_visible`,
 `billing_extra`, `reset_present`, `ctx_present`, `update_available`,
-`setup_incomplete`. An unknown condition keeps the block hidden.
+`setup_incomplete`, `git_repo`. An unknown condition keeps the block hidden.
+
+### The `git_dirty` block
+
+The built-in `git_dirty` block (`blocks/git_dirty.toml`) renders
+` <grey>|</grey> <yellow>±{git_dirty}</yellow>` last in the default line,
+counting staged, unstaged, and untracked files (a clean repo shows `±0`).
+It's hidden when the session isn't inside a git work tree, when no session
+cwd is known (e.g. the background watcher renders without stdin), or when
+`git` fails or doesn't answer within a fixed 300 ms timeout. Results are
+cached ~5s per directory, like command blocks.
 
 ### Command blocks
 
 Run a shell command and show its output — handy for the current git
-branch, working directory, hostname, etc.
+branch, working directory, hostname, etc. (A dirty-file count now ships
+built-in as `git_dirty`, so you don't need a custom command block just
+to see how many files have changed.)
 
 ```toml
 # blocks/git_branch.toml
