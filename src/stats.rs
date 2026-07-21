@@ -24,6 +24,16 @@
 //! results are cached on disk keyed on `(mtime, size)` under
 //! `$XDG_CACHE_HOME/mewxi/files-<slug>.json`, one file per
 //! account so concurrent watchers don't stomp on each other.
+//!
+//! Claude Code transcripts are append-only in practice, so the in-memory
+//! parse caches behind [`parse_file_cached`] and
+//! [`current_context_from_transcript`] are incremental: when a watched
+//! file grows, only the newly appended bytes are read and parsed, not
+//! the whole (potentially tens-of-MB) file. A short "guard" — the last
+//! few bytes before the previously-consumed offset — is re-checked on
+//! every growth to detect an in-place rewrite or truncation; a mismatch
+//! forces a full reparse from byte 0, so correctness never depends on
+//! the append-only assumption holding.
 
 use crate::accounts::Account;
 use crate::debug_log::{LogKind, LogOrigin};
@@ -203,33 +213,185 @@ fn save_file_cache(path: &Path, cache: &FileCache) {
     }
 }
 
+/// Bytes of guard kept before an offset to detect an in-place rewrite or
+/// truncation on the next incremental read (see [`read_tail`]).
+const GUARD_LEN: u64 = 64;
+
+/// Outcome of attempting to read only the bytes appended to a grown file.
+enum TailRead {
+    /// Verified append: the guard bytes immediately before `offset` on
+    /// disk still match what was recorded last time, so everything from
+    /// `offset` onward is genuinely new. `text` holds exactly the newly
+    /// *complete* lines (terminated by `\n`); a trailing partial line (the
+    /// writer mid-flush) is held back so it isn't parsed until it
+    /// completes. `new_offset`/`new_guard` are ready to store for the
+    /// next call.
+    Append { text: String, new_offset: u64, new_guard: Vec<u8> },
+    /// The guard didn't match (or the read was otherwise too short) —
+    /// the file was rewritten or truncated in place rather than appended
+    /// to. Caller must fall back to a full reparse.
+    Reparse,
+}
+
+/// Read only the bytes appended to `path` since `offset`, verifying that
+/// the `guard` bytes (the up-to-[`GUARD_LEN`] bytes immediately before
+/// `offset` as of the last read) are still present on disk immediately
+/// before `offset`. A mismatch means the file was rewritten/truncated in
+/// place rather than purely appended to, and the caller must reparse from
+/// scratch — this is what keeps the incremental path correct even though
+/// append-only is only the *common* case, not a guarantee.
+fn read_tail(path: &Path, offset: u64, guard: &[u8]) -> std::io::Result<TailRead> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let read_from = offset.saturating_sub(guard.len() as u64);
+    f.seek(SeekFrom::Start(read_from))?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+
+    let gl = (offset - read_from) as usize;
+    if buf.len() < gl || &buf[..gl] != guard {
+        return Ok(TailRead::Reparse);
+    }
+
+    let tail = &buf[gl..];
+    match tail.iter().rposition(|&b| b == b'\n') {
+        None => {
+            // No newly-completed line yet; nothing to parse, offset/guard unchanged.
+            Ok(TailRead::Append { text: String::new(), new_offset: offset, new_guard: guard.to_vec() })
+        }
+        Some(last_nl) => {
+            let complete_end = gl + last_nl + 1;
+            let text = String::from_utf8_lossy(&tail[..=last_nl]).into_owned();
+            let new_offset = offset + last_nl as u64 + 1;
+            let guard_start = complete_end.saturating_sub(GUARD_LEN.min(new_offset) as usize);
+            let new_guard = buf[guard_start..complete_end].to_vec();
+            Ok(TailRead::Append { text, new_offset, new_guard })
+        }
+    }
+}
+
+/// Byte offset just past the last complete line, and the guard bytes
+/// leading up to it, for a freshly fully-parsed file's content. Shared by
+/// every full-reparse path so the incremental offset/guard bookkeeping is
+/// computed the same way everywhere.
+fn offset_and_guard_for(content: &str) -> (u64, Vec<u8>) {
+    let offset = content.rfind('\n').map(|i| i as u64 + 1).unwrap_or(0);
+    let bytes = content.as_bytes();
+    let start = (offset as usize).saturating_sub(GUARD_LEN as usize);
+    let guard = bytes[start..offset as usize].to_vec();
+    (offset, guard)
+}
+
+/// One file's cached parse state: the records plus enough bookkeeping to
+/// extend them incrementally on the next call. `tail_trusted` is false
+/// only for entries seeded from the on-disk [`FileCache`] (see
+/// [`scan_all`]) where `offset`/`guard` are assumed (offset = size, empty
+/// guard) rather than read from disk — the first growth after seeding
+/// must do one full reparse to establish a byte-accurate offset/guard
+/// before incremental reads are safe.
+struct ParsedEntry {
+    mtime: u64,
+    size: u64,
+    offset: u64,
+    guard: Vec<u8>,
+    tail_trusted: bool,
+    records: Vec<UsageRecord>,
+}
+
 /// Process-wide cache of per-file parse results, populated as
 /// [`scan_all`] runs. Lets [`parse_file_cached`] (used by
 /// [`crate::live_session::scan`]) return the freshest records without
-/// re-reading the file on every UI tick.
-fn parsed_cache() -> &'static Mutex<HashMap<PathBuf, (u64, u64, Vec<UsageRecord>)>> {
-    static S: OnceLock<Mutex<HashMap<PathBuf, (u64, u64, Vec<UsageRecord>)>>> = OnceLock::new();
+/// re-reading the file on every UI tick. Entries carry a byte
+/// offset/guard so a grown file can be extended incrementally instead of
+/// re-read in full (see module docs).
+fn parsed_cache() -> &'static Mutex<HashMap<PathBuf, ParsedEntry>> {
+    static S: OnceLock<Mutex<HashMap<PathBuf, ParsedEntry>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Parse a transcript file, reusing the process-wide cache when the
-/// file's `(mtime, size)` matches the cached entry. Public so the
-/// live-session detector can share work with [`scan_all`].
+/// Parse a transcript file, reusing the process-wide cache when possible.
+/// Public so the live-session detector can share work with [`scan_all`].
+///
+/// Three paths, cheapest first:
+///  - `(mtime, size)` unchanged → clone cached records, no I/O.
+///  - File grew and the cached offset/guard are trustworthy → read and
+///    parse only the newly appended complete lines, append to the cached
+///    records. A guard mismatch (rewrite/truncation in place) falls back
+///    to the next case.
+///  - Otherwise (new file, shrank, or an untrusted seeded offset) → full
+///    reparse.
 pub fn parse_file_cached(path: &Path) -> Result<Vec<UsageRecord>> {
     let meta = fs::metadata(path)?;
     let mtime = mtime_unix(&meta);
     let size = meta.len();
     let key = path.to_path_buf();
+
     if let Ok(g) = parsed_cache().lock() {
-        if let Some((m, s, recs)) = g.get(&key) {
-            if *m == mtime && *s == size {
-                return Ok(recs.clone());
+        if let Some(e) = g.get(&key) {
+            if e.mtime == mtime && e.size == size {
+                return Ok(e.records.clone());
             }
         }
     }
-    let recs = parse_file(path).unwrap_or_default();
+
+    let grown_trusted = {
+        let g = parsed_cache().lock().ok();
+        g.and_then(|g| {
+            g.get(&key).and_then(|e| {
+                if size > e.size && e.tail_trusted {
+                    Some((e.offset, e.guard.clone(), e.records.clone()))
+                } else {
+                    None
+                }
+            })
+        })
+    };
+
+    if let Some((offset, guard, mut records)) = grown_trusted {
+        match read_tail(path, offset, &guard) {
+            Ok(TailRead::Append { text, new_offset, new_guard }) => {
+                let project = project_name_from_path(path);
+                for line in text.lines() {
+                    if let Some(r) = parse_record_line(line, &project) {
+                        records.push(r);
+                    }
+                }
+                if let Ok(mut g) = parsed_cache().lock() {
+                    g.insert(
+                        key,
+                        ParsedEntry {
+                            mtime,
+                            size,
+                            offset: new_offset,
+                            guard: new_guard,
+                            tail_trusted: true,
+                            records: records.clone(),
+                        },
+                    );
+                }
+                return Ok(records);
+            }
+            Ok(TailRead::Reparse) | Err(_) => {
+                // Fall through to full reparse below.
+            }
+        }
+    }
+
+    // Full reparse: read the file once, deriving both the records and the
+    // byte offset/guard that future growth extends incrementally. This is
+    // the only path that reads the whole file (new file, shrink, rewrite,
+    // or an untrusted seeded offset); every subsequent append reads only
+    // the newly appended tail.
+    let content = fs::read_to_string(path).unwrap_or_default();
+    let project = project_name_from_path(path);
+    let recs: Vec<UsageRecord> =
+        content.lines().filter_map(|l| parse_record_line(l, &project)).collect();
+    let (offset, guard) = offset_and_guard_for(&content);
     if let Ok(mut g) = parsed_cache().lock() {
-        g.insert(key, (mtime, size, recs.clone()));
+        g.insert(
+            key,
+            ParsedEntry { mtime, size, offset, guard, tail_trusted: true, records: recs.clone() },
+        );
     }
     Ok(recs)
 }
@@ -281,7 +443,11 @@ pub fn scan_all(root: &Path, cache_path: Option<&Path>) -> Result<Vec<UsageRecor
             _ => {
                 changed = true;
                 files_parsed += 1;
-                match parse_file(path) {
+                // Route through the incremental in-memory cache rather
+                // than a raw full parse — an actively-written file that
+                // already has a byte-accurate offset/guard entry only
+                // pays for the appended tail here, not the whole file.
+                match parse_file_cached(path) {
                     Ok(recs) => recs,
                     Err(e) => {
                         crate::debug_log::log_event(
@@ -310,10 +476,34 @@ pub fn scan_all(root: &Path, cache_path: Option<&Path>) -> Result<Vec<UsageRecor
     let mut ordered: Vec<(&PathBuf, &FileEntry)> = next.iter().collect();
     ordered.sort_by(|a, b| a.0.cmp(b.0));
     // Populate the process-wide parsed cache so live_session::scan can
-    // skip re-reading these files this tick.
+    // skip re-reading these files this tick. Only seed files whose
+    // in-memory entry is missing or stale — a changed file already got a
+    // byte-accurate, tail_trusted entry from parse_file_cached above, and
+    // clobbering it here would erase its offset/guard and force the next
+    // growth to do a full reparse instead of an incremental one. An
+    // unchanged (cache-hit) file has no in-memory entry yet; seed it with
+    // tail_trusted:false since we don't know its true on-disk offset —
+    // the first future growth reparses fully to establish one, and every
+    // growth after that is incremental.
     if let Ok(mut g) = parsed_cache().lock() {
         for (p, fe) in &ordered {
-            g.insert((*p).clone(), (fe.mtime_unix, fe.size, fe.records.clone()));
+            let stale = match g.get(*p) {
+                Some(existing) => existing.mtime != fe.mtime_unix || existing.size != fe.size,
+                None => true,
+            };
+            if stale {
+                g.insert(
+                    (*p).clone(),
+                    ParsedEntry {
+                        mtime: fe.mtime_unix,
+                        size: fe.size,
+                        offset: fe.size,
+                        guard: Vec::new(),
+                        tail_trusted: false,
+                        records: fe.records.clone(),
+                    },
+                );
+            }
         }
     }
     for (_, fe) in ordered {
@@ -366,86 +556,93 @@ fn file_label(path: &Path) -> String {
         .to_string()
 }
 
+/// Parse one JSONL line into a [`UsageRecord`], or `None` if the line
+/// isn't a priced assistant message (wrong `type`, missing usage, or all
+/// token counts are zero — e.g. a stop event). Shared by the full-file
+/// parse ([`parse_file`]) and the incremental tail parse in
+/// [`parse_file_cached`] so there is exactly one implementation of the
+/// per-line extraction logic.
+fn parse_record_line(line: &str, project: &str) -> Option<UsageRecord> {
+    if line.is_empty() {
+        return None;
+    }
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        return None;
+    }
+    let msg = v.get("message")?;
+    let usage = msg.get("usage")?;
+
+    let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_read = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    // cache_creation has ephemeral_5m / ephemeral_1h; fall back to cache_creation_input_tokens as 5m
+    let (cw5, cw1h) = if let Some(cc) = usage.get("cache_creation") {
+        (
+            cc.get("ephemeral_5m_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            cc.get("ephemeral_1h_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        )
+    } else {
+        let c = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        (c, 0)
+    };
+
+    // Skip rows with no tokens at all (stop events)
+    if input + output + cache_read + cw5 + cw1h == 0 {
+        return None;
+    }
+
+    let model = msg.get("model").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+    let timestamp = v
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+    let session_id = v.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let message_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let message_id = if message_id.is_empty() {
+        // Fallback: uuid from outer envelope
+        v.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    } else {
+        message_id
+    };
+    let is_sidechain = v.get("isSidechain").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let p = price_for(&model);
+    let cost_usd = (input as f64 * p.input
+        + output as f64 * p.output
+        + cache_read as f64 * p.cache_read
+        + cw5 as f64 * p.cache_write_5m
+        + cw1h as f64 * p.cache_write_1h)
+        / 1_000_000.0;
+
+    Some(UsageRecord {
+        timestamp,
+        session_id,
+        project: project.to_string(),
+        model,
+        input,
+        output,
+        cache_read,
+        cache_write_5m: cw5,
+        cache_write_1h: cw1h,
+        cost_usd,
+        message_id,
+        is_sidechain,
+    })
+}
+
+/// Full-file parse into records. `parse_file_cached` inlines this same
+/// `parse_record_line` fold on its full-reparse path (it needs the raw
+/// content anyway, to derive the incremental offset/guard) so this is now
+/// only a cold-parse reference for the tests.
+#[cfg(test)]
 fn parse_file(path: &Path) -> Result<Vec<UsageRecord>> {
     let content = std::fs::read_to_string(path)?;
     let project = project_name_from_path(path);
-    let mut out = Vec::new();
-    for line in content.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-                continue;
-            }
-            let Some(msg) = v.get("message") else { continue };
-            let Some(usage) = msg.get("usage") else { continue };
-
-            let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let cache_read = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-
-            // cache_creation has ephemeral_5m / ephemeral_1h; fall back to cache_creation_input_tokens as 5m
-            let (cw5, cw1h) = if let Some(cc) = usage.get("cache_creation") {
-                (
-                    cc.get("ephemeral_5m_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                    cc.get("ephemeral_1h_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                )
-            } else {
-                let c = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                (c, 0)
-            };
-
-            // Skip rows with no tokens at all (stop events)
-            if input + output + cache_read + cw5 + cw1h == 0 {
-                continue;
-            }
-
-            let model = msg.get("model").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-            let timestamp = v
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|d| d.with_timezone(&Utc))
-                .unwrap_or_else(Utc::now);
-            let session_id = v.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let message_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let message_id = if message_id.is_empty() {
-                // Fallback: uuid from outer envelope
-                v.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string()
-            } else {
-                message_id
-            };
-            let is_sidechain = v
-                .get("isSidechain")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let p = price_for(&model);
-            let cost_usd = (input as f64 * p.input
-                + output as f64 * p.output
-                + cache_read as f64 * p.cache_read
-                + cw5 as f64 * p.cache_write_5m
-                + cw1h as f64 * p.cache_write_1h)
-                / 1_000_000.0;
-
-            out.push(UsageRecord {
-                timestamp,
-                session_id,
-                project: project.clone(),
-                model,
-                input,
-                output,
-                cache_read,
-                cache_write_5m: cw5,
-                cache_write_1h: cw1h,
-                cost_usd,
-                message_id,
-                is_sidechain,
-            });
-        }
-    }
-    Ok(out)
+    Ok(content.lines().filter_map(|l| parse_record_line(l, &project)).collect())
 }
 
 fn project_name_from_path(path: &Path) -> String {
@@ -596,47 +793,146 @@ pub struct SessionContext {
     pub model: String,
 }
 
+/// `(ctx_tokens, model)` for a non-sidechain assistant message whose
+/// context size is nonzero, or `None` if the line doesn't qualify
+/// (wrong type, sidechain, missing usage, or ctx == 0). Mirrors
+/// [`parse_record_line`]'s shape — one implementation shared by the
+/// full-file scan and the incremental tail scan in
+/// [`current_context_from_transcript`].
+fn ctx_from_line(line: &str) -> Option<(u64, String)> {
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        return None;
+    }
+    // Sub-agents (Task tool, plan-mode helpers) use their own
+    // model + context window. Skip them so the cap stays anchored
+    // to the main agent — otherwise a one-off Sonnet helper would
+    // briefly inflate the displayed cap to Sonnet's 1M.
+    if v.get("isSidechain").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    let msg = v.get("message")?;
+    let usage = msg.get("usage")?;
+    let input = usage.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+    let cread = usage.get("cache_read_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+    let (c5, c1h) = if let Some(cc) = usage.get("cache_creation") {
+        (
+            cc.get("ephemeral_5m_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+            cc.get("ephemeral_1h_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+        )
+    } else {
+        (usage.get("cache_creation_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0), 0)
+    };
+    let ctx = input + cread + c5 + c1h;
+    if ctx == 0 {
+        return None;
+    }
+    let model = msg.get("model").and_then(|x| x.as_str()).unwrap_or("unknown").to_string();
+    Some((ctx, model))
+}
+
+/// One transcript's cached context-tracking state, mirroring
+/// [`ParsedEntry`]'s offset/guard incremental scheme but tracking the
+/// rolling `(max_observed, current)` fold instead of a record list —
+/// see [`current_context_from_transcript`].
+struct CtxEntry {
+    mtime: u64,
+    size: u64,
+    offset: u64,
+    guard: Vec<u8>,
+    tail_trusted: bool,
+    max_observed: u64,
+    current: Option<(u64, String)>,
+}
+
+/// Process-wide cache for [`current_context_from_transcript`], separate
+/// from [`parsed_cache`] since it tracks a different fold (rolling
+/// max/current context, not a record list) over the same files.
+fn ctx_cache() -> &'static Mutex<HashMap<PathBuf, CtxEntry>> {
+    static S: OnceLock<Mutex<HashMap<PathBuf, CtxEntry>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Parse a transcript and return:
-///  - current context size (last assistant message's input + cache tokens)
+///  - current context size (last non-sidechain assistant message's
+///    input + cache tokens)
 ///  - max context size ever observed in this session (to detect 1M tier)
-///  - model id of the most recent assistant message
+///  - model id of the most recent non-sidechain assistant message
+///
+/// Incremental like [`parse_file_cached`]: an append only re-folds the
+/// newly-completed lines into the cached `(max_observed, current)` state;
+/// a guard mismatch (rewrite/truncation) forces a full reparse.
 pub fn current_context_from_transcript(path: &Path) -> Option<SessionContext> {
+    let meta = fs::metadata(path).ok()?;
+    let mtime = mtime_unix(&meta);
+    let size = meta.len();
+    let key = path.to_path_buf();
+
+    if let Ok(g) = ctx_cache().lock() {
+        if let Some(e) = g.get(&key) {
+            if e.mtime == mtime && e.size == size {
+                let (cur, model) = e.current.clone()?;
+                return Some(SessionContext { current: cur, max_observed: e.max_observed, model });
+            }
+        }
+    }
+
+    let grown_trusted = {
+        let g = ctx_cache().lock().ok();
+        g.and_then(|g| {
+            g.get(&key).and_then(|e| {
+                if size > e.size && e.tail_trusted {
+                    Some((e.offset, e.guard.clone(), e.max_observed, e.current.clone()))
+                } else {
+                    None
+                }
+            })
+        })
+    };
+
+    if let Some((offset, guard, mut max_observed, mut current)) = grown_trusted {
+        if let Ok(TailRead::Append { text, new_offset, new_guard }) = read_tail(path, offset, &guard) {
+            for line in text.lines() {
+                if let Some((ctx, model)) = ctx_from_line(line) {
+                    max_observed = max_observed.max(ctx);
+                    current = Some((ctx, model));
+                }
+            }
+            if let Ok(mut g) = ctx_cache().lock() {
+                g.insert(
+                    key,
+                    CtxEntry {
+                        mtime,
+                        size,
+                        offset: new_offset,
+                        guard: new_guard,
+                        tail_trusted: true,
+                        max_observed,
+                        current: current.clone(),
+                    },
+                );
+            }
+            let (cur, model) = current?;
+            return Some(SessionContext { current: cur, max_observed, model });
+        }
+        // Guard mismatch or I/O error — fall through to full reparse.
+    }
+
     let content = std::fs::read_to_string(path).ok()?;
-    let mut current: Option<(u64, String)> = None;
     let mut max_observed: u64 = 0;
+    let mut current: Option<(u64, String)> = None;
     for line in content.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-            continue;
+        if let Some((ctx, model)) = ctx_from_line(line) {
+            max_observed = max_observed.max(ctx);
+            current = Some((ctx, model));
         }
-        // Sub-agents (Task tool, plan-mode helpers) use their own
-        // model + context window. Skip them so the cap stays anchored
-        // to the main agent — otherwise a one-off Sonnet helper would
-        // briefly inflate the displayed cap to Sonnet's 1M.
-        if v.get("isSidechain").and_then(|x| x.as_bool()).unwrap_or(false) {
-            continue;
-        }
-        let Some(msg) = v.get("message") else { continue };
-        let Some(usage) = msg.get("usage") else { continue };
-        let input = usage.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-        let cread = usage.get("cache_read_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-        let (c5, c1h) = if let Some(cc) = usage.get("cache_creation") {
-            (
-                cc.get("ephemeral_5m_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                cc.get("ephemeral_1h_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-            )
-        } else {
-            (usage.get("cache_creation_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0), 0)
-        };
-        let ctx = input + cread + c5 + c1h;
-        if ctx == 0 {
-            continue;
-        }
-        if ctx > max_observed {
-            max_observed = ctx;
-        }
-        let model = msg.get("model").and_then(|x| x.as_str()).unwrap_or("unknown").to_string();
-        current = Some((ctx, model));
+    }
+    let (offset, guard) = offset_and_guard_for(&content);
+    if let Ok(mut g) = ctx_cache().lock() {
+        g.insert(
+            key,
+            CtxEntry { mtime, size, offset, guard, tail_trusted: true, max_observed, current: current.clone() },
+        );
     }
     let (cur, model) = current?;
     Some(SessionContext { current: cur, max_observed, model })
@@ -932,5 +1228,230 @@ mod trailing_tests {
         assert!((agg.trailing_7d_cost_by_session["session-a"] - 4.0).abs() < 1e-9);
         assert!((agg.trailing_7d_cost_by_session["session-b"] - 4.0).abs() < 1e-9);
         assert!(!agg.trailing_7d_cost_by_session.contains_key("nonexistent-session"));
+    }
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::*;
+    use std::fs;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    /// One assistant-message JSONL line with real (nonzero) token counts,
+    /// so the resulting record isn't priced/zeroed out. `cache_read` and
+    /// `input` are caller-controlled so tests can build predictable
+    /// context-token sums; `ephemeral_5m` is fixed at 10 for simplicity.
+    fn assistant_line(
+        id: &str,
+        session: &str,
+        ts: &str,
+        model: &str,
+        input: u64,
+        cache_read: u64,
+        sidechain: bool,
+    ) -> String {
+        let side = if sidechain { r#","isSidechain":true"# } else { "" };
+        format!(
+            r#"{{"type":"assistant","sessionId":"{session}","timestamp":"{ts}"{side},"message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":{input},"output_tokens":50,"cache_read_input_tokens":{cache_read},"cache_creation":{{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":0}}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn append_only_growth_matches_full_reparse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t1.jsonl");
+
+        let lines: Vec<String> = (0..5)
+            .map(|i| assistant_line(&format!("m{i}"), "s1", "2026-07-21T10:00:00Z", "claude-sonnet-4-5", 1000 + i, 2000, false))
+            .collect();
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let a = parse_file_cached(&path).unwrap();
+        assert_eq!(a.len(), 5);
+
+        let more: Vec<String> = (5..8)
+            .map(|i| assistant_line(&format!("m{i}"), "s1", "2026-07-21T10:05:00Z", "claude-opus-4-5", 1000 + i, 2000, false))
+            .collect();
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            for l in &more {
+                writeln!(f, "{l}").unwrap();
+            }
+        }
+
+        let b = parse_file_cached(&path).unwrap();
+        assert_eq!(b.len(), 8);
+
+        // Cold full parse of the final bytes, from a brand-new path so the
+        // in-memory cache can't short-circuit it.
+        let cold_path = tmp.path().join("t1_cold.jsonl");
+        fs::copy(&path, &cold_path).unwrap();
+        let cold = parse_file(&cold_path).unwrap();
+
+        assert_eq!(b.len(), cold.len());
+        for (x, y) in b.iter().zip(cold.iter()) {
+            assert_eq!(x.message_id, y.message_id);
+            assert_eq!(x.model, y.model);
+            assert_eq!(x.total_tokens(), y.total_tokens());
+        }
+        assert_eq!(
+            b.iter().map(|r| r.message_id.clone()).collect::<Vec<_>>(),
+            (0..8).map(|i| format!("m{i}")).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn partial_trailing_line_not_consumed_until_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t2.jsonl");
+
+        let complete = assistant_line("m0", "s1", "2026-07-21T10:00:00Z", "claude-sonnet-4-5", 1000, 2000, false);
+        let full_line1 = assistant_line("m1", "s1", "2026-07-21T10:01:00Z", "claude-sonnet-4-5", 1500, 2000, false);
+        let split_at = full_line1.len() / 2;
+        let (frag_prefix, frag_rest) = full_line1.split_at(split_at);
+
+        // Complete line, then a trailing fragment with NO newline.
+        fs::write(&path, format!("{complete}\n{frag_prefix}")).unwrap();
+
+        let a = parse_file_cached(&path).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].message_id, "m0");
+
+        // Complete the fragment, add a newline, then one more full line.
+        let next_line = assistant_line("m2", "s1", "2026-07-21T10:02:00Z", "claude-sonnet-4-5", 1200, 2000, false);
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            write!(f, "{frag_rest}\n{next_line}\n").unwrap();
+        }
+
+        let b = parse_file_cached(&path).unwrap();
+        assert_eq!(
+            b.iter().map(|r| r.message_id.clone()).collect::<Vec<_>>(),
+            vec!["m0".to_string(), "m1".to_string(), "m2".to_string()]
+        );
+
+        let cold_path = tmp.path().join("t2_cold.jsonl");
+        fs::copy(&path, &cold_path).unwrap();
+        let cold = parse_file(&cold_path).unwrap();
+        assert_eq!(b.len(), cold.len());
+        for (x, y) in b.iter().zip(cold.iter()) {
+            assert_eq!(x.message_id, y.message_id);
+            assert_eq!(x.total_tokens(), y.total_tokens());
+        }
+    }
+
+    #[test]
+    fn rewrite_or_truncation_forces_full_reparse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t3.jsonl");
+
+        let lines: Vec<String> = (0..4)
+            .map(|i| assistant_line(&format!("m{i}"), "s1", "2026-07-21T10:00:00Z", "claude-sonnet-4-5", 1000 + i, 2000, false))
+            .collect();
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let a = parse_file_cached(&path).unwrap();
+        assert_eq!(a.len(), 4);
+
+        // Rewrite in place with different, shorter content — size shrinks,
+        // so the incremental path must be discarded in favor of a full
+        // reparse rather than treating this as a truncated-but-consistent
+        // append.
+        let new_line = assistant_line("z0", "s2", "2026-07-21T11:00:00Z", "claude-opus-4-5", 500, 100, false);
+        fs::write(&path, format!("{new_line}\n")).unwrap();
+
+        let b = parse_file_cached(&path).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].message_id, "z0");
+
+        let cold_path = tmp.path().join("t3_cold.jsonl");
+        fs::copy(&path, &cold_path).unwrap();
+        let cold = parse_file(&cold_path).unwrap();
+        assert_eq!(b.len(), cold.len());
+        assert_eq!(b[0].message_id, cold[0].message_id);
+        assert_eq!(b[0].total_tokens(), cold[0].total_tokens());
+    }
+
+    #[test]
+    fn grown_but_rewritten_tail_guard_mismatch_forces_full_reparse() {
+        // A file that grows in total size but whose *earlier* bytes were
+        // also rewritten (not a pure append) must still be caught: the
+        // guard bytes immediately before the old offset won't match, so
+        // read_tail must report Reparse rather than silently splicing
+        // stale + new content together.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t3b.jsonl");
+
+        let original: Vec<String> = (0..3)
+            .map(|i| assistant_line(&format!("orig{i}"), "s1", "2026-07-21T10:00:00Z", "claude-sonnet-4-5", 1000 + i, 2000, false))
+            .collect();
+        fs::write(&path, original.join("\n") + "\n").unwrap();
+        let a = parse_file_cached(&path).unwrap();
+        assert_eq!(a.len(), 3);
+
+        // Replace wholesale with a longer, entirely different set of lines.
+        let replaced: Vec<String> = (0..6)
+            .map(|i| assistant_line(&format!("new{i}"), "s2", "2026-07-21T12:00:00Z", "claude-opus-4-5", 2000 + i, 3000, false))
+            .collect();
+        fs::write(&path, replaced.join("\n") + "\n").unwrap();
+
+        let b = parse_file_cached(&path).unwrap();
+        let cold_path = tmp.path().join("t3b_cold.jsonl");
+        fs::copy(&path, &cold_path).unwrap();
+        let cold = parse_file(&cold_path).unwrap();
+
+        assert_eq!(b.len(), cold.len());
+        for (x, y) in b.iter().zip(cold.iter()) {
+            assert_eq!(x.message_id, y.message_id);
+        }
+        assert!(b.iter().all(|r| r.message_id.starts_with("new")));
+    }
+
+    #[test]
+    fn context_tracking_incremental_matches_cold_reparse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t4.jsonl");
+
+        // Early high-context line (simulates approaching the 1M cap).
+        let l0 = assistant_line("m0", "s1", "2026-07-21T09:00:00Z", "claude-opus-4-5", 900_000, 0, false);
+        // Later, lower-context lines.
+        let l1 = assistant_line("m1", "s1", "2026-07-21T09:05:00Z", "claude-sonnet-4-5", 1000, 500, false);
+        // Sidechain line with a huge ctx that must be ignored entirely.
+        let l2 = assistant_line("side0", "s1", "2026-07-21T09:06:00Z", "claude-haiku-4-5", 999_000, 0, true);
+        fs::write(&path, format!("{l0}\n{l1}\n{l2}\n")).unwrap();
+
+        let ctx1 = current_context_from_transcript(&path).unwrap();
+        assert_eq!(ctx1.max_observed, 900_010); // 900_000 input + 10 ephemeral_5m
+        assert_eq!(ctx1.model, "claude-sonnet-4-5"); // last non-sidechain line
+
+        // Append more lower-context lines, plus another sidechain line.
+        let l3 = assistant_line("m3", "s1", "2026-07-21T09:10:00Z", "claude-sonnet-4-5", 2000, 500, false);
+        let side1 = assistant_line("side1", "s1", "2026-07-21T09:10:30Z", "claude-haiku-4-5", 500_000, 0, true);
+        let l4 = assistant_line("m4", "s1", "2026-07-21T09:11:00Z", "claude-opus-4-5", 3000, 500, false);
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(f, "{l3}").unwrap();
+            writeln!(f, "{side1}").unwrap();
+            writeln!(f, "{l4}").unwrap();
+        }
+
+        let ctx2 = current_context_from_transcript(&path).unwrap();
+
+        let cold_path = tmp.path().join("t4_cold.jsonl");
+        fs::copy(&path, &cold_path).unwrap();
+        let cold = current_context_from_transcript(&cold_path).unwrap();
+
+        assert_eq!(ctx2.current, cold.current);
+        assert_eq!(ctx2.max_observed, cold.max_observed);
+        assert_eq!(ctx2.model, cold.model);
+
+        // The historical high from m0 is retained even though later
+        // messages have much smaller context…
+        assert_eq!(ctx2.max_observed, 900_010);
+        // …while `current` tracks the last non-sidechain line (m4), and
+        // the sidechain lines never influence either field.
+        assert_eq!(ctx2.model, "claude-opus-4-5");
+        assert_eq!(ctx2.current, 3000 + 500 + 10);
     }
 }
