@@ -18,6 +18,8 @@ mod accounts_panel;
 mod font;
 mod fx;
 mod palette;
+mod score_store;
+pub(super) mod scores_modal;
 mod streaks;
 mod table;
 mod visualizer;
@@ -177,7 +179,7 @@ pub fn render(
 
     // `Del kill` only when the selected row is a mewxi-driven session —
     // same gating as view 1's footer. `? help` always.
-    let mut hint = String::from("↑/↓ select · Enter open · n new");
+    let mut hint = String::from("↑/↓ select · Enter open · n new · s scores");
     if selected_driven {
         hint.push_str(" · Del kill");
     }
@@ -189,15 +191,21 @@ pub fn render(
         return;
     }
 
-    // Top-level sessions only — sub-agent rows in the flattened list
-    // belong to view 1's tree and would inflate the counts here.
+    // Top-level sessions only — used for the "an agent came online"
+    // shake pulse below.
     let active_top = sessions
         .iter()
         .filter(|s| s.subagent.is_none() && s.state == SessionState::Active)
         .count();
+    // The HUD's combo is parallelism width: every agent working right
+    // now, sub-agents included — a session fanning out to N sub-agents
+    // counts as 1 + N. Sub-agent rows only exist while their delegation
+    // runs, so their presence *is* their activity.
+    let workers =
+        active_top + sessions.iter().filter(|s| s.subagent.is_some()).count();
 
     let hud = if cfg.streaks {
-        Some(streaks::tick(active_top))
+        Some(streaks::tick(workers))
     } else {
         None
     };
@@ -281,7 +289,7 @@ pub fn render(
             hud.as_ref(),
             headline_phase,
             marquee_offset,
-            active_top,
+            workers,
             sessions,
         );
     }
@@ -309,7 +317,13 @@ pub fn render(
     // Screen-shake post-pass — mutates already-rendered cells within
     // the block, so it must run last. The footer below the block is
     // deliberately left steady.
-    fx::apply_shake(f.buffer_mut(), block_area, cfg.shake, cfg.intensity, active_top > 0);
+    fx::apply_shake(f.buffer_mut(), block_area, cfg.shake, cfg.intensity, workers > 0);
+}
+
+/// Flush the arcade score state to the local status file — called by
+/// the event loop once on shutdown so the tail of a run isn't lost.
+pub(super) fn flush_scores() {
+    streaks::flush_scores();
 }
 
 /// Headline shimmer/marquee phase state — a steady independent clock

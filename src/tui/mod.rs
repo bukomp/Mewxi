@@ -1439,6 +1439,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     // recomputed fresh each time it's opened from the current view/session
     // context (see the `?` key arm below).
     let mut help_modal_state: Option<help_modal::HelpModal> = None;
+    let mut scores_modal: Option<view_mewxi::scores_modal::ScoresModal> = None;
 
     // Status-line composer modal (opened from the Config view). Owns
     // every keystroke while open.
@@ -2147,6 +2148,9 @@ fn run_loop<B: ratatui::backend::Backend>(
             if let Some(modal) = update_prompt_modal.as_ref() {
                 modal.render(f, f.area());
             }
+            if let Some(modal) = scores_modal.as_ref() {
+                modal.render(f, f.area());
+            }
             if let Some(modal) = help_modal_state.as_ref() {
                 modal.render(f, f.area());
             }
@@ -2649,6 +2653,16 @@ fn run_loop<B: ratatui::backend::Backend>(
                             }
                             continue;
                         }
+                    }
+                    // Score-board modal owns every keystroke while open.
+                    if let Some(modal) = scores_modal.as_mut() {
+                        match modal.handle_key(k) {
+                            view_mewxi::scores_modal::ScoresOutcome::Stay => {}
+                            view_mewxi::scores_modal::ScoresOutcome::Close => {
+                                scores_modal = None;
+                            }
+                        }
+                        continue;
                     }
                     // `?` help modal owns every keystroke while open — route first so no
                     // shortcut fires underneath it.
@@ -3578,6 +3592,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 let _ = cmd_tx.send(LiveCmd::Stop);
                             }
                             break;
+                        }
+                        KeyCode::Char('s') if mode == ViewMode::Mewxi => {
+                            scores_modal = Some(view_mewxi::scores_modal::ScoresModal::new());
                         }
                         KeyCode::Char('?') => {
                             let view = match mode {
@@ -4549,6 +4566,8 @@ fn run_loop<B: ratatui::backend::Backend>(
             }
         }
     }
+
+    view_mewxi::flush_scores();
 
     // Tear down every driven session before we surrender the TUI. Kill
     // pending spawns too — their child may have rendered but never made

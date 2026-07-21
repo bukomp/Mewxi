@@ -184,6 +184,11 @@ pub fn sections_for(ctx: &HelpCtx) -> Vec<HelpSection> {
             if !entries.is_empty() {
                 sections.push(HelpSection { title: "Sessions".into(), entries });
             }
+
+            sections.push(HelpSection {
+                title: "Rave".into(),
+                entries: vec![("s".into(), "score board".into())],
+            });
         }
     }
 
@@ -473,6 +478,20 @@ mod tests {
             let total_entries: usize = sections.iter().map(|s| s.entries.len()).sum();
             assert!(total_entries > 0, "{view:?} produced sections with no entries");
         }
+    }
+
+    #[test]
+    fn mewxi_advertises_score_board_key() {
+        let ctx = HelpCtx {
+            view: ViewKind::Mewxi,
+            has_sessions: false,
+            selected_driven: false,
+            session: None,
+        };
+        assert!(
+            all_pairs(&ctx).iter().any(|(k, a)| k == "s" && a == "score board"),
+            "Mewxi view must advertise the `s` score-board key even with no sessions"
+        );
     }
 
     #[test]

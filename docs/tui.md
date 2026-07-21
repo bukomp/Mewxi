@@ -100,13 +100,27 @@ screen, plus:
   runs, or edits, settle to a mid-level while it thinks or reads, and
   decay to an ember when it idles — a music visualizer that follows
   your agents instead of music.
-- **Streak HUD** — an arcade band above the panels: COMBO (active
-  agents right now), STREAK (continuous time with ≥1 agent active, with
-  a 5s grace so brief gaps don't reset it), BEST (longest streak this
-  run), and SCORE (accumulated active-agent-seconds). On a tall enough
+- **Streak HUD** — an arcade band above the panels, tuned to reward
+  *parallel* productivity: COMBO (agents working right now, sub-agents
+  included — this is the score multiplier), STREAK (continuous time
+  with ≥2 agents in parallel; a 15s grace bridges the gap between
+  worker waves, but solo time doesn't build it), SCORE (the current
+  run's score — each working agent earns points per second times the
+  combo, so 4 parallel agents score 16× one, and streak tiers add +25%
+  each; the run ends after 15s with no agents working, banking the
+  score and resetting to zero), and BEST (the all-time high score,
+  persisted across restarts — overtaking it flashes the HUD). On a tall enough
   terminal the values render in the same big pixel font as the
   headline; tighter screens fall back to a one-line HUD. Streak
   tier-ups and combo highs flash the HUD.
+- **Score board** (`s`) — press `s` in the rave view to open a
+  centered modal showing the current run's SCORE, the all-time BEST
+  and BEST COMBO, the live COMBO and STREAK, and where the scores file
+  lives. Below those stats it lists a HISTORY table of past finished
+  runs, newest first, each row showing that run's score, peak combo,
+  peak streak, and when it ended; the box is larger now to fit the
+  table. `Esc`, `q`, or `s` closes it; other keys are swallowed while
+  it's open.
 - **Screen shake** — a short pseudo-3D jolt (rows skew on a rolling
   wave) fires on the events worth feeling: an agent coming online, a
   session or sub-agent appearing or wrapping up, a burst of
@@ -137,6 +151,17 @@ over the sessions table, full height), with the key hints on the very
 bottom row like every other view. It degrades gracefully: narrow
 terminals drop the chrome column entirely, short ones drop the
 visualizer — the data panels always win.
+
+Scores persist to `~/.local/state/mewxi/scores.json` (override the
+base with `$XDG_STATE_HOME`), holding `best_score`, `best_combo`,
+`current_score`, `current_combo`, `current_streak_secs`, and
+`updated_at` (an RFC 3339 timestamp), plus a `history` array of
+past-run objects `{score, peak_combo, peak_streak_secs, ended_at}`
+(`ended_at` an RFC 3339 timestamp), newest first and capped at 50
+entries. Older files written without the `history` key still load
+fine — it defaults to empty. The file is written atomically
+and debounced while the rave view is open, and flushed once more on
+exit.
 
 ## Updates
 
