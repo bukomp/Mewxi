@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Pre-release gate: pushing a tag creates a GitHub release, so when any
+# tag is being pushed, always run the outdated-dependency check (no
+# rate limit). Branch pushes are not checked here — pre-commit covers
+# the day-to-day case.
+set -u
+
+repo_root="$(git rev-parse --show-toplevel)" || exit 0
+
+pushing_tag=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/tags/*) pushing_tag=1 ;;
+  esac
+done
+
+if [ "$pushing_tag" -eq 1 ]; then
+  exec "$repo_root/scripts/hooks/check-outdated-deps.sh"
+fi
+exit 0

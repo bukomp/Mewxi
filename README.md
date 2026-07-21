@@ -87,6 +87,21 @@ For MCP, see [docs/mcp.md](docs/mcp.md).
 
 ---
 
+## Contributing
+
+One-time setup after cloning — enables the git hooks (outdated-dependency
+gate on commits and release-tag pushes):
+
+```sh
+git config core.hooksPath scripts/hooks
+```
+
+If the hook flags outdated dependencies, review each update's source diff
+for supply-chain issues before applying it. Skip the gate once with
+`MEWXI_SKIP_DEPS_CHECK=1`.
+
+---
+
 <div align="center">
 
 ### 🐾 fun fact

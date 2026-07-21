@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Warn about outdated cargo dependencies before committing.
+# Network check, so rate-limited to once per 24h; the pre-push hook
+# always runs it when a release tag is pushed.
+set -u
+
+# Explicitly skipped runs must not refresh the 24h stamp below.
+if [ "${MEWXI_SKIP_DEPS_CHECK:-0}" = "1" ]; then
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)" || exit 0
+git_dir="$(git rev-parse --git-dir)"
+stamp="$git_dir/mewxi-deps-check-stamp"
+
+now=$(date +%s)
+if [ -f "$stamp" ]; then
+  last=$(cat "$stamp" 2>/dev/null || echo 0)
+  if [ $((now - last)) -lt 86400 ]; then
+    exit 0
+  fi
+fi
+
+if "$repo_root/scripts/hooks/check-outdated-deps.sh"; then
+  # Only cache a clean (or explicitly waved-through) result.
+  echo "$now" > "$stamp"
+  exit 0
+fi
+exit 1
