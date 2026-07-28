@@ -3,6 +3,14 @@ name = "mewxi"
 version = "1.7.1"
 edition = "2021"
 description = "MCP server + TUI for real-time coding-agent usage stats"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bukomp/Mewxi"
+readme = "README.md"
+keywords = ["tui", "mcp", "claude", "usage", "stats"]
+categories = ["command-line-utilities", "development-tools"]
+# Keep the .crate small: build.rs embeds blocks/*.toml and src include_str!s
+# the ASCII logos; everything else (png, dist, docs, scripts) is repo-only.
+include = ["src/**", "blocks/**", "images/*.ascii", "build.rs", "README.md"]
 
 [[bin]]
 name = "mewxi"
