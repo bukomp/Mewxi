@@ -1078,7 +1078,10 @@ fn spawn_live_poller(
         // A stale background daemon running an older binary can keep
         // overwriting our cache with wrong-account data; bypassing the
         // REFRESH_INTERVAL short-circuit on bootstrap guarantees the
-        // TUI's first real frame shows correct numbers.
+        // TUI's first real frame shows correct numbers. (If a sibling
+        // process fetched within the last few seconds, `fetch_force`
+        // serves that result instead of sending a duplicate request —
+        // two requests seconds apart is a reliable way to earn a 429.)
         let _ = out_tx.send(LiveMsg::Update {
             account_name: account.name.clone(),
             live: live_usage::fetch_force(&account, no_live),
@@ -1098,6 +1101,14 @@ fn spawn_live_poller(
                             (false, "rate limited (429)".to_string())
                         }
                         live_usage::FetchOutcome::Failed { reason, .. } => (false, reason.clone()),
+                        // A sibling process (watch daemon, statusline) has a
+                        // fetch on the wire right now; its result lands in
+                        // the shared cache and the periodic tick picks it up.
+                        // Not a failure — but not fresh-from-the-web either.
+                        live_usage::FetchOutcome::InFlight(_) => (
+                            false,
+                            "another process is fetching — showing cached".to_string(),
+                        ),
                         live_usage::FetchOutcome::Cached(_) => {
                             (false, "live disabled".to_string())
                         }

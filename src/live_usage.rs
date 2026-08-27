@@ -30,7 +30,15 @@ const USER_AGENT: &str = "claude-cli/2.1.116 (external, cli)";
 /// Built-in default for the minimum age of a cached response before an
 /// on-demand refetch. Override with `live_refresh_interval_secs` in
 /// `~/.config/mewxi/accounts.toml` (see [`refresh_interval`]).
-pub const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+///
+/// 120s, not 60: the endpoint sits behind a Cloudflare rate-limit rule
+/// that, observed over a morning of logs, sustains roughly one request
+/// per two minutes per account (with a burst allowance of ~15 after an
+/// idle spell). Polling at 60s produced a steady ok/ok/429 cycle; at
+/// 120s the account stays under the limit indefinitely. Claude Code
+/// itself also calls this endpoint with the same token, so leave
+/// headroom rather than sitting exactly on the line.
+pub const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 /// Built-in default for the post-429 backoff. Override with
 /// `live_backoff_secs` in `accounts.toml` (see [`backoff_after_429`]).
 pub const DEFAULT_BACKOFF_AFTER_429: Duration = Duration::from_secs(120);
@@ -305,6 +313,34 @@ fn fmt_dur(ms: u128) -> String {
     }
 }
 
+/// Collapse a response body onto one log line: whitespace squashed,
+/// truncated so a surprise HTML error page can't flood the log.
+fn summarize_body(body: &str) -> String {
+    const MAX: usize = 200;
+    let compact: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return "(empty body)".to_string();
+    }
+    if compact.chars().count() <= MAX {
+        return compact;
+    }
+    let cut: String = compact.chars().take(MAX).collect();
+    format!("{cut}…")
+}
+
+/// Minutes since `expiry`, if it's already in the past. `None` for a
+/// still-valid token or when the credential carries no expiry. Pure so
+/// the skip-expired-token rule in [`fetch_or_cached_inner`] is testable
+/// without a keychain.
+fn expired_minutes_ago(expiry: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<i64> {
+    let expiry = expiry?;
+    if expiry < now {
+        Some((now - expiry).num_minutes().max(0))
+    } else {
+        None
+    }
+}
+
 /// Raw HTTP call. Synchronous; blocks up to the request timeout.
 pub fn fetch_live(token: &str) -> Result<LiveUsage, FetchError> {
     let start = Instant::now();
@@ -338,11 +374,25 @@ pub fn fetch_live(token: &str) -> Result<LiveUsage, FetchError> {
                 cache_schema_version: CACHE_SCHEMA_VERSION,
             })
         }
-        Err(ureq::Error::Status(429, _)) => {
+        Err(ureq::Error::Status(429, r)) => {
+            // Keep the server's side of the story. In practice this is a
+            // Cloudflare edge block (`server: cloudflare`, `retry-after:
+            // 0`, ~30ms round trip, generic `rate_limit_error` body) —
+            // the request never reached Anthropic's application — but
+            // that's exactly the kind of thing that changes without
+            // notice, so record what came back rather than assuming.
+            let retry_after = r.header("retry-after").unwrap_or("-").to_string();
+            let cf_ray = r.header("cf-ray").unwrap_or("-").to_string();
+            let server = r.header("server").unwrap_or("-").to_string();
+            let body = r.into_string().unwrap_or_default();
             crate::debug_log::log_event(
                 crate::debug_log::LogOrigin::Usage,
                 crate::debug_log::LogKind::Error,
-                &format!("429 rate limited · {}", fmt_dur(dur_ms)),
+                &format!(
+                    "429 rate limited · {} · server={server} retry-after={retry_after} cf-ray={cf_ray} · {}",
+                    fmt_dur(dur_ms),
+                    summarize_body(&body)
+                ),
             );
             Err(FetchError::RateLimited)
         }
@@ -666,6 +716,10 @@ pub enum FetchOutcome {
     /// A cached value was returned without hitting the network — either it
     /// was still fresh (`fetch_or_cached`) or `no_live` is set.
     Cached(Option<LiveUsage>),
+    /// Another process touched the attempt marker within the last
+    /// `HTTP_TIMEOUT`, so its fetch may still be on the wire; the cached
+    /// value is served instead of doubling up. Applies to `force` too.
+    InFlight(Option<LiveUsage>),
     /// The endpoint asked us to back off (429), or a prior 429 backoff is
     /// still in effect. The carried value is the cached fallback, if any.
     RateLimited(Option<LiveUsage>),
@@ -683,6 +737,7 @@ impl FetchOutcome {
         match self {
             FetchOutcome::Fetched(u) => Some(u),
             FetchOutcome::Cached(c)
+            | FetchOutcome::InFlight(c)
             | FetchOutcome::RateLimited(c)
             | FetchOutcome::Failed { cached: c, .. } => c,
         }
@@ -698,9 +753,11 @@ pub fn fetch_or_cached(account: &Account, no_live: bool) -> Option<LiveUsage> {
 }
 
 /// Like [`fetch_or_cached`] but bypass the `REFRESH_INTERVAL` freshness
-/// short-circuit and always attempt one HTTP call. Used by the TUI's
-/// initial poller bootstrap so a cold open never trusts a poisoned
-/// cache from a stale background daemon. 429 backoff is still honored.
+/// short-circuit. Used by the TUI's initial poller bootstrap so a cold
+/// open never trusts a poisoned cache from a stale background daemon.
+/// Still honored: 429 backoff, the cross-process single-flight marker
+/// (a sibling's in-flight fetch is served from cache rather than
+/// duplicated), and the local token-expiry check.
 pub fn fetch_force(account: &Account, no_live: bool) -> Option<LiveUsage> {
     fetch_or_cached_inner(account, no_live, true).into_usage()
 }
@@ -784,13 +841,19 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
                 }
             }
         }
-        // Single-flight: when the cache expires, every concurrent session's
-        // statusline sees "stale" in the same instant. Let the first one
-        // fetch; siblings serve the (marginally stale) cache instead of
-        // firing a synchronized burst at the endpoint.
-        if fetch_recently_attempted(account) {
-            return FetchOutcome::Cached(cached);
-        }
+    }
+    // Single-flight: when the cache expires, every concurrent session's
+    // statusline sees "stale" in the same instant. Let the first one
+    // fetch; siblings serve the (marginally stale) cache instead of
+    // firing a synchronized burst at the endpoint.
+    //
+    // Deliberately *not* inside `if !force`: `force` exists to bypass
+    // the freshness window, not to double up on a request that's already
+    // on the wire. The TUI's bootstrap fetch landing two seconds after
+    // the watch daemon's regular poll was a reliable way to earn a 429
+    // — and with it a two-minute backoff for every process on the box.
+    if fetch_recently_attempted(account) {
+        return FetchOutcome::InFlight(cached);
     }
 
     let (token, expiry) = match auth::read_oauth_token_with_expiry(account) {
@@ -806,6 +869,34 @@ fn fetch_or_cached_inner(account: &Account, no_live: bool, force: bool) -> Fetch
             };
         }
     };
+
+    // Never send a token we already know is expired. mewxi only *reads*
+    // Claude Code's credential; it can't refresh it, so the request can't
+    // succeed — and it does real harm: the origin answers 401, and the
+    // Cloudflare edge in front of it treats repeated 401s as abuse and
+    // blocks the token outright with 429s. Retrying every backoff window
+    // kept that block armed for hours on one account. Record a "denied"
+    // marker so the per-keypress statusline doesn't re-read the keychain
+    // on every invocation, and say plainly what fixes it. `force` doesn't
+    // bypass this: the check is local and the answer won't change until
+    // Claude Code writes a new token.
+    if let Some(stale_for) = expired_minutes_ago(expiry, now) {
+        let reason = format!(
+            "local token expired {stale_for}m ago — open Claude Code for '{}' to refresh it (fetch not attempted)",
+            account.name
+        );
+        write_backoff(account, "denied", &reason);
+        crate::debug_log::log_event(
+            crate::debug_log::LogOrigin::Usage,
+            crate::debug_log::LogKind::Error,
+            &format!("fetch skipped — {reason}"),
+        );
+        log_once(
+            &account.name,
+            format!("mewxi: live fetch skipped for '{}': {reason}", account.name),
+        );
+        return FetchOutcome::Failed { reason, cached };
+    }
 
     mark_fetch_attempt(account);
     match fetch_live(&token) {
@@ -1003,6 +1094,39 @@ mod tests {
         // Corrupt markers must not wedge polling.
         std::fs::write(&p, b"not json").unwrap();
         assert!(read_backoff_marker(&p, Duration::from_secs(120)).is_none());
+    }
+
+    #[test]
+    fn expired_minutes_ago_only_fires_for_past_expiry() {
+        let now = DateTime::parse_from_rfc3339("2026-08-27T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let earlier = now - chrono::Duration::minutes(150);
+        let later = now + chrono::Duration::minutes(5);
+
+        // No expiry on the credential (env/MEWXI_OAUTH_TOKEN paths) →
+        // nothing to check, send as before.
+        assert_eq!(expired_minutes_ago(None, now), None);
+        // Still valid → send.
+        assert_eq!(expired_minutes_ago(Some(later), now), None);
+        // Exactly at expiry is not yet "past".
+        assert_eq!(expired_minutes_ago(Some(now), now), None);
+        // Past → skip, reporting how stale (whole minutes).
+        assert_eq!(expired_minutes_ago(Some(earlier), now), Some(150));
+    }
+
+    #[test]
+    fn summarize_body_squashes_and_truncates() {
+        assert_eq!(summarize_body(""), "(empty body)");
+        assert_eq!(summarize_body("   \n\t "), "(empty body)");
+        assert_eq!(
+            summarize_body("{\n  \"error\": {\n    \"type\": \"rate_limit_error\"\n  }\n}"),
+            "{ \"error\": { \"type\": \"rate_limit_error\" } }"
+        );
+        let long = "x".repeat(500);
+        let s = summarize_body(&long);
+        assert!(s.ends_with('…'));
+        assert_eq!(s.chars().count(), 201);
     }
 }
 

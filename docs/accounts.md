@@ -27,7 +27,7 @@ default_view = "overview"
 # statusline picks up edits immediately, a running TUI on restart.
 # The Config view edits the interval live: Enter steps in 30s
 # increments (30s–15m), "e" lets you type a value like 90s or 2m.
-live_refresh_interval_secs = 300  # min seconds between HTTP probes (default 60)
+live_refresh_interval_secs = 300  # min seconds between HTTP probes (default 120)
 live_backoff_secs = 600           # wait after a 429/401/403 (default 120)
 
 [[account]]

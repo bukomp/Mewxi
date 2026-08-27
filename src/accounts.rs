@@ -348,7 +348,7 @@ struct AccountsConfig {
     #[serde(default)]
     live_session_open_threshold_secs: Option<u64>,
     /// Minimum seconds between live `/usage` HTTP probes per account
-    /// (default 60). Raise this if the endpoint rate-limits you. Read
+    /// (default 120). Raise this if the endpoint rate-limits you. Read
     /// via [`live_tuning`]; floored at 10s by `live_usage`.
     #[serde(default)]
     live_refresh_interval_secs: Option<u64>,
