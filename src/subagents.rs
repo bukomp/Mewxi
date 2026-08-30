@@ -18,15 +18,24 @@
 //!     records a `tool_result` for its `toolUseId`. This fires on normal
 //!     return *and* on interrupt/rejection (an `is_error` result), so a
 //!     stopped sub-agent disappears on the very next scan instead of
-//!     lingering. The one exception is the `async_launched` ack a
-//!     background agent gets at launch — that is not terminal and is
-//!     excluded.
+//!     lingering. The one exception is the ack a background agent gets
+//!     at launch ("Async agent launched successfully…") — that is not
+//!     terminal and is excluded. The session transcript flags it with a
+//!     `toolUseResult.status == "async_launched"` envelope; a sub-agent's
+//!     own transcript carries no `toolUseResult` envelope at all, so the
+//!     ack is also recognised by its text.
+//!   * a **background** agent is finished when its parent receives the
+//!     `<task-notification>` user record Claude Code injects once the
+//!     agent stops (`<task-id>` = agentId). An agent continued afterwards
+//!     via `SendMessage` writes to its transcript again, so a notification
+//!     older than the transcript's mtime is ignored and the row comes
+//!     back.
 //!   * sub-agent transcripts accumulate for the whole life of the
 //!     session, so a cheap mtime [`FRESH_WINDOW`] gate runs first: a
 //!     session with hundreds of past delegations only ever parses the
-//!     handful written recently. It also retires background agents (whose
-//!     completion the parent doesn't record) and transcripts orphaned by
-//!     a crash.
+//!     handful written recently. It also retires transcripts orphaned by
+//!     a crash, and forked-skill agents (`/code-review` run as a fork),
+//!     whose sidecar has no `toolUseId` to resolve.
 //!
 //! The parent transcript is read only when at least one fresh sub-agent
 //! file exists.
@@ -236,9 +245,34 @@ fn order_as_tree(agents: Vec<SubAgent>) -> Vec<SubAgent> {
 struct Candidate {
     path: PathBuf,
     meta: Option<Meta>,
+    /// Last write to this agent's transcript — compared against a
+    /// `<task-notification>` timestamp to tell a finished background
+    /// agent from one continued via `SendMessage` afterwards.
+    modified: Option<DateTime<Utc>>,
     /// Whether *this* agent's own transcript passed the mtime gate —
     /// ancestors pulled in only for a fresh descendant have this `false`.
     self_fresh: bool,
+}
+
+/// Grace added to a `<task-notification>` timestamp before a later
+/// transcript write counts as the agent having been resumed: the parent
+/// records the notification a beat after the child's final write, and
+/// the child may flush a trailing record after that.
+const RESUME_SLACK_SECS: i64 = 5;
+
+/// Whether a `<task-notification>` recorded at `notified_at` (`None` when
+/// the record carried no timestamp) still stands for an agent whose
+/// transcript was last written at `modified`: it does unless the agent
+/// wrote again clearly after the notification — the `SendMessage`
+/// continuation case.
+fn notification_stands(
+    notified_at: Option<DateTime<Utc>>,
+    modified: Option<DateTime<Utc>>,
+) -> bool {
+    match (notified_at, modified) {
+        (Some(ts), Some(m)) => m <= ts + chrono::Duration::seconds(RESUME_SLACK_SECS),
+        _ => true,
+    }
 }
 
 /// The plain Agent/Task half of [`scan_running`] — delegations launched by
@@ -275,10 +309,8 @@ fn scan_flat_running(
         else {
             continue;
         };
-        let fresh_enough = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
+        let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
+        let fresh_enough = modified
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age <= FRESH_WINDOW);
         if fresh_enough {
@@ -288,6 +320,7 @@ fn scan_flat_running(
                 Candidate {
                     path,
                     meta,
+                    modified: modified.map(DateTime::<Utc>::from),
                     self_fresh: true,
                 },
             );
@@ -321,9 +354,10 @@ fn scan_flat_running(
         if !parent_path.is_file() {
             continue;
         }
-        let self_fresh = std::fs::metadata(&parent_path)
+        let modified = std::fs::metadata(&parent_path)
             .ok()
-            .and_then(|m| m.modified().ok())
+            .and_then(|m| m.modified().ok());
+        let self_fresh = modified
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age <= FRESH_WINDOW);
         let meta = read_meta(&parent_path);
@@ -332,6 +366,7 @@ fn scan_flat_running(
             Candidate {
                 path: parent_path,
                 meta,
+                modified: modified.map(DateTime::<Utc>::from),
                 self_fresh,
             },
         );
@@ -356,15 +391,21 @@ fn scan_flat_running(
         // Skip any delegation its resolving transcript has already
         // recorded a `tool_result` for — keyed on the launching
         // `toolUseId` (catches normal return and interrupt alike), with
-        // the legacy agentId path as a fallback. Judged purely on this
-        // agent's own signal: a resolved parent does not cascade-hide its
+        // the legacy agentId path as a fallback — or, for a background
+        // agent, a `<task-notification>` not superseded by a later write
+        // to the agent's own transcript. Judged purely on this agent's
+        // own signal: a resolved parent does not cascade-hide its
         // children, which can legitimately outlive it as background work.
         let resolved = cand
             .meta
             .as_ref()
             .and_then(|m| m.tool_use_id.as_deref())
             .is_some_and(|t| finished.tool_use_ids.contains(t))
-            || finished.agent_ids.contains(agent_id);
+            || finished.agent_ids.contains(agent_id)
+            || finished
+                .notified
+                .get(agent_id)
+                .is_some_and(|ts| notification_stands(*ts, cand.modified));
         if resolved {
             resolved_ids.insert(agent_id.clone());
         }
@@ -673,7 +714,20 @@ struct Finished {
     /// agentIds with a terminal `toolUseResult` envelope. Legacy fallback
     /// for transcripts whose sidecar (and thus `toolUseId`) is missing.
     agent_ids: HashSet<String>,
+    /// Background agents (by agentId) the transcript has received a
+    /// `<task-notification>` for, with the notification record's
+    /// timestamp (`None` if it carried none). A later notification for
+    /// the same agent replaces an earlier one, so a `SendMessage`
+    /// continuation that stops again is judged by its latest stop.
+    notified: HashMap<String, Option<DateTime<Utc>>>,
 }
+
+/// Text a background-agent launch ack opens with, in both the session
+/// transcript and a sub-agent's own. Only the latter needs it: the
+/// session transcript also flags the ack with a
+/// `toolUseResult.status == "async_launched"` envelope, but sub-agent
+/// transcripts carry no `toolUseResult` at all.
+const ASYNC_LAUNCH_ACK_PREFIX: &str = "Async agent launched";
 
 /// Scan the parent transcript for every delegation it has already
 /// resolved. Cheap relative to the full session — one sequential read,
@@ -699,17 +753,17 @@ fn finished_delegations(path: &Path) -> Finished {
         let status = tur.and_then(|t| t.get("status")).and_then(|x| x.as_str());
         let is_async_launch = status == Some("async_launched");
 
-        // Primary: a `tool_result` block resolves its `tool_use_id`.
-        if let Some(items) = v
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        {
+        let content = v.get("message").and_then(|m| m.get("content"));
+
+        // Primary: a `tool_result` block resolves its `tool_use_id` —
+        // unless it is a launch ack, flagged by the envelope or (in a
+        // sub-agent transcript, which has no envelope) by its text.
+        if let Some(items) = content.and_then(|c| c.as_array()) {
             for ci in items {
                 if ci.get("type").and_then(|x| x.as_str()) != Some("tool_result") {
                     continue;
                 }
-                if is_async_launch {
+                if is_async_launch || is_async_launch_ack(ci) {
                     continue;
                 }
                 if let Some(tid) = ci.get("tool_use_id").and_then(|x| x.as_str()) {
@@ -724,8 +778,58 @@ fn finished_delegations(path: &Path) -> Finished {
                 out.agent_ids.insert(id.to_string());
             }
         }
+
+        // Background agents: the `<task-notification>` user record
+        // injected when the agent stops names it in `<task-id>`.
+        if v.get("type").and_then(|x| x.as_str()) == Some("user") {
+            if let Some(id) = content
+                .and_then(live_session::user_text)
+                .as_deref()
+                .and_then(task_notification_agent_id)
+            {
+                let ts = v
+                    .get("timestamp")
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&Utc));
+                out.notified.insert(id.to_string(), ts);
+            }
+        }
     }
     out
+}
+
+/// Whether a `tool_result` block is the "Async agent launched
+/// successfully…" ack a background agent's launch returns.
+fn is_async_launch_ack(tool_result: &serde_json::Value) -> bool {
+    // Only the opening text matters, so peek at it in place rather than
+    // concatenating the whole result (which can be a large file read).
+    let Some(content) = tool_result.get("content") else {
+        return false;
+    };
+    let head = content.as_str().or_else(|| {
+        content
+            .as_array()?
+            .iter()
+            .find(|ci| ci.get("type").and_then(|x| x.as_str()) == Some("text"))?
+            .get("text")?
+            .as_str()
+    });
+    head.is_some_and(|t| t.trim_start().starts_with(ASYNC_LAUNCH_ACK_PREFIX))
+}
+
+/// The `<task-id>` of a `<task-notification>` block in a user record's
+/// text, if the text carries one.
+fn task_notification_agent_id(text: &str) -> Option<&str> {
+    let block = text.split("<task-notification>").nth(1)?;
+    let block = block.split("</task-notification>").next()?;
+    let id = block
+        .split("<task-id>")
+        .nth(1)?
+        .split("</task-id>")
+        .next()?
+        .trim();
+    (!id.is_empty()).then_some(id)
 }
 
 /// The `.meta.json` sidecar Claude Code writes beside each sub-agent
@@ -943,11 +1047,169 @@ mod tests {
             r#"{{"type":"user","toolUseResult":{{"agentId":"aBG","status":"async_launched"}},"message":{{"content":[{{"type":"tool_result","tool_use_id":"tBG"}}]}}}}"#
         )
         .unwrap();
+        // The same ack as it lands in a *sub-agent's* transcript: no
+        // `toolUseResult` envelope at all, only the text.
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"tBG2","content":[{{"type":"text","text":"Async agent launched successfully. (This tool result is internal metadata)\nagentId: aBG2 (internal ID)"}}]}}]}}}}"#
+        )
+        .unwrap();
+        // The background agent's stop, injected as a task notification.
+        writeln!(
+            f,
+            r#"{{"type":"user","timestamp":"2026-06-19T00:01:00Z","message":{{"role":"user","content":"[SYSTEM NOTIFICATION - NOT USER INPUT]\n<task-notification>\n<task-id>aBG2</task-id>\n<tool-use-id>tBG2</tool-use-id>\n<status>completed</status>\n</task-notification>"}}}}"#
+        )
+        .unwrap();
         let fin = finished_delegations(f.path());
         assert!(fin.tool_use_ids.contains("tDONE"));
         assert!(fin.tool_use_ids.contains("tERR")); // interrupt still finishes the row
         assert!(!fin.tool_use_ids.contains("tBG")); // async launch isn't terminal
         assert!(!fin.agent_ids.contains("aBG"));
+        assert!(!fin.tool_use_ids.contains("tBG2")); // envelope-less ack isn't either
+        assert_eq!(
+            fin.notified.get("aBG2").copied().flatten(),
+            Some("2026-06-19T00:01:00Z".parse::<DateTime<Utc>>().unwrap())
+        );
+    }
+
+    #[test]
+    fn task_notification_agent_id_extracts_task_id() {
+        assert_eq!(
+            task_notification_agent_id(
+                "preamble\n<task-notification>\n<task-id> abc123 </task-id>\n<status>completed</status>\n</task-notification>"
+            ),
+            Some("abc123")
+        );
+        assert_eq!(task_notification_agent_id("<task-id>x</task-id>"), None);
+        assert_eq!(
+            task_notification_agent_id(
+                "<task-notification><task-id></task-id></task-notification>"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn notification_stands_unless_agent_wrote_after_it() {
+        let ts = "2026-06-19T00:01:00Z".parse::<DateTime<Utc>>().unwrap();
+        let secs = chrono::Duration::seconds;
+        assert!(notification_stands(Some(ts), Some(ts - secs(10))));
+        assert!(notification_stands(
+            Some(ts),
+            Some(ts + secs(RESUME_SLACK_SECS))
+        ));
+        assert!(!notification_stands(
+            Some(ts),
+            Some(ts + secs(RESUME_SLACK_SECS + 1))
+        ));
+        // Missing either timestamp: trust the notification.
+        assert!(notification_stands(None, Some(ts)));
+        assert!(notification_stands(Some(ts), None));
+    }
+
+    /// The reported case: `/code-review` run as a forked skill (sidecar
+    /// without `toolUseId`) fans out background finders. Their launch
+    /// acks land in the fork's transcript without a `toolUseResult`
+    /// envelope and must not retire them; a `<task-notification>` must.
+    #[test]
+    fn scan_running_keeps_background_children_of_forked_skill_until_notified() {
+        let proj = tempfile::tempdir().unwrap();
+        let sid = "sess1";
+        let parent_path = proj.path().join(format!("{sid}.jsonl"));
+        // The session transcript only logs the fork's launch as a system record.
+        fs::write(
+            &parent_path,
+            r#"{"type":"system","subtype":"local_command","content":"<forked-skill-launch>{\"agentId\":\"fork\",\"skillName\":\"code-review\"}</forked-skill-launch>"}"#,
+        )
+        .unwrap();
+
+        let subdir = proj.path().join(sid).join("subagents");
+        fs::create_dir_all(&subdir).unwrap();
+
+        let ack = |tid: &str, aid: &str| {
+            format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{tid}","content":[{{"type":"text","text":"Async agent launched successfully. (internal metadata)\nagentId: {aid} (internal ID)"}}]}}]}}}}"#
+            )
+        };
+        let notify = |aid: &str, ts: &str| {
+            format!(
+                r#"{{"type":"user","timestamp":"{ts}","message":{{"role":"user","content":"[SYSTEM NOTIFICATION]\n<task-notification>\n<task-id>{aid}</task-id>\n<status>completed</status>\n</task-notification>"}}}}"#
+            )
+        };
+        // cDone's notification is recent (its transcript, stamped just
+        // before it, stays inside FRESH_WINDOW — the notification, not
+        // the mtime gate, must hide it). cBack's is old: the fixture
+        // writes its transcript "now", long after, i.e. it was continued
+        // via SendMessage.
+        let notified_at = Utc::now() - chrono::Duration::seconds(2);
+        let fork_lines = format!(
+            "\n{}\n{}\n{}\n{}\n{}",
+            ack("tLIVE", "cLive"),
+            ack("tDONE", "cDone"),
+            ack("tBACK", "cBack"),
+            notify(
+                "cDone",
+                &notified_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            ),
+            notify("cBack", "2026-06-19T00:01:00Z"),
+        );
+        write_nested_fixture(
+            &subdir,
+            "fork",
+            r#"{"agentType":"general-purpose","description":"/code-review xhigh","name":"code-review","spawnDepth":1}"#,
+            "2026-06-19T00:00:01Z",
+            &fork_lines,
+        );
+        let child_meta = |tid: &str| {
+            format!(
+                r#"{{"agentType":"general-purpose","description":"finder","toolUseId":"{tid}","parentAgentId":"fork","spawnDepth":2}}"#
+            )
+        };
+        write_nested_fixture(
+            &subdir,
+            "cLive",
+            &child_meta("tLIVE"),
+            "2026-06-19T00:00:02Z",
+            "",
+        );
+        write_nested_fixture(
+            &subdir,
+            "cDone",
+            &child_meta("tDONE"),
+            "2026-06-19T00:00:03Z",
+            "",
+        );
+        write_nested_fixture(
+            &subdir,
+            "cBack",
+            &child_meta("tBACK"),
+            "2026-06-19T00:00:04Z",
+            "",
+        );
+
+        // cDone last wrote just before its notification.
+        let written_at = notified_at - chrono::Duration::seconds(1);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(subdir.join("agent-cDone.jsonl"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(written_at.into()))
+            .unwrap();
+
+        let subs = scan_running(&parent_path, sid, None);
+        let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["fork", "cLive", "cBack"],
+            "envelope-less launch acks keep children alive; a notification retires cDone; \
+             cBack's later write overrides its notification"
+        );
+        let fork = &subs[0];
+        assert_eq!(fork.parent_agent_id, None);
+        assert_eq!(fork.description, "/code-review xhigh");
+        assert!(subs[1..]
+            .iter()
+            .all(|s| s.parent_agent_id.as_deref() == Some("fork")));
     }
 
     #[test]
