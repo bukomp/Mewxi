@@ -182,7 +182,7 @@ fn render_one_account_compact(f: &mut Frame, area: Rect, pa: &PerAccount) {
 }
 
 fn render_one_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
-    // Row 0: name · N live · $total
+    // Row 0: name · N live · cache age
     // Row 1: 5h gauge
     // Row 2: weekly gauge
     // Row 3: extra gauge
@@ -280,22 +280,17 @@ fn render_account_header(f: &mut Frame, area: Rect, pa: &PerAccount) {
     ];
     // Cache-age indicator — makes it obvious when the bars below are
     // out of date because the daemon stopped or the endpoint backed off.
-    // Always reserved as a fixed-width slot so the $ column lines up
-    // across accounts regardless of whether one is "0s ago" and another
-    // is "59s ago"; absent live data renders as blank padding.
+    // Always reserved as a fixed-width slot so headers line up across
+    // accounts regardless of whether one is "0s ago" and another is
+    // "59s ago"; absent live data renders as blank padding.
     spans.push(Span::raw(" · "));
     spans.push(cache_age_span(pa.live.as_ref()));
-    spans.push(Span::raw("   "));
-    spans.push(Span::styled(
-        format!("${:>9.2} total", pa.agg.all.cost_usd),
-        Style::default().fg(Color::Green),
-    ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Width of the cache-age column — right-aligned so "0s ago", "59m ago"
-/// and "23h ago" all occupy the same space. Without this, varying widths
-/// across accounts shift the $-column on the right.
+/// and "23h ago" all occupy the same space, keeping headers aligned
+/// across accounts.
 const CACHE_AGE_WIDTH: usize = 7;
 
 fn cache_age_span(live: Option<&LiveUsage>) -> Span<'static> {

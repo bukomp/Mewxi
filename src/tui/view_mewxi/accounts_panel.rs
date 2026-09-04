@@ -150,7 +150,7 @@ fn render_one_account_compact(f: &mut Frame, area: Rect, pa: &PerAccount) {
 }
 
 fn render_one_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
-    // Row 0: name · N live · cache age · $total
+    // Row 0: name · N live · cache age
     // Row 1: 5h gauge
     // Row 2: weekly gauge
     // Row 3: extra gauge
@@ -252,15 +252,10 @@ fn render_account_header(f: &mut Frame, area: Rect, pa: &PerAccount) {
             Style::default().fg(live_color),
         ),
     ];
-    // Cache-age indicator — always reserved as a fixed-width slot so the
-    // $ column lines up across accounts even when live data is absent.
+    // Cache-age indicator — always reserved as a fixed-width slot so
+    // headers line up across accounts even when live data is absent.
     spans.push(Span::raw(" · "));
     spans.push(cache_age_span(pa.live.as_ref()));
-    spans.push(Span::raw("   "));
-    spans.push(Span::styled(
-        format!("${:>9.2} total", pa.agg.all.cost_usd),
-        Style::default().fg(P_TEXT),
-    ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
