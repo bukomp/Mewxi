@@ -2,3 +2,10 @@ dist
 target
 .env*
 .DS_Store
+# kanbu: local agent setup; .mcp.json holds the token.
+.mcp.json
+.claude/settings.local.json
+.claude/kanbu.local.json
+.claude/kanbu-attach.sh
+.claude/skills/kanbu-setup/
+.worktrees/
