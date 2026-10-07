@@ -100,6 +100,23 @@ use std::time::{Duration, SystemTime};
 /// terminal record (background agents, crash orphans).
 const FRESH_WINDOW: Duration = Duration::from_secs(90);
 
+/// Freshness window for a background agent (sidecar `requestShape` is
+/// `background`). Its completion is announced by a `<task-notification>`,
+/// and it routinely goes silent far past [`FRESH_WINDOW`] while a long
+/// tool call (build, test run) or a slow model step is in flight — real
+/// transcripts show quiet gaps of 10-17 minutes — so the short window
+/// would hide a live agent. This longer one only retires crash orphans.
+const BACKGROUND_FRESH_WINDOW: Duration = Duration::from_secs(30 * 60);
+
+/// The mtime window that applies to an agent with sidecar `meta`.
+fn fresh_window_for(meta: Option<&Meta>) -> Duration {
+    if meta.is_some_and(|m| m.background) {
+        BACKGROUND_FRESH_WINDOW
+    } else {
+        FRESH_WINDOW
+    }
+}
+
 /// One sub-agent a session is actively running. Rendered as an indented
 /// child row under its parent session in the all-sessions view.
 #[derive(Clone, Debug, Serialize)]
@@ -310,11 +327,15 @@ fn scan_flat_running(
             continue;
         };
         let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
-        let fresh_enough = modified
-            .and_then(|m| now.duration_since(m).ok())
-            .is_some_and(|age| age <= FRESH_WINDOW);
-        if fresh_enough {
+        let age = modified.and_then(|m| now.duration_since(m).ok());
+        // Cheap gate against the widest window first, so only recently
+        // written files pay for a sidecar read; the per-agent window is
+        // applied once the sidecar says whether it is a background agent.
+        if age.is_some_and(|a| a <= BACKGROUND_FRESH_WINDOW) {
             let meta = read_meta(&path);
+            if age.is_some_and(|a| a > fresh_window_for(meta.as_ref())) {
+                continue;
+            }
             candidates.insert(
                 agent_id,
                 Candidate {
@@ -357,10 +378,11 @@ fn scan_flat_running(
         let modified = std::fs::metadata(&parent_path)
             .ok()
             .and_then(|m| m.modified().ok());
+        let meta = read_meta(&parent_path);
+        let window = fresh_window_for(meta.as_ref());
         let self_fresh = modified
             .and_then(|m| now.duration_since(m).ok())
-            .is_some_and(|age| age <= FRESH_WINDOW);
-        let meta = read_meta(&parent_path);
+            .is_some_and(|age| age <= window);
         candidates.insert(
             parent_id.clone(),
             Candidate {
@@ -846,6 +868,9 @@ struct Meta {
     /// depth-1 agent, …). `None` when the sidecar predates the field
     /// (older Claude Code) — callers default this to 1.
     spawn_depth: Option<u32>,
+    /// Sidecar `requestShape == "background"`: launched as a background
+    /// agent (foreground ones carry no such field).
+    background: bool,
 }
 
 fn read_meta(agent_path: &Path) -> Option<Meta> {
@@ -866,6 +891,7 @@ fn read_meta(agent_path: &Path) -> Option<Meta> {
             .get("spawnDepth")
             .and_then(|x| x.as_u64())
             .map(|n| n as u32),
+        background: s("requestShape").as_deref() == Some("background"),
     })
 }
 
@@ -1588,6 +1614,57 @@ mod tests {
             vec!["pAgent", "cAgent"],
             "stale-but-unresolved ancestor kept alive by its fresh child"
         );
+    }
+
+    #[test]
+    fn scan_running_keeps_quiet_background_agent_but_not_quiet_foreground_one() {
+        let proj = tempfile::tempdir().unwrap();
+        let sid = "sess1";
+        let parent_path = proj.path().join(format!("{sid}.jsonl"));
+        fs::write(&parent_path, "").unwrap();
+        let subdir = proj.path().join(sid).join("subagents");
+        fs::create_dir_all(&subdir).unwrap();
+
+        write_nested_fixture(
+            &subdir,
+            "bg",
+            r#"{"agentType":"general-purpose","toolUseId":"tBg","requestShape":"background"}"#,
+            "2026-06-19T00:00:02Z",
+            "",
+        );
+        write_nested_fixture(
+            &subdir,
+            "fg",
+            r#"{"agentType":"general-purpose","toolUseId":"tFg"}"#,
+            "2026-06-19T00:00:03Z",
+            "",
+        );
+        write_nested_fixture(
+            &subdir,
+            "bgOld",
+            r#"{"agentType":"general-purpose","toolUseId":"tOld","requestShape":"background"}"#,
+            "2026-06-19T00:00:04Z",
+            "",
+        );
+        // 10 minutes quiet: a long build inside a background agent.
+        let set_age = |id: &str, secs: u64| {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(subdir.join(format!("agent-{id}.jsonl")))
+                .unwrap();
+            f.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::now() - Duration::from_secs(secs)),
+            )
+            .unwrap();
+        };
+        set_age("bg", 600);
+        set_age("fg", 600);
+        set_age("bgOld", 3 * 3600);
+
+        let subs = scan_running(&parent_path, sid, None);
+        let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(ids, vec!["bg"]);
     }
 
     #[test]
