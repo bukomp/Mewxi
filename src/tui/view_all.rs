@@ -30,9 +30,9 @@ pub fn render(
     selected: Option<usize>,
     sessions_rect: &mut Option<Rect>,
     table_state: &mut TableState,
-    // True when view 1's currently-selected row is a mewxi-driven session —
-    // the only case where `Del kill` applies (observed sessions can't be
-    // killed from mewxi).
+    // True when view 1's currently-selected row is killable —
+    // the case where `Del kill` applies (any non-sub-agent session;
+    // observed ones are signalled by pid).
     selected_driven: bool,
 ) {
     // Reserve enough rows for every account block, capped so the
@@ -62,8 +62,8 @@ pub fn render(
     render_account_stack(f, rows[0], accounts, compact);
     *sessions_rect = Some(rows[1]);
     render_sessions_table(f, rows[1], sessions, selected, table_state);
-    // `Del kill` only when the selected row is a mewxi-driven session —
-    // observed sessions can't be killed from mewxi. `? help` always.
+    // `Del kill` only when the selected row is killable (not a sub-agent) —
+    // `? help` always.
     let mut hint = String::from("↑/↓ select · Enter open · n new");
     if selected_driven {
         hint.push_str(" · Del kill");

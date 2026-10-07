@@ -1614,12 +1614,12 @@ fn run_loop<B: ratatui::backend::Backend>(
             None
         };
 
-        // Whether view 1's selected row is a mewxi-driven session — decides
-        // if the `Del kill` footer chip shows (kill only manages driven ones).
+        // Whether view 1's selected row can be killed (any session with its
+        // own process, driven or observed; not a sub-agent) — decides if
+        // the `Del kill` footer chip shows.
         let selected_v1_driven = visible_sessions
             .get(selected_session)
-            .map(|s| (s.account_name.clone(), s.session_id.clone()))
-            .is_some_and(|key| drivers.contains_key(&key));
+            .is_some_and(|s| s.subagent.is_none());
 
         let raw_error = live_usage::most_recent_error()
             .map(|(acct, msg)| format!("[{acct}] {msg}"));
@@ -3617,8 +3617,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             };
                             let selected_driven = visible_sessions
                                 .get(selected_session)
-                                .map(|s| (s.account_name.clone(), s.session_id.clone()))
-                                .is_some_and(|key| drivers.contains_key(&key));
+                                .is_some_and(|s| s.subagent.is_none());
                             let session = if mode == ViewMode::SessionDetail {
                                 pinned_session.as_ref().map(|k| help_modal::SessionFlags {
                                     driven: drivers.contains_key(k),
@@ -4547,21 +4546,14 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     ));
                                 }
                                 Some(s) => {
-                                    // Kill only manages mewxi-spawned sessions — an
-                                    // observed session's process isn't ours to tear down.
-                                    let key = (s.account_name.clone(), s.session_id.clone());
-                                    if drivers.contains_key(&key) {
-                                        kill_confirm_modal = Some(KillConfirmModal::new(
-                                            s.account_name.clone(),
-                                            s.session_id.clone(),
-                                            s.pid,
-                                        ));
-                                    } else {
-                                        driver_status = Some((
-                                            "kill is only available for sessions created by mewxi (n to drive)".into(),
-                                            Instant::now(),
-                                        ));
-                                    }
+                                    // Driven sessions are torn down through their
+                                    // PTY; observed ones by signalling the pid
+                                    // (see the confirm handler).
+                                    kill_confirm_modal = Some(KillConfirmModal::new(
+                                        s.account_name.clone(),
+                                        s.session_id.clone(),
+                                        s.pid,
+                                    ));
                                 }
                                 None => {
                                     driver_status = Some((
