@@ -223,7 +223,10 @@ mod tests {
         // Sanity ranges so a wildly wrong parse fails CI.
         assert!(opus.input > 1.0 && opus.input < 20.0, "opus.input={}", opus.input);
         assert!(sonnet.input > 1.0 && sonnet.input < 10.0, "sonnet.input={}", sonnet.input);
-        assert!(haiku.input > 0.1 && haiku.input < 5.0, "haiku.input={}", haiku.input);
+        // The newest haiku entry can be priced at exactly $0.10/MTok, and
+        // `1e-7 * 1e6` is 0.09999999999999999 in f64, so the lower bound
+        // must sit well below any real price instead of on one.
+        assert!(haiku.input > 0.01 && haiku.input < 5.0, "haiku.input={}", haiku.input);
         eprintln!("opus={:?} sonnet={:?} haiku={:?}", opus, sonnet, haiku);
     }
 }
