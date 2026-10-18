@@ -61,9 +61,9 @@ pub fn read(path: &Path) -> Vec<ChatEntry> {
     // Fingerprint the file cheaply (one stat) and reuse the parse if it
     // hasn't changed since last read. Falls through to a full parse on
     // any I/O hiccup or cache miss.
-    let fingerprint = std::fs::metadata(path).ok().map(|m| {
-        (m.modified().ok(), m.len())
-    });
+    let fingerprint = std::fs::metadata(path)
+        .ok()
+        .map(|m| (m.modified().ok(), m.len()));
     if let Some((mtime, len)) = fingerprint {
         if let Ok(guard) = READ_CACHE.lock() {
             if let Some(hit) = guard.as_ref().and_then(|m| m.get(path)) {
@@ -142,7 +142,11 @@ fn parse_record(v: &Value, out: &mut Vec<ChatEntry>) {
                 if text.is_empty() || is_meta {
                     return;
                 }
-                out.push(ChatEntry { ts, kind: EntryKind::User, text });
+                out.push(ChatEntry {
+                    ts,
+                    kind: EntryKind::User,
+                    text,
+                });
             } else if let Some(arr) = content.as_array() {
                 for item in arr {
                     let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
@@ -324,7 +328,14 @@ pub fn tool_input_summary(name: &str, input: Option<&Value>) -> String {
     // A short list of fields we care about, in priority order. First
     // match wins.
     const KEYS: &[&str] = &[
-        "command", "file_path", "path", "pattern", "query", "prompt", "url", "description",
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "prompt",
+        "url",
+        "description",
     ];
     for k in KEYS {
         if let Some(s) = input.get(*k).and_then(|v| v.as_str()) {
@@ -404,8 +415,7 @@ pub fn extract_tasks(entries: &[ChatEntry]) -> Vec<Task> {
     // taskId → index into `tasks`. TaskCreate doesn't carry the id in
     // its input; Claude assigns the next sequential id ("1", "2", …) at
     // create time, so we mirror that here.
-    let mut by_id: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut by_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut next_id: u64 = 1;
 
     let s_field = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -418,7 +428,8 @@ pub fn extract_tasks(entries: &[ChatEntry]) -> Vec<Task> {
             "TaskCreate" => {
                 let id = next_id.to_string();
                 next_id += 1;
-                let subject = s_field(input, "subject").unwrap_or_else(|| "(no subject)".to_string());
+                let subject =
+                    s_field(input, "subject").unwrap_or_else(|| "(no subject)".to_string());
                 let task = Task {
                     id: id.clone(),
                     subject,
@@ -430,7 +441,9 @@ pub fn extract_tasks(entries: &[ChatEntry]) -> Vec<Task> {
                 tasks.push(task);
             }
             "TaskUpdate" => {
-                let Some(id) = s_field(input, "taskId") else { continue };
+                let Some(id) = s_field(input, "taskId") else {
+                    continue;
+                };
                 let Some(&idx) = by_id.get(&id) else { continue };
                 let t = &mut tasks[idx];
                 if let Some(s) = s_field(input, "status") {

@@ -201,8 +201,7 @@ pub fn apply_shake(
         if let Some((row_pick, dir)) = vjitter {
             if ry == row_pick {
                 let dst_y_i32 = y as i32 + dir;
-                if dst_y_i32 >= area.top() as i32 && dst_y_i32 < area.top() as i32 + height as i32
-                {
+                if dst_y_i32 >= area.top() as i32 && dst_y_i32 < area.top() as i32 + height as i32 {
                     write_row_shifted(buf, area, dst_y_i32 as u16, &row_buf, hoff);
                 }
             }

@@ -136,7 +136,10 @@ pub struct Aggregate {
 
 fn floor_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
     let naive = ts.naive_utc();
-    let floored = naive.date().and_hms_opt(naive.hour(), 0, 0).unwrap_or(naive);
+    let floored = naive
+        .date()
+        .and_hms_opt(naive.hour(), 0, 0)
+        .unwrap_or(naive);
     DateTime::from_naive_utc_and_offset(floored, Utc)
 }
 
@@ -144,14 +147,18 @@ fn floor_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
 /// shared `mewxi` cache dir. Keeping caches per-account means
 /// concurrent watchers (one per account) don't clobber each other.
 pub fn cache_path_for(account: &Account) -> Option<PathBuf> {
-    dirs::cache_dir()
-        .map(|c| c.join("mewxi").join(format!("files3-{}.json", account.slug())))
+    dirs::cache_dir().map(|c| {
+        c.join("mewxi")
+            .join(format!("files3-{}.json", account.slug()))
+    })
 }
 
 /// Per-account on-disk statusLine output: `status-<slug>.txt`.
 pub fn status_cache_path_for(account: &Account) -> Option<PathBuf> {
-    dirs::cache_dir()
-        .map(|c| c.join("mewxi").join(format!("status-{}.txt", account.slug())))
+    dirs::cache_dir().map(|c| {
+        c.join("mewxi")
+            .join(format!("status-{}.txt", account.slug()))
+    })
 }
 
 /// Single-file mirror of the most-recently-modified account, kept so
@@ -226,7 +233,11 @@ enum TailRead {
     /// writer mid-flush) is held back so it isn't parsed until it
     /// completes. `new_offset`/`new_guard` are ready to store for the
     /// next call.
-    Append { text: String, new_offset: u64, new_guard: Vec<u8> },
+    Append {
+        text: String,
+        new_offset: u64,
+        new_guard: Vec<u8>,
+    },
     /// The guard didn't match (or the read was otherwise too short) —
     /// the file was rewritten or truncated in place rather than appended
     /// to. Caller must fall back to a full reparse.
@@ -257,7 +268,11 @@ fn read_tail(path: &Path, offset: u64, guard: &[u8]) -> std::io::Result<TailRead
     match tail.iter().rposition(|&b| b == b'\n') {
         None => {
             // No newly-completed line yet; nothing to parse, offset/guard unchanged.
-            Ok(TailRead::Append { text: String::new(), new_offset: offset, new_guard: guard.to_vec() })
+            Ok(TailRead::Append {
+                text: String::new(),
+                new_offset: offset,
+                new_guard: guard.to_vec(),
+            })
         }
         Some(last_nl) => {
             let complete_end = gl + last_nl + 1;
@@ -265,7 +280,11 @@ fn read_tail(path: &Path, offset: u64, guard: &[u8]) -> std::io::Result<TailRead
             let new_offset = offset + last_nl as u64 + 1;
             let guard_start = complete_end.saturating_sub(GUARD_LEN.min(new_offset) as usize);
             let new_guard = buf[guard_start..complete_end].to_vec();
-            Ok(TailRead::Append { text, new_offset, new_guard })
+            Ok(TailRead::Append {
+                text,
+                new_offset,
+                new_guard,
+            })
         }
     }
 }
@@ -349,7 +368,11 @@ pub fn parse_file_cached(path: &Path) -> Result<Vec<UsageRecord>> {
 
     if let Some((offset, guard, mut records)) = grown_trusted {
         match read_tail(path, offset, &guard) {
-            Ok(TailRead::Append { text, new_offset, new_guard }) => {
+            Ok(TailRead::Append {
+                text,
+                new_offset,
+                new_guard,
+            }) => {
                 let project = project_name_from_path(path);
                 for line in text.lines() {
                     if let Some(r) = parse_record_line(line, &project) {
@@ -384,13 +407,22 @@ pub fn parse_file_cached(path: &Path) -> Result<Vec<UsageRecord>> {
     // the newly appended tail.
     let content = fs::read_to_string(path).unwrap_or_default();
     let project = project_name_from_path(path);
-    let recs: Vec<UsageRecord> =
-        content.lines().filter_map(|l| parse_record_line(l, &project)).collect();
+    let recs: Vec<UsageRecord> = content
+        .lines()
+        .filter_map(|l| parse_record_line(l, &project))
+        .collect();
     let (offset, guard) = offset_and_guard_for(&content);
     if let Ok(mut g) = parsed_cache().lock() {
         g.insert(
             key,
-            ParsedEntry { mtime, size, offset, guard, tail_trusted: true, records: recs.clone() },
+            ParsedEntry {
+                mtime,
+                size,
+                offset,
+                guard,
+                tail_trusted: true,
+                records: recs.clone(),
+            },
         );
     }
     Ok(recs)
@@ -419,9 +451,7 @@ pub fn scan_all(root: &Path, cache_path: Option<&Path>) -> Result<Vec<UsageRecor
         return Ok(out);
     }
 
-    let mut cache = cache_path
-        .map(load_file_cache)
-        .unwrap_or_default();
+    let mut cache = cache_path.map(load_file_cache).unwrap_or_default();
     let mut next: HashMap<PathBuf, FileEntry> = HashMap::new();
     let mut changed = false;
     let mut files_scanned = 0usize;
@@ -460,7 +490,14 @@ pub fn scan_all(root: &Path, cache_path: Option<&Path>) -> Result<Vec<UsageRecor
                 }
             }
         };
-        next.insert(path_buf, FileEntry { mtime_unix: mtime, size, records: entry_records });
+        next.insert(
+            path_buf,
+            FileEntry {
+                mtime_unix: mtime,
+                size,
+                records: entry_records,
+            },
+        );
     }
 
     if !cache.files.is_empty() {
@@ -573,18 +610,34 @@ fn parse_record_line(line: &str, project: &str) -> Option<UsageRecord> {
     let msg = v.get("message")?;
     let usage = msg.get("usage")?;
 
-    let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    let cache_read = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let input = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     // cache_creation has ephemeral_5m / ephemeral_1h; fall back to cache_creation_input_tokens as 5m
     let (cw5, cw1h) = if let Some(cc) = usage.get("cache_creation") {
         (
-            cc.get("ephemeral_5m_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            cc.get("ephemeral_1h_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            cc.get("ephemeral_5m_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            cc.get("ephemeral_1h_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
         )
     } else {
-        let c = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let c = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         (c, 0)
     };
 
@@ -593,22 +646,40 @@ fn parse_record_line(line: &str, project: &str) -> Option<UsageRecord> {
         return None;
     }
 
-    let model = msg.get("model").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+    let model = msg
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
     let timestamp = v
         .get("timestamp")
         .and_then(|v| v.as_str())
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc))
         .unwrap_or_else(Utc::now);
-    let session_id = v.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let message_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let session_id = v
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let message_id = msg
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let message_id = if message_id.is_empty() {
         // Fallback: uuid from outer envelope
-        v.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string()
+        v.get("uuid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
     } else {
         message_id
     };
-    let is_sidechain = v.get("isSidechain").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_sidechain = v
+        .get("isSidechain")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let p = price_for(&model);
     let cost_usd = (input as f64 * p.input
@@ -642,7 +713,10 @@ fn parse_record_line(line: &str, project: &str) -> Option<UsageRecord> {
 fn parse_file(path: &Path) -> Result<Vec<UsageRecord>> {
     let content = std::fs::read_to_string(path)?;
     let project = project_name_from_path(path);
-    Ok(content.lines().filter_map(|l| parse_record_line(l, &project)).collect())
+    Ok(content
+        .lines()
+        .filter_map(|l| parse_record_line(l, &project))
+        .collect())
 }
 
 fn project_name_from_path(path: &Path) -> String {
@@ -706,7 +780,9 @@ pub fn aggregate(records: &[UsageRecord]) -> Aggregate {
         }
         if r.timestamp >= trailing_7d_cutoff {
             agg.trailing_7d_cost_usd += r.cost_usd;
-            *agg.trailing_7d_cost_by_session.entry(r.session_id.clone()).or_insert(0.0) += r.cost_usd;
+            *agg.trailing_7d_cost_by_session
+                .entry(r.session_id.clone())
+                .or_insert(0.0) += r.cost_usd;
         }
         by_model.entry(r.model.clone()).or_default().add(r);
         by_project.entry(r.project.clone()).or_default().add(r);
@@ -808,26 +884,49 @@ fn ctx_from_line(line: &str) -> Option<(u64, String)> {
     // model + context window. Skip them so the cap stays anchored
     // to the main agent — otherwise a one-off Sonnet helper would
     // briefly inflate the displayed cap to Sonnet's 1M.
-    if v.get("isSidechain").and_then(|x| x.as_bool()).unwrap_or(false) {
+    if v.get("isSidechain")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
     let msg = v.get("message")?;
     let usage = msg.get("usage")?;
-    let input = usage.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-    let cread = usage.get("cache_read_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+    let input = usage
+        .get("input_tokens")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let cread = usage
+        .get("cache_read_input_tokens")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
     let (c5, c1h) = if let Some(cc) = usage.get("cache_creation") {
         (
-            cc.get("ephemeral_5m_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-            cc.get("ephemeral_1h_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+            cc.get("ephemeral_5m_input_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            cc.get("ephemeral_1h_input_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
         )
     } else {
-        (usage.get("cache_creation_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0), 0)
+        (
+            usage
+                .get("cache_creation_input_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            0,
+        )
     };
     let ctx = input + cread + c5 + c1h;
     if ctx == 0 {
         return None;
     }
-    let model = msg.get("model").and_then(|x| x.as_str()).unwrap_or("unknown").to_string();
+    let model = msg
+        .get("model")
+        .and_then(|x| x.as_str())
+        .unwrap_or("unknown")
+        .to_string();
     Some((ctx, model))
 }
 
@@ -872,7 +971,11 @@ pub fn current_context_from_transcript(path: &Path) -> Option<SessionContext> {
         if let Some(e) = g.get(&key) {
             if e.mtime == mtime && e.size == size {
                 let (cur, model) = e.current.clone()?;
-                return Some(SessionContext { current: cur, max_observed: e.max_observed, model });
+                return Some(SessionContext {
+                    current: cur,
+                    max_observed: e.max_observed,
+                    model,
+                });
             }
         }
     }
@@ -891,7 +994,12 @@ pub fn current_context_from_transcript(path: &Path) -> Option<SessionContext> {
     };
 
     if let Some((offset, guard, mut max_observed, mut current)) = grown_trusted {
-        if let Ok(TailRead::Append { text, new_offset, new_guard }) = read_tail(path, offset, &guard) {
+        if let Ok(TailRead::Append {
+            text,
+            new_offset,
+            new_guard,
+        }) = read_tail(path, offset, &guard)
+        {
             for line in text.lines() {
                 if let Some((ctx, model)) = ctx_from_line(line) {
                     max_observed = max_observed.max(ctx);
@@ -913,7 +1021,11 @@ pub fn current_context_from_transcript(path: &Path) -> Option<SessionContext> {
                 );
             }
             let (cur, model) = current?;
-            return Some(SessionContext { current: cur, max_observed, model });
+            return Some(SessionContext {
+                current: cur,
+                max_observed,
+                model,
+            });
         }
         // Guard mismatch or I/O error — fall through to full reparse.
     }
@@ -931,22 +1043,40 @@ pub fn current_context_from_transcript(path: &Path) -> Option<SessionContext> {
     if let Ok(mut g) = ctx_cache().lock() {
         g.insert(
             key,
-            CtxEntry { mtime, size, offset, guard, tail_trusted: true, max_observed, current: current.clone() },
+            CtxEntry {
+                mtime,
+                size,
+                offset,
+                guard,
+                tail_trusted: true,
+                max_observed,
+                current: current.clone(),
+            },
         );
     }
     let (cur, model) = current?;
-    Some(SessionContext { current: cur, max_observed, model })
+    Some(SessionContext {
+        current: cur,
+        max_observed,
+        model,
+    })
 }
 
 /// Read `"model"` from an account's settings and return true if it
 /// requests an extended-context variant (e.g. `opus[1m]`, `sonnet[1m]`).
 pub fn extended_context_from_settings(account: &Account) -> bool {
     for path in account.settings_paths() {
-        let Ok(s) = std::fs::read_to_string(&path) else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { continue };
+        let Ok(s) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
+            continue;
+        };
         let model_str: Option<String> = match v.get("model") {
             Some(serde_json::Value::String(s)) => Some(s.clone()),
-            Some(serde_json::Value::Object(o)) => o.get("id").and_then(|x| x.as_str()).map(String::from),
+            Some(serde_json::Value::Object(o)) => {
+                o.get("id").and_then(|x| x.as_str()).map(String::from)
+            }
             _ => None,
         };
         if let Some(s) = model_str {
@@ -1024,7 +1154,11 @@ pub fn context_cap_for(
         || session_id.is_some_and(|sid| extended_context_marked(account, sid))
         || max_observed > 200_000
         || extended_context_from_settings(account);
-    if one_m { 1_000_000 } else { 200_000 }
+    if one_m {
+        1_000_000
+    } else {
+        200_000
+    }
 }
 
 fn extended_context_marker_path(account: &Account, session_id: &str) -> Option<std::path::PathBuf> {
@@ -1038,7 +1172,9 @@ fn extended_context_marker_path(account: &Account, session_id: &str) -> Option<s
 /// Record that this session has been seen using `[1m]` (1M context tier).
 /// Idempotent — writing an existing file is a no-op for our purposes.
 pub fn mark_extended_context(account: &Account, session_id: &str) {
-    let Some(p) = extended_context_marker_path(account, session_id) else { return };
+    let Some(p) = extended_context_marker_path(account, session_id) else {
+        return;
+    };
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -1047,8 +1183,7 @@ pub fn mark_extended_context(account: &Account, session_id: &str) {
 
 /// True iff [`mark_extended_context`] was previously called for this session.
 pub fn extended_context_marked(account: &Account, session_id: &str) -> bool {
-    extended_context_marker_path(account, session_id)
-        .is_some_and(|p| p.exists())
+    extended_context_marker_path(account, session_id).is_some_and(|p| p.exists())
 }
 
 fn session_effort_path(account: &Account, session_id: &str) -> Option<std::path::PathBuf> {
@@ -1065,7 +1200,9 @@ fn session_effort_path(account: &Account, session_id: &str) -> Option<std::path:
 /// `effortLevel` and shows every session the same level. Overwritten on
 /// each `mewxi status` refresh so it tracks the live value.
 pub fn mark_session_effort(account: &Account, session_id: &str, effort: &str) {
-    let Some(p) = session_effort_path(account, session_id) else { return };
+    let Some(p) = session_effort_path(account, session_id) else {
+        return;
+    };
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -1170,14 +1307,26 @@ mod context_cap_tests {
     #[test]
     fn natively_1m_model_gets_1m_cap_without_any_1m_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        let cap = context_cap_for("claude-fable-5", 49_000, Some("Fable 5"), &account(tmp.path()), None);
+        let cap = context_cap_for(
+            "claude-fable-5",
+            49_000,
+            Some("Fable 5"),
+            &account(tmp.path()),
+            None,
+        );
         assert_eq!(cap, 1_000_000);
     }
 
     #[test]
     fn model_on_200k_default_keeps_200k_cap() {
         let tmp = tempfile::tempdir().unwrap();
-        let cap = context_cap_for("claude-opus-4-5", 49_000, Some("Opus 4.5"), &account(tmp.path()), None);
+        let cap = context_cap_for(
+            "claude-opus-4-5",
+            49_000,
+            Some("Opus 4.5"),
+            &account(tmp.path()),
+            None,
+        );
         assert_eq!(cap, 200_000);
     }
 }
@@ -1186,7 +1335,12 @@ mod context_cap_tests {
 mod trailing_tests {
     use super::*;
 
-    fn record(session_id: &str, message_id: &str, cost_usd: f64, timestamp: DateTime<Utc>) -> UsageRecord {
+    fn record(
+        session_id: &str,
+        message_id: &str,
+        cost_usd: f64,
+        timestamp: DateTime<Utc>,
+    ) -> UsageRecord {
         UsageRecord {
             timestamp,
             session_id: session_id.to_string(),
@@ -1227,7 +1381,9 @@ mod trailing_tests {
         // Per-session split of the trailing window.
         assert!((agg.trailing_7d_cost_by_session["session-a"] - 4.0).abs() < 1e-9);
         assert!((agg.trailing_7d_cost_by_session["session-b"] - 4.0).abs() < 1e-9);
-        assert!(!agg.trailing_7d_cost_by_session.contains_key("nonexistent-session"));
+        assert!(!agg
+            .trailing_7d_cost_by_session
+            .contains_key("nonexistent-session"));
     }
 }
 
@@ -1251,7 +1407,11 @@ mod incremental_tests {
         cache_read: u64,
         sidechain: bool,
     ) -> String {
-        let side = if sidechain { r#","isSidechain":true"# } else { "" };
+        let side = if sidechain {
+            r#","isSidechain":true"#
+        } else {
+            ""
+        };
         format!(
             r#"{{"type":"assistant","sessionId":"{session}","timestamp":"{ts}"{side},"message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":{input},"output_tokens":50,"cache_read_input_tokens":{cache_read},"cache_creation":{{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":0}}}}}}}}"#
         )
@@ -1263,7 +1423,17 @@ mod incremental_tests {
         let path = tmp.path().join("t1.jsonl");
 
         let lines: Vec<String> = (0..5)
-            .map(|i| assistant_line(&format!("m{i}"), "s1", "2026-07-21T10:00:00Z", "claude-sonnet-4-5", 1000 + i, 2000, false))
+            .map(|i| {
+                assistant_line(
+                    &format!("m{i}"),
+                    "s1",
+                    "2026-07-21T10:00:00Z",
+                    "claude-sonnet-4-5",
+                    1000 + i,
+                    2000,
+                    false,
+                )
+            })
             .collect();
         fs::write(&path, lines.join("\n") + "\n").unwrap();
 
@@ -1271,7 +1441,17 @@ mod incremental_tests {
         assert_eq!(a.len(), 5);
 
         let more: Vec<String> = (5..8)
-            .map(|i| assistant_line(&format!("m{i}"), "s1", "2026-07-21T10:05:00Z", "claude-opus-4-5", 1000 + i, 2000, false))
+            .map(|i| {
+                assistant_line(
+                    &format!("m{i}"),
+                    "s1",
+                    "2026-07-21T10:05:00Z",
+                    "claude-opus-4-5",
+                    1000 + i,
+                    2000,
+                    false,
+                )
+            })
             .collect();
         {
             let mut f = OpenOptions::new().append(true).open(&path).unwrap();
@@ -1306,8 +1486,24 @@ mod incremental_tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("t2.jsonl");
 
-        let complete = assistant_line("m0", "s1", "2026-07-21T10:00:00Z", "claude-sonnet-4-5", 1000, 2000, false);
-        let full_line1 = assistant_line("m1", "s1", "2026-07-21T10:01:00Z", "claude-sonnet-4-5", 1500, 2000, false);
+        let complete = assistant_line(
+            "m0",
+            "s1",
+            "2026-07-21T10:00:00Z",
+            "claude-sonnet-4-5",
+            1000,
+            2000,
+            false,
+        );
+        let full_line1 = assistant_line(
+            "m1",
+            "s1",
+            "2026-07-21T10:01:00Z",
+            "claude-sonnet-4-5",
+            1500,
+            2000,
+            false,
+        );
         let split_at = full_line1.len() / 2;
         let (frag_prefix, frag_rest) = full_line1.split_at(split_at);
 
@@ -1319,7 +1515,15 @@ mod incremental_tests {
         assert_eq!(a[0].message_id, "m0");
 
         // Complete the fragment, add a newline, then one more full line.
-        let next_line = assistant_line("m2", "s1", "2026-07-21T10:02:00Z", "claude-sonnet-4-5", 1200, 2000, false);
+        let next_line = assistant_line(
+            "m2",
+            "s1",
+            "2026-07-21T10:02:00Z",
+            "claude-sonnet-4-5",
+            1200,
+            2000,
+            false,
+        );
         {
             let mut f = OpenOptions::new().append(true).open(&path).unwrap();
             write!(f, "{frag_rest}\n{next_line}\n").unwrap();
@@ -1347,7 +1551,17 @@ mod incremental_tests {
         let path = tmp.path().join("t3.jsonl");
 
         let lines: Vec<String> = (0..4)
-            .map(|i| assistant_line(&format!("m{i}"), "s1", "2026-07-21T10:00:00Z", "claude-sonnet-4-5", 1000 + i, 2000, false))
+            .map(|i| {
+                assistant_line(
+                    &format!("m{i}"),
+                    "s1",
+                    "2026-07-21T10:00:00Z",
+                    "claude-sonnet-4-5",
+                    1000 + i,
+                    2000,
+                    false,
+                )
+            })
             .collect();
         fs::write(&path, lines.join("\n") + "\n").unwrap();
 
@@ -1358,7 +1572,15 @@ mod incremental_tests {
         // so the incremental path must be discarded in favor of a full
         // reparse rather than treating this as a truncated-but-consistent
         // append.
-        let new_line = assistant_line("z0", "s2", "2026-07-21T11:00:00Z", "claude-opus-4-5", 500, 100, false);
+        let new_line = assistant_line(
+            "z0",
+            "s2",
+            "2026-07-21T11:00:00Z",
+            "claude-opus-4-5",
+            500,
+            100,
+            false,
+        );
         fs::write(&path, format!("{new_line}\n")).unwrap();
 
         let b = parse_file_cached(&path).unwrap();
@@ -1384,7 +1606,17 @@ mod incremental_tests {
         let path = tmp.path().join("t3b.jsonl");
 
         let original: Vec<String> = (0..3)
-            .map(|i| assistant_line(&format!("orig{i}"), "s1", "2026-07-21T10:00:00Z", "claude-sonnet-4-5", 1000 + i, 2000, false))
+            .map(|i| {
+                assistant_line(
+                    &format!("orig{i}"),
+                    "s1",
+                    "2026-07-21T10:00:00Z",
+                    "claude-sonnet-4-5",
+                    1000 + i,
+                    2000,
+                    false,
+                )
+            })
             .collect();
         fs::write(&path, original.join("\n") + "\n").unwrap();
         let a = parse_file_cached(&path).unwrap();
@@ -1392,7 +1624,17 @@ mod incremental_tests {
 
         // Replace wholesale with a longer, entirely different set of lines.
         let replaced: Vec<String> = (0..6)
-            .map(|i| assistant_line(&format!("new{i}"), "s2", "2026-07-21T12:00:00Z", "claude-opus-4-5", 2000 + i, 3000, false))
+            .map(|i| {
+                assistant_line(
+                    &format!("new{i}"),
+                    "s2",
+                    "2026-07-21T12:00:00Z",
+                    "claude-opus-4-5",
+                    2000 + i,
+                    3000,
+                    false,
+                )
+            })
             .collect();
         fs::write(&path, replaced.join("\n") + "\n").unwrap();
 
@@ -1414,11 +1656,35 @@ mod incremental_tests {
         let path = tmp.path().join("t4.jsonl");
 
         // Early high-context line (simulates approaching the 1M cap).
-        let l0 = assistant_line("m0", "s1", "2026-07-21T09:00:00Z", "claude-opus-4-5", 900_000, 0, false);
+        let l0 = assistant_line(
+            "m0",
+            "s1",
+            "2026-07-21T09:00:00Z",
+            "claude-opus-4-5",
+            900_000,
+            0,
+            false,
+        );
         // Later, lower-context lines.
-        let l1 = assistant_line("m1", "s1", "2026-07-21T09:05:00Z", "claude-sonnet-4-5", 1000, 500, false);
+        let l1 = assistant_line(
+            "m1",
+            "s1",
+            "2026-07-21T09:05:00Z",
+            "claude-sonnet-4-5",
+            1000,
+            500,
+            false,
+        );
         // Sidechain line with a huge ctx that must be ignored entirely.
-        let l2 = assistant_line("side0", "s1", "2026-07-21T09:06:00Z", "claude-haiku-4-5", 999_000, 0, true);
+        let l2 = assistant_line(
+            "side0",
+            "s1",
+            "2026-07-21T09:06:00Z",
+            "claude-haiku-4-5",
+            999_000,
+            0,
+            true,
+        );
         fs::write(&path, format!("{l0}\n{l1}\n{l2}\n")).unwrap();
 
         let ctx1 = current_context_from_transcript(&path).unwrap();
@@ -1426,9 +1692,33 @@ mod incremental_tests {
         assert_eq!(ctx1.model, "claude-sonnet-4-5"); // last non-sidechain line
 
         // Append more lower-context lines, plus another sidechain line.
-        let l3 = assistant_line("m3", "s1", "2026-07-21T09:10:00Z", "claude-sonnet-4-5", 2000, 500, false);
-        let side1 = assistant_line("side1", "s1", "2026-07-21T09:10:30Z", "claude-haiku-4-5", 500_000, 0, true);
-        let l4 = assistant_line("m4", "s1", "2026-07-21T09:11:00Z", "claude-opus-4-5", 3000, 500, false);
+        let l3 = assistant_line(
+            "m3",
+            "s1",
+            "2026-07-21T09:10:00Z",
+            "claude-sonnet-4-5",
+            2000,
+            500,
+            false,
+        );
+        let side1 = assistant_line(
+            "side1",
+            "s1",
+            "2026-07-21T09:10:30Z",
+            "claude-haiku-4-5",
+            500_000,
+            0,
+            true,
+        );
+        let l4 = assistant_line(
+            "m4",
+            "s1",
+            "2026-07-21T09:11:00Z",
+            "claude-opus-4-5",
+            3000,
+            500,
+            false,
+        );
         {
             let mut f = OpenOptions::new().append(true).open(&path).unwrap();
             writeln!(f, "{l3}").unwrap();

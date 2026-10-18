@@ -207,7 +207,11 @@ pub fn scan_running(
 ) -> Vec<SubAgent> {
     let feed = account_dir.and_then(|d| crate::agent_status::read_feed(d, session_id));
     let mut out = scan_flat_running(transcript_path, session_id, feed.as_ref());
-    out.extend(scan_workflow_running(transcript_path, session_id, feed.as_ref()));
+    out.extend(scan_workflow_running(
+        transcript_path,
+        session_id,
+        feed.as_ref(),
+    ));
     order_as_tree(out)
 }
 
@@ -239,7 +243,11 @@ fn order_as_tree(agents: Vec<SubAgent>) -> Vec<SubAgent> {
         kids.sort_by_key(key);
     }
 
-    fn push_subtree(agent: SubAgent, children: &mut HashMap<String, Vec<SubAgent>>, out: &mut Vec<SubAgent>) {
+    fn push_subtree(
+        agent: SubAgent,
+        children: &mut HashMap<String, Vec<SubAgent>>,
+        out: &mut Vec<SubAgent>,
+    ) {
         let id = agent.agent_id.clone();
         out.push(agent);
         if let Some(kids) = children.remove(&id) {
@@ -444,7 +452,9 @@ fn scan_flat_running(
         if !keep_alive {
             continue;
         }
-        let Some(detail) = read_subagent(&cand.path) else { continue };
+        let Some(detail) = read_subagent(&cand.path) else {
+            continue;
+        };
         let meta = &cand.meta;
         let agent_type = meta.as_ref().and_then(|m| m.agent_type.clone());
         let description = meta
@@ -497,7 +507,12 @@ fn has_fresh_descendant(
         if resolved_ids.contains(id) {
             continue;
         }
-        if cand.meta.as_ref().and_then(|m| m.parent_agent_id.as_deref()) != Some(agent_id) {
+        if cand
+            .meta
+            .as_ref()
+            .and_then(|m| m.parent_agent_id.as_deref())
+            != Some(agent_id)
+        {
             continue;
         }
         if cand.self_fresh || has_fresh_descendant(id, candidates, resolved_ids) {
@@ -574,7 +589,9 @@ fn scan_workflow_running(
             if finished.contains(&agent_id) {
                 continue;
             }
-            let Some(detail) = read_subagent(&path) else { continue };
+            let Some(detail) = read_subagent(&path) else {
+                continue;
+            };
             let meta = read_meta(&path);
             let progress = run_meta.as_ref().and_then(|r| r.agents.get(&agent_id));
             let agent_type = progress
@@ -1562,7 +1579,13 @@ mod tests {
     /// usage record, so `read_subagent` succeeds) and its `.meta.json`
     /// sidecar, with room for extra hand-written lines (e.g. a
     /// `tool_result` resolving a child).
-    fn write_nested_fixture(subdir: &Path, id: &str, meta_json: &str, launched: &str, extra_lines: &str) {
+    fn write_nested_fixture(
+        subdir: &Path,
+        id: &str,
+        meta_json: &str,
+        launched: &str,
+        extra_lines: &str,
+    ) {
         let body = format!(
             "{}\n{}\n{}",
             format!(

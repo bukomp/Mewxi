@@ -53,7 +53,11 @@ pub struct LimitShare {
 
 /// Estimate `session_id`'s share of the account's 5h and weekly limits.
 /// See the module doc for the estimation model.
-pub fn session_limit_share(agg: &Aggregate, live: Option<&LiveUsage>, session_id: &str) -> LimitShare {
+pub fn session_limit_share(
+    agg: &Aggregate,
+    live: Option<&LiveUsage>,
+    session_id: &str,
+) -> LimitShare {
     let five_h_pct = (|| {
         let u = live?.five_hour.as_ref()?.utilization;
         let sess: f64 = agg
@@ -87,7 +91,10 @@ pub fn session_limit_share(agg: &Aggregate, live: Option<&LiveUsage>, session_id
         }
     })();
 
-    LimitShare { five_h_pct, weekly_pct }
+    LimitShare {
+        five_h_pct,
+        weekly_pct,
+    }
 }
 
 /// One observed increase in the account's billed "extra usage" credits,
@@ -109,7 +116,10 @@ pub struct LedgerEntry {
 
 /// `<cache>/mewxi/extra-ledger-<slug>.jsonl` (mirrors live_usage::cache_path).
 pub fn ledger_path(account: &Account) -> Option<PathBuf> {
-    dirs::cache_dir().map(|c| c.join("mewxi").join(format!("extra-ledger-{}.jsonl", account.slug())))
+    dirs::cache_dir().map(|c| {
+        c.join("mewxi")
+            .join(format!("extra-ledger-{}.jsonl", account.slug()))
+    })
 }
 
 fn load_ledger_from(path: &Path) -> Vec<LedgerEntry> {
@@ -126,7 +136,9 @@ fn load_ledger_from(path: &Path) -> Vec<LedgerEntry> {
 
 /// JSONL: one LedgerEntry per line; unparseable lines skipped; missing file = empty.
 pub fn load_ledger(account: &Account) -> Vec<LedgerEntry> {
-    ledger_path(account).map(|p| load_ledger_from(&p)).unwrap_or_default()
+    ledger_path(account)
+        .map(|p| load_ledger_from(&p))
+        .unwrap_or_default()
 }
 
 /// Best-effort: observe an increase in extra-usage credits and append a
@@ -150,7 +162,9 @@ pub fn load_ledger(account: &Account) -> Vec<LedgerEntry> {
 ///    from_cents: from, to_cents: fresh_used, currency }`.
 /// 5. Entries older than 45 days are pruned on every write.
 pub fn record_extra_delta(account: &Account, prev: Option<&LiveUsage>, fresh: &LiveUsage) {
-    let Some(path) = ledger_path(account) else { return };
+    let Some(path) = ledger_path(account) else {
+        return;
+    };
     record_extra_delta_at(&path, prev, fresh, refresh_interval());
 }
 
@@ -197,7 +211,12 @@ fn write_ledger(path: &Path, mut entries: Vec<LedgerEntry>, new_entry: LedgerEnt
     }
 }
 
-fn record_extra_delta_at(path: &Path, prev: Option<&LiveUsage>, fresh: &LiveUsage, refresh: Duration) {
+fn record_extra_delta_at(
+    path: &Path,
+    prev: Option<&LiveUsage>,
+    fresh: &LiveUsage,
+    refresh: Duration,
+) {
     let fresh_used = match fresh.extra_usage.as_ref() {
         Some(e) if e.is_enabled => match e.used_credits {
             Some(v) if v > 0.0 => v,
@@ -208,7 +227,13 @@ fn record_extra_delta_at(path: &Path, prev: Option<&LiveUsage>, fresh: &LiveUsag
 
     let existing = load_ledger_from(path);
     let last_to = existing.last().map(|e| e.to_cents);
-    let prev_used = prev.and_then(|p| p.extra_usage.as_ref()).and_then(|e| if e.is_enabled { e.used_credits } else { None });
+    let prev_used = prev.and_then(|p| p.extra_usage.as_ref()).and_then(|e| {
+        if e.is_enabled {
+            e.used_credits
+        } else {
+            None
+        }
+    });
 
     let from = prev_used.unwrap_or(0.0).max(last_to.unwrap_or(0.0));
     let at = fresh.fetched_at;
@@ -231,17 +256,27 @@ fn record_extra_delta_at(path: &Path, prev: Option<&LiveUsage>, fresh: &LiveUsag
         return;
     }
 
-    let window_start = prev
-        .map(|p| p.fetched_at)
-        .unwrap_or(at - chrono::Duration::from_std(refresh).unwrap_or_else(|_| chrono::Duration::seconds(60)));
+    let window_start = prev.map(|p| p.fetched_at).unwrap_or(
+        at - chrono::Duration::from_std(refresh).unwrap_or_else(|_| chrono::Duration::seconds(60)),
+    );
 
-    let entry = LedgerEntry { window_start, at, from_cents: from, to_cents: fresh_used, currency: currency.clone() };
+    let entry = LedgerEntry {
+        window_start,
+        at,
+        from_cents: from,
+        to_cents: fresh_used,
+        currency: currency.clone(),
+    };
     write_ledger(path, existing, entry);
 
     crate::debug_log::log_event(
         LogOrigin::Usage,
         LogKind::FileWrite,
-        &format!("extra usage +{:.2} {} recorded", delta / 100.0, currency.as_deref().unwrap_or("")),
+        &format!(
+            "extra usage +{:.2} {} recorded",
+            delta / 100.0,
+            currency.as_deref().unwrap_or("")
+        ),
     );
 }
 
@@ -303,7 +338,11 @@ mod tests {
         assert!((a - b).abs() < 1e-6, "expected {b}, got {a}");
     }
 
-    fn live(five_hour: Option<WindowUsage>, seven_day: Option<WindowUsage>, extra_usage: Option<ExtraUsage>) -> LiveUsage {
+    fn live(
+        five_hour: Option<WindowUsage>,
+        seven_day: Option<WindowUsage>,
+        extra_usage: Option<ExtraUsage>,
+    ) -> LiveUsage {
         LiveUsage {
             five_hour,
             seven_day,
@@ -314,7 +353,11 @@ mod tests {
         }
     }
 
-    fn live_extra(used_credits: Option<f64>, is_enabled: bool, fetched_at: DateTime<Utc>) -> LiveUsage {
+    fn live_extra(
+        used_credits: Option<f64>,
+        is_enabled: bool,
+        fetched_at: DateTime<Utc>,
+    ) -> LiveUsage {
         LiveUsage {
             five_hour: None,
             seven_day: None,
@@ -356,18 +399,29 @@ mod tests {
 
     #[test]
     fn five_h_share_with_block_activity() {
-        let mut agg = Aggregate { ..Default::default() };
+        let mut agg = Aggregate {
+            ..Default::default()
+        };
         agg.five_h_records = vec![record("sess-a", 3.0, "m1"), record("sess-b", 1.0, "m2")];
         agg.rolling_5h.cost_usd = 4.0;
 
-        let l = live(Some(WindowUsage { utilization: 50.0, resets_at: None }), None, None);
+        let l = live(
+            Some(WindowUsage {
+                utilization: 50.0,
+                resets_at: None,
+            }),
+            None,
+            None,
+        );
         let share = session_limit_share(&agg, Some(&l), "sess-a");
         approx(share.five_h_pct.expect("expected Some"), 50.0 * 3.0 / 4.0);
     }
 
     #[test]
     fn missing_live_data_yields_none() {
-        let agg = Aggregate { ..Default::default() };
+        let agg = Aggregate {
+            ..Default::default()
+        };
         let share = session_limit_share(&agg, None, "sess-a");
         assert_eq!(share.five_h_pct, None);
         assert_eq!(share.weekly_pct, None);
@@ -375,19 +429,37 @@ mod tests {
 
     #[test]
     fn zero_account_window_cost_yields_none() {
-        let agg = Aggregate { ..Default::default() };
-        let l = live(Some(WindowUsage { utilization: 50.0, resets_at: None }), None, None);
+        let agg = Aggregate {
+            ..Default::default()
+        };
+        let l = live(
+            Some(WindowUsage {
+                utilization: 50.0,
+                resets_at: None,
+            }),
+            None,
+            None,
+        );
         let share = session_limit_share(&agg, Some(&l), "sess-a");
         assert_eq!(share.five_h_pct, None);
     }
 
     #[test]
     fn session_with_no_block_activity_yields_some_zero() {
-        let mut agg = Aggregate { ..Default::default() };
+        let mut agg = Aggregate {
+            ..Default::default()
+        };
         agg.five_h_records = vec![record("sess-b", 4.0, "m1")];
         agg.rolling_5h.cost_usd = 4.0;
 
-        let l = live(Some(WindowUsage { utilization: 50.0, resets_at: None }), None, None);
+        let l = live(
+            Some(WindowUsage {
+                utilization: 50.0,
+                resets_at: None,
+            }),
+            None,
+            None,
+        );
         let share = session_limit_share(&agg, Some(&l), "sess-a");
         let pct = share.five_h_pct.expect("expected Some");
         approx(pct, 0.0);
@@ -398,13 +470,22 @@ mod tests {
 
     #[test]
     fn weekly_share_with_activity() {
-        let mut agg = Aggregate { ..Default::default() };
+        let mut agg = Aggregate {
+            ..Default::default()
+        };
         let mut by_session = HashMap::new();
         by_session.insert("sess-a".to_string(), 6.0);
         agg.trailing_7d_cost_by_session = by_session;
         agg.trailing_7d_cost_usd = 8.0;
 
-        let l = live(None, Some(WindowUsage { utilization: 20.0, resets_at: None }), None);
+        let l = live(
+            None,
+            Some(WindowUsage {
+                utilization: 20.0,
+                resets_at: None,
+            }),
+            None,
+        );
         let share = session_limit_share(&agg, Some(&l), "sess-a");
         approx(share.weekly_pct.expect("expected Some"), 20.0 * 6.0 / 8.0);
     }
@@ -465,8 +546,20 @@ mod tests {
         let t3 = t2 + ChronoDuration::seconds(60);
 
         let ledger = vec![
-            LedgerEntry { window_start: t0, at: t1, from_cents: 0.0, to_cents: 100.0, currency: Some("EUR".to_string()) },
-            LedgerEntry { window_start: t2, at: t3, from_cents: 100.0, to_cents: 200.0, currency: Some("EUR".to_string()) },
+            LedgerEntry {
+                window_start: t0,
+                at: t1,
+                from_cents: 0.0,
+                to_cents: 100.0,
+                currency: Some("EUR".to_string()),
+            },
+            LedgerEntry {
+                window_start: t2,
+                at: t3,
+                from_cents: 100.0,
+                to_cents: 200.0,
+                currency: Some("EUR".to_string()),
+            },
         ];
 
         let records = vec![
@@ -570,7 +663,11 @@ mod tests {
             to_cents: 100.0,
             currency: Some("EUR".to_string()),
         };
-        fs::write(&path, format!("{}\n", serde_json::to_string(&old_entry).unwrap())).unwrap();
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&old_entry).unwrap()),
+        )
+        .unwrap();
 
         let refresh = Duration::from_secs(60);
         let now = Utc::now();

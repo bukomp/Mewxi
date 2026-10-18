@@ -113,17 +113,22 @@ pub fn render_status(
         }
     };
 
-    let account = match transcript_path
-        .and_then(|p| accounts::account_for_transcript(&view.accounts, p))
-    {
-        Some(a) => a,
-        None => match view.pick(None) {
+    let account =
+        match transcript_path.and_then(|p| accounts::account_for_transcript(&view.accounts, p)) {
             Some(a) => a,
-            None => return String::new(),
-        },
-    };
+            None => match view.pick(None) {
+                Some(a) => a,
+                None => return String::new(),
+            },
+        };
 
-    render_status_for_account(account, view.accounts.len() > 1, transcript_path, meta, no_live)
+    render_status_for_account(
+        account,
+        view.accounts.len() > 1,
+        transcript_path,
+        meta,
+        no_live,
+    )
 }
 
 pub(crate) fn render_status_for_account(
@@ -212,7 +217,13 @@ pub(crate) fn render_status_legacy(
                 session_id.as_deref(),
             );
             let pct = (sc.current as f64 / cap as f64 * 100.0).min(999.0);
-            let color = if pct >= 85.0 { "31" } else if pct >= 60.0 { "33" } else { "32" };
+            let color = if pct >= 85.0 {
+                "31"
+            } else if pct >= 60.0 {
+                "33"
+            } else {
+                "32"
+            };
             format!(
                 " \x1b[90m|\x1b[0m \x1b[36mctx\x1b[0m \x1b[{c}m{p:.0}%\x1b[0m ({}/{})",
                 fmt_tokens_compact(sc.current),
@@ -269,7 +280,13 @@ pub(crate) fn currency_symbol(code: Option<&str>) -> &'static str {
 }
 
 pub(crate) fn pct_color(pct: f64) -> &'static str {
-    if pct >= 85.0 { "31" } else if pct >= 60.0 { "33" } else { "32" }
+    if pct >= 85.0 {
+        "31"
+    } else if pct >= 60.0 {
+        "33"
+    } else {
+        "32"
+    }
 }
 
 pub(crate) fn five_h_from_live(live: Option<&live_usage::LiveUsage>) -> Option<(String, String)> {
@@ -364,7 +381,8 @@ fn write_status_cache(path: &Path, line: &str) -> Result<()> {
 /// `status.txt` mirror so single-statusLine deployments still get the
 /// most-recently-modified account.
 fn write_account_status(account: &Account, prefix_name: bool, no_live: bool) {
-    let line = render_status_for_account(account, prefix_name, None, SessionMeta::default(), no_live);
+    let line =
+        render_status_for_account(account, prefix_name, None, SessionMeta::default(), no_live);
     if let Some(p) = stats::status_cache_path_for(account) {
         if let Err(e) = write_status_cache(&p, &line) {
             crate::debug_log::log_event(
@@ -413,13 +431,18 @@ pub fn run_forever(no_live: bool) -> Result<()> {
         }
         let acct_name = account.name.clone();
         let tx: Sender<String> = dirty_tx.clone();
-        let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(ev) = res {
-                if ev.paths.iter().any(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl")) {
-                    let _ = tx.send(acct_name.clone());
+        let mut watcher: RecommendedWatcher =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res {
+                    if ev
+                        .paths
+                        .iter()
+                        .any(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+                    {
+                        let _ = tx.send(acct_name.clone());
+                    }
                 }
-            }
-        })?;
+            })?;
         watcher.watch(&dir, RecursiveMode::Recursive)?;
         crate::debug_log::log_event(
             LogOrigin::Statusline,
@@ -502,7 +525,9 @@ pub fn run_forever(no_live: bool) -> Result<()> {
         if !wrote_any {
             let mut missing: Vec<&Account> = Vec::new();
             for account in &view.accounts {
-                let Some(p) = stats::status_cache_path_for(account) else { continue };
+                let Some(p) = stats::status_cache_path_for(account) else {
+                    continue;
+                };
                 if !p.exists() {
                     missing.push(account);
                 }
@@ -568,8 +593,9 @@ mod golden_tests {
         live: Option<&LiveUsage>,
     ) {
         let legacy = render_status_legacy(account, prefix, transcript, meta, agg, live);
-        let composed =
-            crate::statusline::compose_default_from_data(account, prefix, transcript, meta, agg, live);
+        let composed = crate::statusline::compose_default_from_data(
+            account, prefix, transcript, meta, agg, live,
+        );
         assert_eq!(composed, legacy);
     }
 
@@ -619,7 +645,14 @@ mod golden_tests {
             }),
             Some(extra),
         );
-        assert_identical(&account, false, None, SessionMeta::default(), &agg, Some(&live));
+        assert_identical(
+            &account,
+            false,
+            None,
+            SessionMeta::default(),
+            &agg,
+            Some(&live),
+        );
     }
 
     #[test]
@@ -640,7 +673,13 @@ mod golden_tests {
             }),
             None,
         );
-        assert_identical(&account, false, None, SessionMeta::default(), &agg, Some(&live));
+        assert_identical(
+            &account,
+            false,
+            None,
+            SessionMeta::default(),
+            &agg,
+            Some(&live),
+        );
     }
 }
-

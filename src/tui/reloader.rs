@@ -16,8 +16,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::accounts::Account;
-use crate::live_session::{self, LiveSession};
 use crate::limit_attr;
+use crate::live_session::{self, LiveSession};
 use crate::stats::{self, Aggregate};
 
 /// The outcome of a single account's reload wave, sent from the
@@ -96,7 +96,11 @@ fn is_due(last_reload: Option<Instant>, now: Instant, debounce: Duration) -> boo
 /// `req_rx` are considered. Each account is further subject to a 500ms
 /// debounce: if it was reloaded more recently than that, it's skipped
 /// for this wave and stays dirty so a later wave retries it.
-fn run(req_rx: Receiver<String>, result_tx: Sender<ReloadResult>, accounts: Vec<(Account, Vec<LiveSession>)>) {
+fn run(
+    req_rx: Receiver<String>,
+    result_tx: Sender<ReloadResult>,
+    accounts: Vec<(Account, Vec<LiveSession>)>,
+) {
     const DEBOUNCE: Duration = Duration::from_millis(500);
     const FORCE_TICK_PERIOD: Duration = Duration::from_secs(5);
 
@@ -148,7 +152,10 @@ fn run(req_rx: Receiver<String>, result_tx: Sender<ReloadResult>, accounts: Vec<
             let (records, agg) = stats::load_records_and_aggregate_for(account).unwrap_or_default();
             let ledger = limit_attr::load_ledger(account);
             let price_by_session = limit_attr::session_prices(&records, &ledger);
-            let previous = previous_live.get(&name).map(|v| v.as_slice()).unwrap_or(&[]);
+            let previous = previous_live
+                .get(&name)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let live_sessions = live_session::scan(account, &alive, previous);
             previous_live.insert(name.clone(), live_sessions.clone());
 

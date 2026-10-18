@@ -49,7 +49,10 @@ pub fn render(
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(P_HIGH))
-        .title(Span::styled(title, Style::default().fg(P_HIGH).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(
+            title,
+            Style::default().fg(P_HIGH).add_modifier(Modifier::BOLD),
+        ));
 
     if sessions.is_empty() {
         *table_state = TableState::default();
@@ -144,7 +147,11 @@ pub fn render(
             .filter(|s| s.subagent.is_none() && s.state == SessionState::Active)
             .count();
         let total_in_group = group.iter().filter(|s| s.subagent.is_none()).count();
-        let label = if project.is_empty() { "(unknown)" } else { project.as_str() };
+        let label = if project.is_empty() {
+            "(unknown)"
+        } else {
+            project.as_str()
+        };
         let label_pad = max_project_len.saturating_sub(label.chars().count());
         let count_text = format!("{active_in_group}/{total_in_group} active");
         let any_active = active_in_group > 0;
@@ -160,7 +167,9 @@ pub fn render(
         let header_line = Line::from(vec![
             Span::styled(
                 format!("▾ {label}"),
-                Style::default().fg(project_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(project_color)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" ".repeat(label_pad + 2)),
             Span::styled(count_text, Style::default().fg(P_DIM)),
@@ -189,7 +198,14 @@ pub fn render(
             if s.subagent.is_some() {
                 session_rows.push(rows.len());
                 rows.push(subagent_row(
-                    s, now, is_selected, show_status, show_ctx, show_io, show_cache, show_price,
+                    s,
+                    now,
+                    is_selected,
+                    show_status,
+                    show_ctx,
+                    show_io,
+                    show_cache,
+                    show_price,
                     show_limits,
                 ));
                 continue;
@@ -292,7 +308,11 @@ pub fn render(
                     match v {
                         None => Cell::from(Span::styled("—", Style::default().fg(P_DIM))),
                         Some(v) => {
-                            let text = if v >= 9.95 { format!("{v:.0}%") } else { format!("{v:.1}%") };
+                            let text = if v >= 9.95 {
+                                format!("{v:.0}%")
+                            } else {
+                                format!("{v:.1}%")
+                            };
                             if v < 0.05 {
                                 Cell::from(Span::styled(text, Style::default().fg(P_DIM)))
                             } else {
@@ -317,7 +337,10 @@ pub fn render(
                 None => Cell::from(model_label),
             };
             cells.push(model_cell);
-            cells.push(Cell::from(Span::styled(state_label, Style::default().fg(state_color))));
+            cells.push(Cell::from(Span::styled(
+                state_label,
+                Style::default().fg(state_color),
+            )));
             session_rows.push(rows.len());
             rows.push(Row::new(cells).style(base_style));
         }
@@ -471,7 +494,11 @@ fn subagent_row(
     } else {
         format!("{indent}      ↳ ")
     };
-    let lead_style = if is_selected { text } else { Style::default().fg(P_HIGH) };
+    let lead_style = if is_selected {
+        text
+    } else {
+        Style::default().fg(P_HIGH)
+    };
     let mut label = vec![Span::styled(lead, lead_style)];
     let tag = s.subagent.as_ref();
     if let Some(name) = tag.and_then(|t| t.workflow.as_ref()) {
@@ -515,7 +542,11 @@ fn subagent_row(
     // Appended after the match so it lands in both branches: the live
     // caption of whatever tool call the agent is currently on.
     if let Some(action) = action {
-        let action_style = if is_selected { text } else { Style::default().fg(P_HIGH) };
+        let action_style = if is_selected {
+            text
+        } else {
+            Style::default().fg(P_HIGH)
+        };
         label.push(Span::styled(format!(" — {action}"), action_style));
     }
     let age = (now - s.last_activity).num_seconds().max(0);
@@ -553,7 +584,10 @@ fn subagent_row(
     if show_price {
         let sym = currency_symbol(s.price_currency.as_deref());
         if s.price > 0.005 {
-            cells.push(Cell::from(Span::styled(format!("~{sym}{:.2}", s.price), text)));
+            cells.push(Cell::from(Span::styled(
+                format!("~{sym}{:.2}", s.price),
+                text,
+            )));
         } else {
             cells.push(Cell::from(Span::styled(format!("{sym}0.00"), dim)));
         }
@@ -574,7 +608,10 @@ fn subagent_row(
         None => Cell::from(Span::styled(model_label, text)),
     };
     cells.push(model_cell);
-    cells.push(Cell::from(Span::styled("active", Style::default().fg(P_HIGH))));
+    cells.push(Cell::from(Span::styled(
+        "active",
+        Style::default().fg(P_HIGH),
+    )));
     Row::new(cells)
 }
 

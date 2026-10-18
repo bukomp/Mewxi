@@ -66,7 +66,11 @@ pub fn backoff_after_429() -> Duration {
 }
 
 fn tunable_duration(configured: Option<u64>, default: Duration) -> Duration {
-    Duration::from_secs(configured.unwrap_or(default.as_secs()).max(MIN_TUNABLE_SECS))
+    Duration::from_secs(
+        configured
+            .unwrap_or(default.as_secs())
+            .max(MIN_TUNABLE_SECS),
+    )
 }
 
 // Cached tunables, in seconds; 0 = not read yet (MIN_TUNABLE_SECS keeps
@@ -453,7 +457,10 @@ pub fn cache_path(account: &Account) -> Option<PathBuf> {
 
 pub fn load_cached(account: &Account) -> Option<LiveUsage> {
     let p = cache_path(account)?;
-    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let file_name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     let bytes = match fs::read(&p) {
         Ok(b) => b,
         Err(e) => {
@@ -485,7 +492,10 @@ pub fn save_cached(account: &Account, u: &LiveUsage) {
     if let Some(parent) = p.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let file_name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     if let Ok(bytes) = serde_json::to_vec(u) {
         let tmp = p.with_extension("json.tmp");
         match fs::write(&tmp, &bytes).and_then(|_| fs::rename(&tmp, &p)) {
@@ -570,7 +580,9 @@ fn skip_note_path(account: &Account) -> Option<PathBuf> {
 /// line). A future mtime (clock skew) reads as "log it" — the safe
 /// failure mode is a noisy log, never a permanently silent one.
 fn should_log_skip(account: &Account) -> bool {
-    let Some(p) = skip_note_path(account) else { return true };
+    let Some(p) = skip_note_path(account) else {
+        return true;
+    };
     let noted_recently = fs::metadata(&p)
         .and_then(|m| m.modified())
         .ok()
@@ -588,7 +600,9 @@ fn should_log_skip(account: &Account) -> bool {
 }
 
 fn write_backoff(account: &Account, kind: &str, reason: &str) {
-    let Some(p) = backoff_path(account) else { return };
+    let Some(p) = backoff_path(account) else {
+        return;
+    };
     write_backoff_marker(&p, kind, reason);
 }
 
@@ -600,7 +614,10 @@ fn clear_backoff(account: &Account) {
         let _ = fs::remove_file(&np);
     }
     if let Some(p) = backoff_path(account) {
-        let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let file_name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         match fs::remove_file(&p) {
             Ok(()) => crate::debug_log::log_event(
                 crate::debug_log::LogOrigin::Usage,
@@ -634,7 +651,10 @@ fn write_backoff_marker(p: &Path, kind: &str, reason: &str) {
         kind: kind.to_string(),
         reason: reason.to_string(),
     };
-    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let file_name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     if let Ok(bytes) = serde_json::to_vec(&marker) {
         let tmp = p.with_extension("json.tmp");
         match fs::write(&tmp, &bytes).and_then(|_| fs::rename(&tmp, p)) {
@@ -678,9 +698,15 @@ fn read_backoff_marker(p: &Path, max_age: Duration) -> Option<Backoff> {
 /// A future mtime (clock skew) reads as *not* attempted — the safe
 /// failure mode is one extra fetch, never a blocked poller.
 fn fetch_recently_attempted(account: &Account) -> bool {
-    let Some(p) = attempt_path(account) else { return false };
-    let Ok(meta) = fs::metadata(&p) else { return false };
-    let Ok(mtime) = meta.modified() else { return false };
+    let Some(p) = attempt_path(account) else {
+        return false;
+    };
+    let Ok(meta) = fs::metadata(&p) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
     mtime
         .elapsed()
         .map(|age| age < HTTP_TIMEOUT)
@@ -688,11 +714,16 @@ fn fetch_recently_attempted(account: &Account) -> bool {
 }
 
 fn mark_fetch_attempt(account: &Account) {
-    let Some(p) = attempt_path(account) else { return };
+    let Some(p) = attempt_path(account) else {
+        return;
+    };
     if let Some(parent) = p.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let file_name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let file_name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     match fs::write(&p, b"") {
         Ok(()) => crate::debug_log::log_event(
             crate::debug_log::LogOrigin::Usage,

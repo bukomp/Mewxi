@@ -266,7 +266,9 @@ fn init_logger() -> Option<Mutex<Logger>> {
 /// their per-process churn could leave thousands). Best-effort delete of
 /// every `mewxi-*.log` other than the adopted one, once per init.
 fn prune_legacy(dir: &std::path::Path, keep: &std::path::Path) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         let is_log = p
@@ -295,7 +297,10 @@ impl Logger {
             // `append`, never `write + truncate`: several processes
             // share this file, and O_APPEND makes each flushed line
             // land at the current end instead of clobbering siblings'.
-            let f = OpenOptions::new().create(true).append(true).open(&self.path)?;
+            let f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
             self.file = Some(BufWriter::new(f));
         }
         if self.line_count >= max_lines_per_file() {
@@ -321,7 +326,9 @@ impl Logger {
     /// append is a single flushed write.
     fn trim(&mut self) {
         let cap = max_lines_per_file();
-        let Ok(bytes) = fs::read(&self.path) else { return };
+        let Ok(bytes) = fs::read(&self.path) else {
+            return;
+        };
         let total = bytes.iter().filter(|&&b| b == b'\n').count();
         if total < cap {
             // Our per-process count drifted past the file's real length
@@ -535,10 +542,7 @@ mod tests {
     /// every assertion here is scoped to entries carrying a marker
     /// unique to this test, never to the ring's raw contents.
     fn marker(tag: &str) -> String {
-        format!(
-            "debug_log::tests::{tag}::{:?}",
-            std::thread::current().id()
-        )
+        format!("debug_log::tests::{tag}::{:?}", std::thread::current().id())
     }
 
     #[test]

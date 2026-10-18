@@ -434,10 +434,7 @@ mod tests {
             EditOutcome::Passthrough
         );
         // Ctrl-C is passthrough (caller handles it).
-        assert_eq!(
-            t.handle_edit_key(ctrl('c')),
-            EditOutcome::Passthrough
-        );
+        assert_eq!(t.handle_edit_key(ctrl('c')), EditOutcome::Passthrough);
         // Alt-b is consumed (word left), changed=false at start.
         let _ = t.handle_edit_key(alt('b'));
     }

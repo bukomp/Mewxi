@@ -1,9 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
 
 pub struct KillConfirmModal {
     pub acct: String,
@@ -46,7 +46,12 @@ impl KillConfirmModal {
             Line::from(""),
             Line::from(vec![
                 Span::raw("  Kill "),
-                Span::styled(&short, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    &short,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(format!("  (pid {})", self.pid)),
             ]),
             Line::from(""),

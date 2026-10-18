@@ -253,7 +253,9 @@ impl Drop for PtySession {
 /// (`$HOME/.claude`). Used to decide whether to forward
 /// `CLAUDE_CONFIG_DIR` to the child — see [`PtySession::spawn`].
 fn is_default_claude_dir(dir: &std::path::Path) -> bool {
-    let Some(home) = dirs::home_dir() else { return false };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
     home.join(".claude") == dir
 }
 
@@ -334,10 +336,7 @@ mod tests {
 
     #[test]
     fn back_tab_is_csi_z() {
-        assert_eq!(
-            key_event_to_bytes(k(KeyCode::BackTab)),
-            b"\x1b[Z".to_vec()
-        );
+        assert_eq!(key_event_to_bytes(k(KeyCode::BackTab)), b"\x1b[Z".to_vec());
     }
 
     #[test]

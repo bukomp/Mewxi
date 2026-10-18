@@ -31,12 +31,12 @@
 //! `AnimState`/`tick_anim` pattern in `super::super` (`view_mewxi.rs`).
 
 use super::font;
-use super::palette::{P_DIM, P_HOT, P_LABEL, P_NEON, P_TEXT, heat_color, purple_gauge};
-use ratatui::Frame;
+use super::palette::{heat_color, purple_gauge, P_DIM, P_HOT, P_LABEL, P_NEON, P_TEXT};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -317,7 +317,11 @@ fn advance(core: &mut StreakCore, active: usize, dt: f64) -> bool {
     if milestone {
         core.flash = 1.0;
     } else if core.flash > 0.0 {
-        let decay = if FLASH_DECAY_SECS > 0.0 { dt / FLASH_DECAY_SECS } else { 1.0 };
+        let decay = if FLASH_DECAY_SECS > 0.0 {
+            dt / FLASH_DECAY_SECS
+        } else {
+            1.0
+        };
         core.flash = (core.flash - decay).max(0.0);
     }
 
@@ -428,7 +432,9 @@ fn snapshot_of(core: &StreakCore) -> ScoreSnapshot {
 /// Non-mutating read of the global score state. Returns zeros if
 /// [`tick`] has never run.
 pub fn snapshot() -> ScoreSnapshot {
-    let Some(cell) = STATE.get() else { return ScoreSnapshot::default() };
+    let Some(cell) = STATE.get() else {
+        return ScoreSnapshot::default();
+    };
     let s = cell.lock().expect("streak state poisoned");
     snapshot_of(&s.core)
 }
@@ -498,7 +504,9 @@ fn history_from_records(records: &[super::score_store::RunRecord]) -> Vec<RunEnt
 /// Non-mutating and IO-free per call: it reads the in-memory list seeded
 /// from disk at [`tick`]'s first call, not the file itself.
 pub fn history() -> Vec<RunEntry> {
-    let Some(cell) = STATE.get() else { return Vec::new() };
+    let Some(cell) = STATE.get() else {
+        return Vec::new();
+    };
     let s = cell.lock().expect("streak state poisoned");
     s.history.clone()
 }
@@ -609,8 +617,9 @@ fn render_hud_big(f: &mut Frame, area: Rect, hud: &StreakHud) {
     let gap = " ".repeat(BIG_SEG_GAP);
 
     let mut label_spans: Vec<Span> = vec![Span::raw(" ")];
-    let mut pixel_spans: Vec<Vec<Span>> =
-        (0..font::HEADLINE_HEIGHT).map(|_| vec![Span::raw(" ")]).collect();
+    let mut pixel_spans: Vec<Vec<Span>> = (0..font::HEADLINE_HEIGHT)
+        .map(|_| vec![Span::raw(" ")])
+        .collect();
 
     for (i, (label, value)) in segs.iter().enumerate() {
         if i > 0 {
@@ -663,9 +672,15 @@ fn render_hud_big(f: &mut Frame, area: Rect, hud: &StreakHud) {
 /// pixel-font bands.
 fn render_hud_line(f: &mut Frame, area: Rect, hud: &StreakHud) {
     let hot = hud.flash > 0.0 || hud.milestone;
-    let accent = if hot { heat_color(hud.flash.max(0.6)) } else { P_HOT };
+    let accent = if hot {
+        heat_color(hud.flash.max(0.6))
+    } else {
+        P_HOT
+    };
     let combo_style = if hot {
-        Style::default().fg(P_NEON).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        Style::default()
+            .fg(P_NEON)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
     };
@@ -783,12 +798,15 @@ mod tests {
         };
         // Tall + wide → big path; 1-row and narrow → one-liner; 0-size
         // guards.
-        for (w, h) in [(120u16, BIG_HUD_HEIGHT), (120, 1), (10, BIG_HUD_HEIGHT), (1, 1)] {
+        for (w, h) in [
+            (120u16, BIG_HUD_HEIGHT),
+            (120, 1),
+            (10, BIG_HUD_HEIGHT),
+            (1, 1),
+        ] {
             let backend = TestBackend::new(w, h);
             let mut terminal = Terminal::new(backend).unwrap();
-            terminal
-                .draw(|f| render_hud(f, f.area(), &hud))
-                .unwrap();
+            terminal.draw(|f| render_hud(f, f.area(), &hud)).unwrap();
         }
     }
 
@@ -807,9 +825,7 @@ mod tests {
         };
         let backend = TestBackend::new(big_hud_width(&hud) + 4, BIG_HUD_HEIGHT);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| render_hud(f, f.area(), &hud))
-            .unwrap();
+        terminal.draw(|f| render_hud(f, f.area(), &hud)).unwrap();
         let buf = terminal.backend().buffer();
         let mut text = String::new();
         for y in 0..buf.area.height {
@@ -842,7 +858,10 @@ mod tests {
         for _ in 0..100 {
             advance(&mut core, 1, 0.1); // 10s of one lone agent
         }
-        assert_eq!(core.streak_secs, 0.0, "solo time must not build the parallel streak");
+        assert_eq!(
+            core.streak_secs, 0.0,
+            "solo time must not build the parallel streak"
+        );
         assert!(core.score_acc > 0.0, "solo time still earns base score");
     }
 
@@ -924,7 +943,10 @@ mod tests {
                 fire_count_before_120 += 1;
             }
         }
-        assert!(fired_at_30, "expected a milestone right at the 30s crossing");
+        assert!(
+            fired_at_30,
+            "expected a milestone right at the 30s crossing"
+        );
         // Only the 30s tier-up should have fired in this window.
         assert_eq!(fire_count_before_120, 1);
 
@@ -937,7 +959,10 @@ mod tests {
                 fire_count_to_120 += 1;
             }
         }
-        assert_eq!(fire_count_to_120, 1, "expected exactly one fire crossing 120s");
+        assert_eq!(
+            fire_count_to_120, 1,
+            "expected exactly one fire crossing 120s"
+        );
     }
 
     #[test]
@@ -974,7 +999,10 @@ mod tests {
             let active = if i % 3 == 0 { 0 } else { 2 };
             advance(&mut core, active, 0.1);
             let score = core.score_acc * SCORE_SCALE;
-            assert!(score >= last_score, "score must never decrease within a run");
+            assert!(
+                score >= last_score,
+                "score must never decrease within a run"
+            );
             last_score = score;
         }
         assert!(last_score > 0.0, "score should have grown while active");
@@ -993,7 +1021,10 @@ mod tests {
         // 4 agents ⇒ 16/s vs 2 agents ⇒ 4/s: twice the agents, four
         // times the score.
         let ratio = squad.score_acc / duo.score_acc;
-        assert!((ratio - 4.0).abs() < 1e-6, "expected 4x score ratio, got {ratio}");
+        assert!(
+            (ratio - 4.0).abs() < 1e-6,
+            "expected 4x score ratio, got {ratio}"
+        );
     }
 
     #[test]
@@ -1186,6 +1217,9 @@ mod tests {
         // Newest-first ordering is preserved (input order kept, just
         // truncated), so the first entry is still the file's first one.
         assert_eq!(entries[0].ended_at, "run-0");
-        assert_eq!(entries[HISTORY_CAP - 1].ended_at, format!("run-{}", HISTORY_CAP - 1));
+        assert_eq!(
+            entries[HISTORY_CAP - 1].ended_at,
+            format!("run-{}", HISTORY_CAP - 1)
+        );
     }
 }

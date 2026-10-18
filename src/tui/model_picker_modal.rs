@@ -26,11 +26,11 @@
 //! unsupported picks.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::Frame;
 
 /// One row in the model column — a `/model` slug plus a short label and
 /// a help line explaining when to pick it.
@@ -44,10 +44,26 @@ pub struct ModelChoice {
 /// aliases. `default` clears any session-local override and falls back
 /// to whatever Claude Code was started with.
 const MODELS: &[ModelChoice] = &[
-    ModelChoice { slug: "opus",    label: "Opus",    hint: "most capable, slow + expensive" },
-    ModelChoice { slug: "sonnet",  label: "Sonnet",  hint: "balanced default" },
-    ModelChoice { slug: "haiku",   label: "Haiku",   hint: "fastest + cheapest" },
-    ModelChoice { slug: "default", label: "Default", hint: "clear override; use Claude Code's default" },
+    ModelChoice {
+        slug: "opus",
+        label: "Opus",
+        hint: "most capable, slow + expensive",
+    },
+    ModelChoice {
+        slug: "sonnet",
+        label: "Sonnet",
+        hint: "balanced default",
+    },
+    ModelChoice {
+        slug: "haiku",
+        label: "Haiku",
+        hint: "fastest + cheapest",
+    },
+    ModelChoice {
+        slug: "default",
+        label: "Default",
+        hint: "clear override; use Claude Code's default",
+    },
 ];
 
 /// Return the `/effort` levels we expose for a given model. Returns an
@@ -301,7 +317,9 @@ impl ModelPickerModal {
     fn render_model_column(&self, f: &mut Frame, area: Rect) {
         let focused = self.focus == Pane::Model;
         let title_style = if focused {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -318,9 +336,13 @@ impl ModelPickerModal {
                     "  "
                 };
                 let name_style = if selected && focused {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else if selected {
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -351,7 +373,9 @@ impl ModelPickerModal {
     fn render_effort_column(&self, f: &mut Frame, area: Rect) {
         let focused = self.focus == Pane::Effort;
         let title_style = if focused {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -366,11 +390,15 @@ impl ModelPickerModal {
                 Line::from(""),
                 Line::from(Span::styled(
                     "  effort not supported",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 )),
                 Line::from(Span::styled(
                     "  for this model",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 )),
             ])
             .block(block);
@@ -390,9 +418,13 @@ impl ModelPickerModal {
                     "  "
                 };
                 let name_style = if selected && focused {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else if selected {
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -400,10 +432,7 @@ impl ModelPickerModal {
                     Span::styled(arrow, name_style),
                     Span::styled(*lvl, name_style),
                     Span::raw("  "),
-                    Span::styled(
-                        effort_hint(lvl),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(effort_hint(lvl), Style::default().fg(Color::DarkGray)),
                 ]))
             })
             .collect();
@@ -467,10 +496,7 @@ mod tests {
     }
 
     fn key(c: char) -> crossterm::event::KeyEvent {
-        crossterm::event::KeyEvent::new(
-            KeyCode::Char(c),
-            crossterm::event::KeyModifiers::NONE,
-        )
+        crossterm::event::KeyEvent::new(KeyCode::Char(c), crossterm::event::KeyModifiers::NONE)
     }
 
     #[test]

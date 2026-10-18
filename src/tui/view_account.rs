@@ -2,8 +2,8 @@
 
 use super::widgets::{self, compute_metrics, Metrics};
 use super::PerAccount;
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::Frame;
 
 /// Width at which the layout switches from stacked (narrow) to multi-column (wide).
 const WIDE_THRESHOLD: u16 = 100;
@@ -84,7 +84,10 @@ fn render_narrow(f: &mut Frame, area: Rect, pa: &PerAccount, m: &Metrics) {
     constraints.push(Constraint::Length(1));
     keys.push("footer");
 
-    let rects = Layout::default().direction(Direction::Vertical).constraints(constraints).split(area);
+    let rects = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
     let title = format!("[{}] account detail", pa.account.name);
 
     for (rect, key) in rects.iter().zip(keys.iter()) {

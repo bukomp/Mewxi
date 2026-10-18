@@ -56,10 +56,10 @@ use crossterm::event::{
     KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
+use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::execute;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -461,9 +461,7 @@ pub fn run(no_live: bool) -> Result<()> {
     // terminal's prior state.
     let _ = execute!(
         io::stdout(),
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        )
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -514,9 +512,7 @@ enum LoopExit {
 /// controlling terminal. Pair with [`resume_terminal`] after the child
 /// exits — always call resume, even on error, or the shell is left
 /// wedged in raw mode.
-fn suspend_terminal<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-) -> io::Result<()> {
+fn suspend_terminal<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> io::Result<()> {
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     disable_hover_tracking();
     disable_raw_mode()?;
@@ -527,16 +523,12 @@ fn suspend_terminal<B: ratatui::backend::Backend>(
 
 /// Re-arm the same crossterm flags `run()` set up on startup. Mirrors
 /// the prologue at the top of [`run`]; keep the two in sync.
-fn resume_terminal<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-) -> io::Result<()> {
+fn resume_terminal<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> io::Result<()> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     let _ = execute!(
         io::stdout(),
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        )
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
     terminal.clear()?;
     enable_hover_tracking();
@@ -553,7 +545,10 @@ fn run_update_apply<B: ratatui::backend::Backend>(
     no_live: bool,
 ) -> (String, bool) {
     if let Err(e) = suspend_terminal(terminal) {
-        return (format!("update aborted — failed to suspend terminal: {e}"), false);
+        return (
+            format!("update aborted — failed to suspend terminal: {e}"),
+            false,
+        );
     }
     let res = update::apply_now();
     // Bounce the watcher onto the freshly-installed binary right away —
@@ -568,9 +563,10 @@ fn run_update_apply<B: ratatui::backend::Backend>(
     let resume = resume_terminal(terminal);
     match (res, resume) {
         (Ok(msg), Ok(())) => (format!("{msg}{watcher_note}"), true),
-        (Ok(msg), Err(e)) => {
-            (format!("{msg}{watcher_note} (terminal resume error: {e})"), true)
-        }
+        (Ok(msg), Err(e)) => (
+            format!("{msg}{watcher_note} (terminal resume error: {e})"),
+            true,
+        ),
         (Err(e), _) => (format!("update FAILED: {e}"), false),
     }
 }
@@ -625,11 +621,7 @@ fn open_editor_for_input<B: ratatui::backend::Backend>(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!(
-        "mewxi-compose-{}-{}.md",
-        std::process::id(),
-        ts
-    ));
+    let path = std::env::temp_dir().join(format!("mewxi-compose-{}-{}.md", std::process::id(), ts));
     {
         let mut f = std::fs::File::create(&path)?;
         f.write_all(initial.as_bytes())?;
@@ -651,11 +643,7 @@ fn open_editor_for_input<B: ratatui::backend::Backend>(
     let _ = std::fs::remove_file(&path);
 
     if !status.success() {
-        return Err(anyhow::anyhow!(
-            "{} exited with status {}",
-            program,
-            status
-        ));
+        return Err(anyhow::anyhow!("{} exited with status {}", program, status));
     }
 
     // Editors typically append a trailing newline on save; strip one to
@@ -877,8 +865,7 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
     // so the brand label is always present.
     let figlet_block = MEWXI_BIG_HEIGHT + gap_h + gap_h + tagline_h;
     let plain_block = plain_mewxi_h + gap_h + gap_h + tagline_h;
-    let cat: Option<(&'static str, u16, bool)> = if area.height
-        >= LOGO_LARGE_DIMS.0 + figlet_block
+    let cat: Option<(&'static str, u16, bool)> = if area.height >= LOGO_LARGE_DIMS.0 + figlet_block
         && area.width >= LOGO_LARGE_DIMS.1.max(MEWXI_BIG_WIDTH)
     {
         Some((LOGO_LARGE, LOGO_LARGE_DIMS.0, true))
@@ -890,21 +877,14 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
         && area.width >= LOGO_SMALL_DIMS.1.max(MEWXI_BIG_WIDTH)
     {
         Some((LOGO_SMALL, LOGO_SMALL_DIMS.0, true))
-    } else if area.height >= LOGO_TINY_DIMS.0 + plain_block
-        && area.width >= LOGO_TINY_DIMS.1
-    {
+    } else if area.height >= LOGO_TINY_DIMS.0 + plain_block && area.width >= LOGO_TINY_DIMS.1 {
         Some((LOGO_TINY, LOGO_TINY_DIMS.0, false))
     } else {
         None
     };
 
     let mewxi_line = || Line::from(Span::styled("Mewxi", mewxi_style));
-    let tagline_line = || {
-        Line::from(Span::styled(
-            "multi-agent CLI usage tracker",
-            tagline_style,
-        ))
-    };
+    let tagline_line = || Line::from(Span::styled("multi-agent CLI usage tracker", tagline_style));
 
     // No cat fits: plain-text "Mewxi" centred, with tagline below if
     // there's room. Add the one-row gap when the screen can afford it.
@@ -944,7 +924,11 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
         return;
     };
 
-    let mewxi_h = if show_figlet { MEWXI_BIG_HEIGHT } else { plain_mewxi_h };
+    let mewxi_h = if show_figlet {
+        MEWXI_BIG_HEIGHT
+    } else {
+        plain_mewxi_h
+    };
     let total_h = logo_h + gap_h + mewxi_h + gap_h + tagline_h;
     let top_pad = area.height.saturating_sub(total_h) / 2;
     let chunks = Layout::default()
@@ -965,7 +949,12 @@ fn render_splash(f: &mut Frame, area: ratatui::layout::Rect) {
     let logo_lines: Vec<Line> = src
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::Magenta))))
+        .map(|l| {
+            Line::from(Span::styled(
+                l.to_string(),
+                Style::default().fg(Color::Magenta),
+            ))
+        })
         .collect();
     f.render_widget(
         Paragraph::new(logo_lines).alignment(Alignment::Center),
@@ -1109,9 +1098,7 @@ fn spawn_live_poller(
                             false,
                             "another process is fetching — showing cached".to_string(),
                         ),
-                        live_usage::FetchOutcome::Cached(_) => {
-                            (false, "live disabled".to_string())
-                        }
+                        live_usage::FetchOutcome::Cached(_) => (false, "live disabled".to_string()),
                     };
                     let live = outcome.into_usage();
                     let update_ok = out_tx
@@ -1182,7 +1169,12 @@ fn start_update_check() -> StartupUpdateCheck {
         update::spawn_check(tx.clone());
         checking = true;
     }
-    StartupUpdateCheck { tx, rx, cached, checking }
+    StartupUpdateCheck {
+        tx,
+        rx,
+        cached,
+        checking,
+    }
 }
 
 fn run_loop<B: ratatui::backend::Backend>(
@@ -1204,8 +1196,7 @@ fn run_loop<B: ratatui::backend::Backend>(
         .accounts
         .iter()
         .map(|a| {
-            let (records, agg) =
-                stats::load_records_and_aggregate_for(a).unwrap_or_default();
+            let (records, agg) = stats::load_records_and_aggregate_for(a).unwrap_or_default();
             PerAccount {
                 account: a.clone(),
                 agg,
@@ -1387,8 +1378,7 @@ fn run_loop<B: ratatui::backend::Backend>(
         .mewxi_ascii_style
         .clone()
         .unwrap_or_else(|| "y2k".to_string());
-    let mut default_view_pref =
-        view_setup::DefaultView::from_config(view.default_view.as_deref());
+    let mut default_view_pref = view_setup::DefaultView::from_config(view.default_view.as_deref());
     let mut driver_status: Option<(String, Instant)> = None;
     // View-agnostic toast notifications, drawn over the whole frame after the
     // active view renders so feedback shows in every view (unlike
@@ -1533,8 +1523,7 @@ fn run_loop<B: ratatui::backend::Backend>(
     let mut restart_after_update = false;
 
     loop {
-        let mut sessions =
-            flatten_sessions(&per_account, &driver_optimistic, subagent_tool_action);
+        let mut sessions = flatten_sessions(&per_account, &driver_optimistic, subagent_tool_action);
         apply_killing_overlay(&mut sessions, &mut killing_sessions);
         if selected_session >= sessions.len() && !sessions.is_empty() {
             selected_session = sessions.len() - 1;
@@ -1621,8 +1610,8 @@ fn run_loop<B: ratatui::backend::Backend>(
             .get(selected_session)
             .is_some_and(|s| s.subagent.is_none());
 
-        let raw_error = live_usage::most_recent_error()
-            .map(|(acct, msg)| format!("[{acct}] {msg}"));
+        let raw_error =
+            live_usage::most_recent_error().map(|(acct, msg)| format!("[{acct}] {msg}"));
         let live_error = match &raw_error {
             None => {
                 error_shown = None;
@@ -1635,7 +1624,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                     error_shown = Some((msg.clone(), Instant::now()));
                     error_dismissed = false;
                 }
-                let age = error_shown.as_ref().map(|(_, t)| t.elapsed()).unwrap_or_default();
+                let age = error_shown
+                    .as_ref()
+                    .map(|(_, t)| t.elapsed())
+                    .unwrap_or_default();
                 if error_dismissed || age >= ERROR_VISIBLE {
                     None
                 } else {
@@ -1694,7 +1686,10 @@ fn run_loop<B: ratatui::backend::Backend>(
         let mut claimed_in_frame: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
         for (i, ps) in pending_spawns.iter().enumerate() {
-            if let Some(pa) = per_account.iter().find(|p| p.account.name == ps.account_name) {
+            if let Some(pa) = per_account
+                .iter()
+                .find(|p| p.account.name == ps.account_name)
+            {
                 let new = pa.live_sessions.iter().find(|s| {
                     !ps.snapshot_session_ids.contains(&s.session_id)
                         && !claimed_in_frame
@@ -1730,10 +1725,7 @@ fn run_loop<B: ratatui::backend::Backend>(
             // even when they didn't use mewxi's `m` picker. The model
             // badge then reflects this slug regardless of what claude
             // internally switches to (sub-agents, plan-mode helpers).
-            if let Some(pa) = per_account
-                .iter()
-                .find(|p| p.account.name == key.0)
-            {
+            if let Some(pa) = per_account.iter().find(|p| p.account.name == key.0) {
                 if let Some(default_model) = pa.account.default_model() {
                     let opt = driver_optimistic.entry(key.clone()).or_default();
                     if opt.model.is_none() {
@@ -1752,7 +1744,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                 pinned_session = Some(key);
             }
             driver_status = Some((
-                format!("driving new session {} ({})", short_sid(&sid), ps.account_name),
+                format!(
+                    "driving new session {} ({})",
+                    short_sid(&sid),
+                    ps.account_name
+                ),
                 Instant::now(),
             ));
         }
@@ -1988,7 +1984,11 @@ fn run_loop<B: ratatui::backend::Backend>(
             if driver_input_focused {
                 crate::debug_log::log(&format!(
                     "driver_input.defocus reason={} pinned={:?} overlay_active={}",
-                    if !is_driven { "not-driven" } else { "overlay-active" },
+                    if !is_driven {
+                        "not-driven"
+                    } else {
+                        "overlay-active"
+                    },
                     pinned_session,
                     overlay_active_here,
                 ));
@@ -2190,8 +2190,9 @@ fn run_loop<B: ratatui::backend::Backend>(
             while let Ok(msg) = rx.try_recv() {
                 match msg {
                     LiveMsg::Update { account_name, live } => {
-                        if let Some(pa) =
-                            per_account.iter_mut().find(|p| p.account.name == account_name)
+                        if let Some(pa) = per_account
+                            .iter_mut()
+                            .find(|p| p.account.name == account_name)
                         {
                             pa.live = live;
                         }
@@ -2415,10 +2416,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                             && m.row >= inner.y
                             && m.row < inner.y + inner.height;
                         let clamp = |col: u16, row: u16| -> (u16, u16) {
-                            let c = col
-                                .clamp(inner.x, inner.x + inner.width.saturating_sub(1));
-                            let r = row
-                                .clamp(inner.y, inner.y + inner.height.saturating_sub(1));
+                            let c = col.clamp(inner.x, inner.x + inner.width.saturating_sub(1));
+                            let r = row.clamp(inner.y, inner.y + inner.height.saturating_sub(1));
                             (c, r)
                         };
                         match m.kind {
@@ -2454,12 +2453,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     }
                                 } else if in_chat {
                                     let p = clamp(m.column, m.row);
-                                    chat_selection = Some(
-                                        view_session::ChatSelection {
-                                            anchor: p,
-                                            cursor: p,
-                                        },
-                                    );
+                                    chat_selection = Some(view_session::ChatSelection {
+                                        anchor: p,
+                                        cursor: p,
+                                    });
                                     chat_selection_dragging = true;
                                 } else {
                                     chat_selection = None;
@@ -2477,11 +2474,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if chat_selection_dragging {
                                     chat_selection_dragging = false;
                                     if let Some(sel) = chat_selection {
-                                        let text = extract_chat_selection_text(
-                                            &chat_visible,
-                                            inner,
-                                            sel,
-                                        );
+                                        let text =
+                                            extract_chat_selection_text(&chat_visible, inner, sel);
                                         if !text.is_empty() {
                                             match arboard::Clipboard::new()
                                                 .and_then(|mut c| c.set_text(text.clone()))
@@ -2493,9 +2487,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                     ));
                                                 }
                                                 Err(e) => {
-                                                    toasts.error(format!(
-                                                        "clipboard error: {e}"
-                                                    ));
+                                                    toasts.error(format!("clipboard error: {e}"));
                                                 }
                                             }
                                         }
@@ -2516,10 +2508,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                             && m.row >= inner.y
                             && m.row < inner.y + inner.height;
                         let clamp = |col: u16, row: u16| -> (u16, u16) {
-                            let c = col
-                                .clamp(inner.x, inner.x + inner.width.saturating_sub(1));
-                            let r = row
-                                .clamp(inner.y, inner.y + inner.height.saturating_sub(1));
+                            let c = col.clamp(inner.x, inner.x + inner.width.saturating_sub(1));
+                            let r = row.clamp(inner.y, inner.y + inner.height.saturating_sub(1));
                             (c, r)
                         };
                         match m.kind {
@@ -2531,12 +2521,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     chat_selection = None;
                                     chat_selection_dragging = false;
                                     let p = clamp(m.column, m.row);
-                                    detail_selection = Some(
-                                        view_session::ChatSelection {
-                                            anchor: p,
-                                            cursor: p,
-                                        },
-                                    );
+                                    detail_selection = Some(view_session::ChatSelection {
+                                        anchor: p,
+                                        cursor: p,
+                                    });
                                     detail_selection_dragging = true;
                                 } else {
                                     detail_selection = None;
@@ -2572,18 +2560,16 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                         ));
                                                     }
                                                     Err(e) => {
-                                                        toasts.error(format!(
-                                                            "clipboard error: {e}"
-                                                        ));
+                                                        toasts
+                                                            .error(format!("clipboard error: {e}"));
                                                     }
                                                 }
                                             }
                                         } else {
                                             // Zero-extent = plain click → copy
                                             // the command part under the cursor.
-                                            if let Some(region) = detail_copy_blocks
-                                                .iter()
-                                                .find(|b| {
+                                            if let Some(region) =
+                                                detail_copy_blocks.iter().find(|b| {
                                                     sel.cursor.1 >= b.top
                                                         && sel.cursor.1 <= b.bottom
                                                 })
@@ -2599,9 +2585,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                         ));
                                                     }
                                                     Err(e) => {
-                                                        toasts.error(format!(
-                                                            "clipboard error: {e}"
-                                                        ));
+                                                        toasts
+                                                            .error(format!("clipboard error: {e}"));
                                                     }
                                                 }
                                             }
@@ -2650,10 +2635,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     "overlay.close key={key:?} reason=f10"
                                 ));
                                 overlay_open.remove(&key);
-                                if let Some(sig) = drivers
-                                    .get(&key)
-                                    .and_then(|pty| terminal_overlay::popup_signature(&pty.screen_snapshot()))
-                                {
+                                if let Some(sig) = drivers.get(&key).and_then(|pty| {
+                                    terminal_overlay::popup_signature(&pty.screen_snapshot())
+                                }) {
                                     overlay_dismissed_sig.insert(key, sig);
                                 }
                             } else if let Some(pty) = drivers.get_mut(&key) {
@@ -2740,8 +2724,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 update_build_dir_edit = None;
                                 match accounts::set_update_build_dir(&dir) {
                                     Ok(()) => {
-                                        update_build_dir =
-                                            if dir.is_empty() { None } else { Some(dir.clone()) };
+                                        update_build_dir = if dir.is_empty() {
+                                            None
+                                        } else {
+                                            Some(dir.clone())
+                                        };
                                         setup_message = Some(match update_build_dir.as_deref() {
                                             Some(d) => format!("update build dir → {d}"),
                                             None => format!(
@@ -2788,9 +2775,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -2832,9 +2818,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -2874,11 +2859,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     )
                                 } else {
                                     match crate::platform::terminate_pid(pid) {
-                                        Ok(s) if s.success() => format!(
-                                            "terminated {} (pid {})",
-                                            short_sid(&sid),
-                                            pid
-                                        ),
+                                        Ok(s) if s.success() => {
+                                            format!("terminated {} (pid {})", short_sid(&sid), pid)
+                                        }
                                         Ok(s) => format!(
                                             "kill {pid} exited {}",
                                             s.code()
@@ -2889,13 +2872,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     }
                                 };
                                 driver_status = Some((msg, Instant::now()));
-                                mark_killing(
-                                    &mut killing_sessions,
-                                    &sessions,
-                                    &acct,
-                                    &sid,
-                                    pid,
-                                );
+                                mark_killing(&mut killing_sessions, &sessions, &acct, &sid, pid);
                                 // Leave the session view if it was showing
                                 // the agent we just closed — its pane is
                                 // about to go dead.
@@ -2993,14 +2970,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                         .iter()
                                                         .find(|s| s.session_id == key.1)
                                                 });
-                                            let model_baseline = ls
-                                                .map(|s| s.model.clone())
-                                                .unwrap_or_default();
+                                            let model_baseline =
+                                                ls.map(|s| s.model.clone()).unwrap_or_default();
                                             let transcript_mode =
                                                 ls.and_then(|s| s.permission_mode.clone());
-                                            let opt = driver_optimistic
-                                                .entry(key.clone())
-                                                .or_default();
+                                            let opt =
+                                                driver_optimistic.entry(key.clone()).or_default();
                                             let prior_mode = opt
                                                 .mode
                                                 .clone()
@@ -3033,8 +3008,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             // what makes it stick.
                                             let mut status_msg = format!("model → {slug}");
                                             if let Some(eff) = effort.as_deref() {
-                                                let mut eb =
-                                                    format!("/effort {eff}").into_bytes();
+                                                let mut eb = format!("/effort {eff}").into_bytes();
                                                 eb.push(b'\r');
                                                 match pty.send_keys(&eb) {
                                                     Ok(_) => {
@@ -3078,17 +3052,14 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                             &pa.account,
                                                             &slug,
                                                         );
-                                                    let effort_res = effort
-                                                        .as_deref()
-                                                        .map(|eff| {
-                                                            crate::accounts::set_default_effort(
-                                                                &pa.account,
-                                                                eff,
-                                                            )
-                                                        });
-                                                    let eff_label = effort
-                                                        .as_deref()
-                                                        .unwrap_or("default");
+                                                    let effort_res = effort.as_deref().map(|eff| {
+                                                        crate::accounts::set_default_effort(
+                                                            &pa.account,
+                                                            eff,
+                                                        )
+                                                    });
+                                                    let eff_label =
+                                                        effort.as_deref().unwrap_or("default");
                                                     match (model_res, effort_res) {
                                                         (Ok(()), None | Some(Ok(()))) => {
                                                             status_msg = format!(
@@ -3103,8 +3074,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                     }
                                                 }
                                             }
-                                            driver_status =
-                                                Some((status_msg, Instant::now()));
+                                            driver_status = Some((status_msg, Instant::now()));
                                         }
                                         Err(e) => {
                                             driver_status = Some((
@@ -3133,8 +3103,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 skill_picker = None;
                                 if let Some(key) = pinned_session.clone() {
                                     if let Some(pty) = drivers.get_mut(&key) {
-                                        let mut bytes =
-                                            format!("/{name}").into_bytes();
+                                        let mut bytes = format!("/{name}").into_bytes();
                                         bytes.push(b'\r');
                                         match pty.send_keys(&bytes) {
                                             Ok(_) => {
@@ -3145,13 +3114,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 // briefly on these.
                                                 driver_send_grace_until.insert(
                                                     key.clone(),
-                                                    Instant::now()
-                                                        + Duration::from_millis(1500),
+                                                    Instant::now() + Duration::from_millis(1500),
                                                 );
-                                                driver_status = Some((
-                                                    format!("/{name} sent"),
-                                                    Instant::now(),
-                                                ));
+                                                driver_status =
+                                                    Some((format!("/{name} sent"), Instant::now()));
                                             }
                                             Err(e) => {
                                                 driver_status = Some((
@@ -3177,7 +3143,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                             ModalOutcome::Cancel => {
                                 new_session_modal = None;
                             }
-                            ModalOutcome::Confirm { account, cwd, resume_session_id } => {
+                            ModalOutcome::Confirm {
+                                account,
+                                cwd,
+                                resume_session_id,
+                            } => {
                                 new_session_modal = None;
                                 let snapshot: HashSet<String> = per_account
                                     .iter()
@@ -3191,7 +3161,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     .unwrap_or_default();
                                 let bin = agent_control::resolve_claude_bin(&account);
                                 let resume_for_status = resume_session_id.clone();
-                                match PtySession::spawn(&account, cwd.clone(), bin, resume_session_id) {
+                                match PtySession::spawn(
+                                    &account,
+                                    cwd.clone(),
+                                    bin,
+                                    resume_session_id,
+                                ) {
                                     Ok(pty) => {
                                         let spawn_id = next_spawn_id;
                                         next_spawn_id += 1;
@@ -3236,10 +3211,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         });
                                     }
                                     Err(e) => {
-                                        driver_status = Some((
-                                            format!("spawn failed: {e}"),
-                                            Instant::now(),
-                                        ));
+                                        driver_status =
+                                            Some((format!("spawn failed: {e}"), Instant::now()));
                                     }
                                 }
                             }
@@ -3257,7 +3230,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     (KeyCode::Esc, _) => {
                                         driver_input_focused = false;
                                     }
-                                    (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                                    (KeyCode::Char('c'), m)
+                                        if m.contains(KeyModifiers::CONTROL) =>
+                                    {
                                         // ESC byte → claude treats it as
                                         // "interrupt the current request"
                                         // (the same key the standalone CLI
@@ -3281,7 +3256,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             }
                                         }
                                     }
-                                    (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
+                                    (KeyCode::Char('d'), m)
+                                        if m.contains(KeyModifiers::CONTROL) =>
+                                    {
                                         let _ = pty.kill();
                                         driver_input.clear();
                                         driver_input_focused = false;
@@ -3322,7 +3299,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             let (rows, cols) = screen.size();
                                             let mut screen_dump = String::new();
                                             for r in 0..rows {
-                                                let mut row_str = String::with_capacity(cols as usize);
+                                                let mut row_str =
+                                                    String::with_capacity(cols as usize);
                                                 for c in 0..cols {
                                                     match screen.cell(r, c) {
                                                         Some(cell) if cell.has_contents() => {
@@ -3348,15 +3326,13 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 preview
                                             ));
                                             let ring_before = pty.ring_snapshot();
-                                            let tail_before: String =
-                                                String::from_utf8_lossy(
-                                                    &ring_before[ring_before
-                                                        .len()
-                                                        .saturating_sub(160)..],
-                                                )
-                                                .chars()
-                                                .filter(|c| !c.is_control() || *c == '\n')
-                                                .collect();
+                                            let tail_before: String = String::from_utf8_lossy(
+                                                &ring_before
+                                                    [ring_before.len().saturating_sub(160)..],
+                                            )
+                                            .chars()
+                                            .filter(|c| !c.is_control() || *c == '\n')
+                                            .collect();
                                             crate::debug_log::log(&format!(
                                                 "driver_input.ring-tail-before key={key:?} tail={tail_before:?}"
                                             ));
@@ -3375,12 +3351,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             // and register as a discrete
                                             // Enter keystroke that
                                             // triggers submit.
-                                            let send_result = pty
-                                                .send_keys(&text_bytes)
-                                                .and_then(|_| {
-                                                    std::thread::sleep(
-                                                        Duration::from_millis(30),
-                                                    );
+                                            let send_result =
+                                                pty.send_keys(&text_bytes).and_then(|_| {
+                                                    std::thread::sleep(Duration::from_millis(30));
                                                     pty.send_keys(b"\r")
                                                 });
                                             match send_result {
@@ -3403,9 +3376,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                         driver_send_grace_until.insert(
                                                             key.clone(),
                                                             Instant::now()
-                                                                + Duration::from_millis(
-                                                                    1500,
-                                                                ),
+                                                                + Duration::from_millis(1500),
                                                         );
                                                     }
                                                     driver_status = Some((
@@ -3437,7 +3408,9 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     // Ctrl-E=move-to-end binding (use
                                     // End key for that in the driver
                                     // composer).
-                                    (KeyCode::Char('e'), m) if m.contains(KeyModifiers::CONTROL) => {
+                                    (KeyCode::Char('e'), m)
+                                        if m.contains(KeyModifiers::CONTROL) =>
+                                    {
                                         let initial = driver_input.as_str().to_owned();
                                         let account_opt = per_account
                                             .iter()
@@ -3450,16 +3423,11 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             ));
                                             continue;
                                         };
-                                        match open_editor_for_input(
-                                            terminal,
-                                            &account,
-                                            &initial,
-                                        ) {
+                                        match open_editor_for_input(terminal, &account, &initial) {
                                             Ok(Some(new)) => {
                                                 driver_input.set(new);
                                                 driver_status = Some((
-                                                    "loaded from editor — Enter to send"
-                                                        .into(),
+                                                    "loaded from editor — Enter to send".into(),
                                                     Instant::now(),
                                                 ));
                                             }
@@ -3569,15 +3537,18 @@ fn run_loop<B: ratatui::backend::Backend>(
                         // falls through naturally.
                         if matches!(k.code, KeyCode::Tab) {
                             match mode {
-                                ViewMode::AllSessions | ViewMode::SessionDetail | ViewMode::Mewxi => {
+                                ViewMode::AllSessions
+                                | ViewMode::SessionDetail
+                                | ViewMode::Mewxi => {
                                     if !sessions.is_empty() {
                                         selected_session = (selected_session + sessions.len() - 1)
                                             % sessions.len();
                                         last_session_select = Instant::now();
                                         if mode == ViewMode::SessionDetail {
-                                            pinned_session = visible_sessions.get(selected_session).map(
-                                                |s| (s.account_name.clone(), s.session_id.clone()),
-                                            );
+                                            pinned_session =
+                                                visible_sessions.get(selected_session).map(|s| {
+                                                    (s.account_name.clone(), s.session_id.clone())
+                                                });
                                         }
                                     }
                                 }
@@ -3593,7 +3564,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     if len > 0 {
                                         selected_setup = (selected_setup + len - 1) % len;
                                     }
-                                }                            }
+                                }
+                            }
                             continue;
                         }
                     }
@@ -3633,7 +3605,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 selected_driven,
                                 session,
                             };
-                            help_modal_state = Some(help_modal::HelpModal::new(help_modal::sections_for(&ctx)));
+                            help_modal_state =
+                                Some(help_modal::HelpModal::new(help_modal::sections_for(&ctx)));
                         }
                         KeyCode::Esc => match mode {
                             ViewMode::AllSessions => {}
@@ -3771,11 +3744,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         });
                                     if let Some(acct) = account {
                                         let bin = agent_control::resolve_claude_bin(&acct);
-                                        let skills = crate::skills::discover(
-                                            &acct.dir,
-                                            &cwd,
-                                            Some(&bin),
-                                        );
+                                        let skills =
+                                            crate::skills::discover(&acct.dir, &cwd, Some(&bin));
                                         skill_picker = Some(SkillPickerModal::new(skills));
                                     }
                                 }
@@ -3885,8 +3855,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     ));
                                 }
                                 Err(e) => {
-                                    setup_message =
-                                        Some(format!("failed to save preference: {e}"));
+                                    setup_message = Some(format!("failed to save preference: {e}"));
                                 }
                             }
                         }
@@ -3919,9 +3888,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     selected_session = (selected_session + 1) % sessions.len();
                                     last_session_select = Instant::now();
                                     if mode == ViewMode::SessionDetail {
-                                        pinned_session = visible_sessions
-                                            .get(selected_session)
-                                            .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                                        pinned_session =
+                                            visible_sessions.get(selected_session).map(|s| {
+                                                (s.account_name.clone(), s.session_id.clone())
+                                            });
                                     }
                                 }
                             }
@@ -3935,7 +3905,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if len > 0 {
                                     selected_setup = (selected_setup + 1) % len;
                                 }
-                            }                        },
+                            }
+                        },
                         KeyCode::BackTab => match mode {
                             // Driven SessionDetail Shift-Tab is
                             // intercepted ahead of this match (forwards
@@ -3944,13 +3915,14 @@ fn run_loop<B: ratatui::backend::Backend>(
                             // is the right behaviour.
                             ViewMode::AllSessions | ViewMode::SessionDetail | ViewMode::Mewxi => {
                                 if !sessions.is_empty() {
-                                    selected_session = (selected_session + sessions.len() - 1)
-                                        % sessions.len();
+                                    selected_session =
+                                        (selected_session + sessions.len() - 1) % sessions.len();
                                     last_session_select = Instant::now();
                                     if mode == ViewMode::SessionDetail {
-                                        pinned_session = visible_sessions
-                                            .get(selected_session)
-                                            .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                                        pinned_session =
+                                            visible_sessions.get(selected_session).map(|s| {
+                                                (s.account_name.clone(), s.session_id.clone())
+                                            });
                                     }
                                 }
                             }
@@ -3965,16 +3937,19 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if len > 0 {
                                     selected_setup = (selected_setup + len - 1) % len;
                                 }
-                            }                        },
+                            }
+                        },
                         KeyCode::Down => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail | ViewMode::Mewxi => {
                                 if !sessions.is_empty() {
-                                    selected_session = (selected_session + 1).min(sessions.len() - 1);
+                                    selected_session =
+                                        (selected_session + 1).min(sessions.len() - 1);
                                     last_session_select = Instant::now();
                                     if mode == ViewMode::SessionDetail {
-                                        pinned_session = visible_sessions
-                                            .get(selected_session)
-                                            .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                                        pinned_session =
+                                            visible_sessions.get(selected_session).map(|s| {
+                                                (s.account_name.clone(), s.session_id.clone())
+                                            });
                                     }
                                 }
                             }
@@ -3989,16 +3964,18 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if len > 0 {
                                     selected_setup = (selected_setup + 1).min(len - 1);
                                 }
-                            }                        },
+                            }
+                        },
                         KeyCode::Up => match mode {
                             ViewMode::AllSessions | ViewMode::SessionDetail | ViewMode::Mewxi => {
                                 if selected_session > 0 {
                                     selected_session -= 1;
                                     last_session_select = Instant::now();
                                     if mode == ViewMode::SessionDetail {
-                                        pinned_session = visible_sessions
-                                            .get(selected_session)
-                                            .map(|s| (s.account_name.clone(), s.session_id.clone()));
+                                        pinned_session =
+                                            visible_sessions.get(selected_session).map(|s| {
+                                                (s.account_name.clone(), s.session_id.clone())
+                                            });
                                     }
                                 }
                             }
@@ -4011,7 +3988,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 if selected_setup > 0 {
                                     selected_setup -= 1;
                                 }
-                            }                        },
+                            }
+                        },
                         KeyCode::Enter => {
                             if matches!(mode, ViewMode::AllSessions | ViewMode::Mewxi)
                                 && !sessions.is_empty()
@@ -4065,9 +4043,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 update::spawn_check(update_tx.clone());
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save channel: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save channel: {e}"));
                                             }
                                         }
                                     }
@@ -4090,9 +4067,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 }
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4107,9 +4083,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4124,9 +4099,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4169,15 +4143,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         match accounts::set_default_view(next.as_str()) {
                                             Ok(()) => {
                                                 default_view_pref = next;
-                                                setup_message = Some(format!(
-                                                    "start in {}",
-                                                    next.label()
-                                                ));
+                                                setup_message =
+                                                    Some(format!("start in {}", next.label()));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4192,9 +4163,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4213,9 +4183,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4235,9 +4204,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4252,9 +4220,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4275,9 +4242,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4286,14 +4252,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         match accounts::set_mewxi_shake(next) {
                                             Ok(()) => {
                                                 mewxi_shake = next.to_string();
-                                                setup_message = Some(format!(
-                                                    "mewxi screen shake: {next}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("mewxi screen shake: {next}"));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4308,25 +4272,23 @@ fn run_loop<B: ratatui::backend::Backend>(
                                                 ));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
                                     Some(view_setup::ConfigItem::MewxiFxIntensityCycle) => {
-                                        let next = view_setup::next_fx_intensity(&mewxi_fx_intensity);
+                                        let next =
+                                            view_setup::next_fx_intensity(&mewxi_fx_intensity);
                                         match accounts::set_mewxi_fx_intensity(next) {
                                             Ok(()) => {
                                                 mewxi_fx_intensity = next.to_string();
-                                                setup_message = Some(format!(
-                                                    "mewxi fx intensity: {next}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("mewxi fx intensity: {next}"));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4335,14 +4297,12 @@ fn run_loop<B: ratatui::backend::Backend>(
                                         match accounts::set_mewxi_ascii_style(next) {
                                             Ok(()) => {
                                                 mewxi_ascii_style = next.to_string();
-                                                setup_message = Some(format!(
-                                                    "mewxi ascii style: {next}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("mewxi ascii style: {next}"));
                                             }
                                             Err(e) => {
-                                                setup_message = Some(format!(
-                                                    "failed to save preference: {e}"
-                                                ));
+                                                setup_message =
+                                                    Some(format!("failed to save preference: {e}"));
                                             }
                                         }
                                     }
@@ -4440,8 +4400,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                             .is_some_and(|c| c.name == a.name)
                                     })
                                     .unwrap_or(0);
-                                let initial_dir =
-                                    accounts::resolve_default_new_session_dir(&view);
+                                let initial_dir = accounts::resolve_default_new_session_dir(&view);
                                 new_session_modal = Some(NewSessionModal::new(
                                     accounts_snapshot,
                                     initial_idx,
@@ -4458,9 +4417,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                             let key = pinned_session
                                 .as_ref()
                                 .expect("driven session ⇒ pinned set");
-                            crate::debug_log::log(&format!(
-                                "driver_input.focus key={key:?}"
-                            ));
+                            crate::debug_log::log(&format!("driver_input.focus key={key:?}"));
                             driver_input_focused = true;
                         }
                         KeyCode::Char('d')
@@ -4476,9 +4433,7 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     ));
                                     let pid = sessions
                                         .iter()
-                                        .find(|s| {
-                                            s.account_name == key.0 && s.session_id == key.1
-                                        })
+                                        .find(|s| s.account_name == key.0 && s.session_id == key.1)
                                         .map(|s| s.pid)
                                         .unwrap_or(0);
                                     mark_killing(
@@ -4524,15 +4479,16 @@ fn run_loop<B: ratatui::backend::Backend>(
                         }
                         KeyCode::Delete => {
                             let target: Option<&&SessionRef> = match mode {
-                                ViewMode::SessionDetail => pinned_session
-                                    .as_ref()
-                                    .and_then(|(acct, sid)| {
-                                        visible_sessions
-                                            .iter()
-                                            .find(|s| s.account_name == *acct && s.session_id == *sid)
-                                    }),
-                                ViewMode::AllSessions | ViewMode::Mewxi => visible_sessions
-                                    .get(selected_session),
+                                ViewMode::SessionDetail => {
+                                    pinned_session.as_ref().and_then(|(acct, sid)| {
+                                        visible_sessions.iter().find(|s| {
+                                            s.account_name == *acct && s.session_id == *sid
+                                        })
+                                    })
+                                }
+                                ViewMode::AllSessions | ViewMode::Mewxi => {
+                                    visible_sessions.get(selected_session)
+                                }
                                 _ => None,
                             };
                             match target {
@@ -4541,7 +4497,8 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 // kill would take down the whole session.
                                 Some(s) if s.subagent.is_some() => {
                                     driver_status = Some((
-                                        "sub-agents can't be killed — kill the parent session".into(),
+                                        "sub-agents can't be killed — kill the parent session"
+                                            .into(),
                                         Instant::now(),
                                     ));
                                 }
@@ -4610,7 +4567,9 @@ fn extract_chat_selection_text(
     for row in row_start.max(inner.y)..=row_end {
         let i = (row - inner.y) as usize;
         let Some(text) = visible.get(i) else { break };
-        let Some((lo, hi)) = sel.row_span(row) else { continue };
+        let Some((lo, hi)) = sel.row_span(row) else {
+            continue;
+        };
         let chars: Vec<char> = text.chars().collect();
         let lo = (lo.saturating_sub(inner.x) as usize).min(chars.len());
         let hi = if hi == u16::MAX {
@@ -4838,12 +4797,13 @@ fn render(
         .split(area);
 
     let header_area = chunks[0];
-    let (banner_area, view_area, error_area) = match (needs_setup && mode != ViewMode::Setup, error_height > 0) {
-        (true, true) => (Some(chunks[1]), chunks[2], Some(chunks[3])),
-        (true, false) => (Some(chunks[1]), chunks[2], None),
-        (false, true) => (None, chunks[1], Some(chunks[2])),
-        (false, false) => (None, chunks[1], None),
-    };
+    let (banner_area, view_area, error_area) =
+        match (needs_setup && mode != ViewMode::Setup, error_height > 0) {
+            (true, true) => (Some(chunks[1]), chunks[2], Some(chunks[3])),
+            (true, false) => (Some(chunks[1]), chunks[2], None),
+            (false, true) => (None, chunks[1], Some(chunks[2])),
+            (false, false) => (None, chunks[1], None),
+        };
 
     render_top_header(f, header_area);
     if let (Some(area), Some(snap)) = (banner_area, setup) {
@@ -4931,7 +4891,9 @@ fn render_top_header(f: &mut Frame, area: ratatui::layout::Rect) {
     use ratatui::widgets::Paragraph;
     let line = Line::from(vec![Span::styled(
         "Mewxi",
-        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
     )]);
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
@@ -4941,12 +4903,10 @@ fn render_error_footer(f: &mut Frame, area: ratatui::layout::Rect, msg: &str) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-    let title = Line::from(vec![
-        Span::styled(
-            " live fetch error ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-    ]);
+    let title = Line::from(vec![Span::styled(
+        " live fetch error ",
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    )]);
     // Right-aligned dismiss hint on the top border. Bracketed `x` so the
     // key to press is unmistakable; the parenthetical reminds the user
     // the banner also auto-hides.
@@ -4992,15 +4952,14 @@ fn render_setup_banner(f: &mut Frame, area: ratatui::layout::Rect, snap: &SetupS
     };
     let line = Line::from(vec![Span::styled(
         msg,
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     )]);
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn toggle_ignore_for_selected(
-    snap: &Option<SetupSnapshot>,
-    idx: usize,
-) -> Option<String> {
+fn toggle_ignore_for_selected(snap: &Option<SetupSnapshot>, idx: usize) -> Option<String> {
     let acct = snap.as_ref()?.accounts.get(idx)?;
     let name = acct.account_name.clone();
     match accounts::toggle_ignored(&name) {
@@ -5030,13 +4989,20 @@ fn toggle_statusline_for_selected(
         setup::StatusLineState::OtherCommand(_) => {
             // Force-overwrite an existing third-party statusLine.
             match setup::wire_statusline(&acct.settings_path, &binary, no_live, true) {
-                Ok(true) => Some(format!("[{}] overwrote existing statusLine", acct.account_name)),
+                Ok(true) => Some(format!(
+                    "[{}] overwrote existing statusLine",
+                    acct.account_name
+                )),
                 Ok(false) => Some(format!("[{}] already wired", acct.account_name)),
                 Err(e) => Some(format!("[{}] FAILED: {e}", acct.account_name)),
             }
         }
         _ => match setup::wire_statusline(&acct.settings_path, &binary, no_live, false) {
-            Ok(true) => Some(format!("[{}] wired statusLine → {}", acct.account_name, acct.settings_path.display())),
+            Ok(true) => Some(format!(
+                "[{}] wired statusLine → {}",
+                acct.account_name,
+                acct.settings_path.display()
+            )),
             Ok(false) => Some(format!("[{}] already wired", acct.account_name)),
             Err(e) => Some(format!("[{}] FAILED: {e}", acct.account_name)),
         },
@@ -5254,9 +5220,7 @@ fn flatten_sessions(
                 // badge reflects what claude's internal state already
                 // is the moment the user picks an unsupported model.
                 let permission_mode = match permission_mode.as_deref() {
-                    Some("auto") if !model_supports_auto(&model) => {
-                        Some("default".into())
-                    }
+                    Some("auto") if !model_supports_auto(&model) => Some("default".into()),
                     _ => permission_mode,
                 };
                 // Effort: user's in-session pick wins; otherwise the
@@ -5269,9 +5233,8 @@ fn flatten_sessions(
                     .and_then(|o| o.effort.clone())
                     .or_else(|| stats::session_effort(&pa.account, &ls.session_id))
                     .or_else(|| pa.account.default_effort());
-                let effort = effort.filter(|_| {
-                    !model_picker_modal::effort_levels_for(&model).is_empty()
-                });
+                let effort =
+                    effort.filter(|_| !model_picker_modal::effort_levels_for(&model).is_empty());
                 // Sub-agents inherit the session's reasoning effort by
                 // default (Claude Code only diverges on an explicit
                 // per-call override, which never reaches the transcript),
@@ -5320,50 +5283,49 @@ fn flatten_sessions(
                 // and carry their own transcript, tokens and context.
                 let mut rows = Vec::with_capacity(1 + ls.subagents.len());
                 rows.push(parent);
-                rows.extend(ls.subagents.iter().map(|sub| SessionRef {
-                    account_name: ls.account_name.clone(),
-                    session_id: sub.agent_id.clone(),
-                    pid: ls.pid,
-                    project: ls.project.clone(),
-                    cwd: ls.cwd.clone(),
-                    transcript_path: sub.transcript_path.clone(),
-                    last_activity: sub.last_activity,
-                    state_since: sub.started_at,
-                    model: sub.model.clone(),
-                    active_model: sub.model.clone(),
-                    tokens: sub.tokens,
-                    totals: sub.totals.clone(),
-                    current_context: sub.current_context,
-                    context_cap: sub.context_cap,
-                    state: SessionState::Active,
-                    activity: sub.activity.clone(),
-                    permission_mode: None,
-                    effort: parent_effort.clone().filter(|_| {
-                        !sub.model.is_empty()
-                            && !model_picker_modal::effort_levels_for(&sub.model).is_empty()
-                    }),
-                    killing: false,
-                    subagent: Some(SubAgentTag {
-                        parent_session_id: ls.session_id.clone(),
-                        agent_type: sub.agent_type.clone(),
-                        description: sub.description.clone(),
-                        workflow: sub.workflow.clone(),
-                        current_action: sub
-                            .current_action
-                            .clone()
-                            .filter(|_| show_tool_action),
-                        narration: sub.narration.clone(),
-                        status_label: sub.status_label.clone(),
-                        depth: sub.depth,
-                    }),
-                    limit_5h_pct: None,
-                    limit_wk_pct: None,
-                    price: pa
-                        .price_by_session
-                        .get(&sub.agent_id)
-                        .copied()
-                        .unwrap_or(0.0),
-                    price_currency: price_currency.clone(),
+                rows.extend(ls.subagents.iter().map(|sub| {
+                    SessionRef {
+                        account_name: ls.account_name.clone(),
+                        session_id: sub.agent_id.clone(),
+                        pid: ls.pid,
+                        project: ls.project.clone(),
+                        cwd: ls.cwd.clone(),
+                        transcript_path: sub.transcript_path.clone(),
+                        last_activity: sub.last_activity,
+                        state_since: sub.started_at,
+                        model: sub.model.clone(),
+                        active_model: sub.model.clone(),
+                        tokens: sub.tokens,
+                        totals: sub.totals.clone(),
+                        current_context: sub.current_context,
+                        context_cap: sub.context_cap,
+                        state: SessionState::Active,
+                        activity: sub.activity.clone(),
+                        permission_mode: None,
+                        effort: parent_effort.clone().filter(|_| {
+                            !sub.model.is_empty()
+                                && !model_picker_modal::effort_levels_for(&sub.model).is_empty()
+                        }),
+                        killing: false,
+                        subagent: Some(SubAgentTag {
+                            parent_session_id: ls.session_id.clone(),
+                            agent_type: sub.agent_type.clone(),
+                            description: sub.description.clone(),
+                            workflow: sub.workflow.clone(),
+                            current_action: sub.current_action.clone().filter(|_| show_tool_action),
+                            narration: sub.narration.clone(),
+                            status_label: sub.status_label.clone(),
+                            depth: sub.depth,
+                        }),
+                        limit_5h_pct: None,
+                        limit_wk_pct: None,
+                        price: pa
+                            .price_by_session
+                            .get(&sub.agent_id)
+                            .copied()
+                            .unwrap_or(0.0),
+                        price_currency: price_currency.clone(),
+                    }
                 }));
                 rows
             })
@@ -5501,9 +5463,18 @@ mod tests {
 
     #[test]
     fn view_mode_from_config_accepts_names_and_keys() {
-        assert_eq!(ViewMode::from_config(Some("overview")), ViewMode::AllSessions);
-        assert_eq!(ViewMode::from_config(Some("session")), ViewMode::SessionDetail);
-        assert_eq!(ViewMode::from_config(Some("account")), ViewMode::AccountDetail);
+        assert_eq!(
+            ViewMode::from_config(Some("overview")),
+            ViewMode::AllSessions
+        );
+        assert_eq!(
+            ViewMode::from_config(Some("session")),
+            ViewMode::SessionDetail
+        );
+        assert_eq!(
+            ViewMode::from_config(Some("account")),
+            ViewMode::AccountDetail
+        );
         assert_eq!(ViewMode::from_config(Some("config")), ViewMode::Setup);
         assert_eq!(ViewMode::from_config(Some("setup")), ViewMode::Setup);
         assert_eq!(ViewMode::from_config(Some("2")), ViewMode::SessionDetail);
@@ -5518,7 +5489,10 @@ mod tests {
     fn view_mode_from_config_falls_back_to_overview() {
         assert_eq!(ViewMode::from_config(None), ViewMode::AllSessions);
         assert_eq!(ViewMode::from_config(Some("")), ViewMode::AllSessions);
-        assert_eq!(ViewMode::from_config(Some("garbage")), ViewMode::AllSessions);
+        assert_eq!(
+            ViewMode::from_config(Some("garbage")),
+            ViewMode::AllSessions
+        );
     }
 
     #[test]
@@ -5582,7 +5556,7 @@ mod tests {
         cycle.observe("plan", "plan", false); // no transition
         cycle.observe("", "plan", false); // empty prev
         cycle.observe("plan", "", false); // empty actual
-        // Nothing learned → falls back.
+                                          // Nothing learned → falls back.
         assert_eq!(cycle.predict("plan", false), "default");
     }
 

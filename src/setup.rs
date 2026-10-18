@@ -177,9 +177,9 @@ pub fn setup_incomplete() -> bool {
     let Ok(view) = accounts::load_accounts() else {
         return true; // can't even read our own config → definitely an issue
     };
-    let any_unwired = view.all_accounts().any(|(a, ignored)| {
-        !ignored && !inspect_statusline(&settings_path_for(a)).is_ok()
-    });
+    let any_unwired = view
+        .all_accounts()
+        .any(|(a, ignored)| !ignored && !inspect_statusline(&settings_path_for(a)).is_ok());
     any_unwired || watcher_heartbeat_stale(&view)
 }
 
@@ -195,7 +195,10 @@ fn watcher_heartbeat_stale(view: &accounts::AccountsView) -> bool {
         .filter_map(|m| m.modified().ok())
         .max();
     match freshest {
-        Some(t) => t.elapsed().map(|e| e > Duration::from_secs(90)).unwrap_or(false),
+        Some(t) => t
+            .elapsed()
+            .map(|e| e > Duration::from_secs(90))
+            .unwrap_or(false),
         None => true,
     }
 }
@@ -330,9 +333,8 @@ fn subagent_status_command(binary: &Path, account_dir: &Path) -> String {
 /// matching so a binary-path change (or move into ~/.cargo/bin) doesn't
 /// strand the old wiring as unrecognized.
 fn is_mewxi_subagent_status_command(cmd: &str) -> bool {
-    cmd.split_once("hook subagent-status").is_some_and(|(pre, post)| {
-        pre.ends_with(' ') && (post.is_empty() || post.starts_with(' '))
-    })
+    cmd.split_once("hook subagent-status")
+        .is_some_and(|(pre, post)| pre.ends_with(' ') && (post.is_empty() || post.starts_with(' ')))
 }
 
 /// Write a `statusLine` block into `<settings_path>`, preserving any other
@@ -341,7 +343,12 @@ fn is_mewxi_subagent_status_command(cmd: &str) -> bool {
 /// already points at our binary (by `command`) we always overwrite it —
 /// that's how we upgrade pre-`refreshInterval` wirings without forcing the
 /// user through the `force=true` path.
-pub fn wire_statusline(settings_path: &Path, binary: &Path, no_live: bool, force: bool) -> Result<bool> {
+pub fn wire_statusline(
+    settings_path: &Path,
+    binary: &Path,
+    no_live: bool,
+    force: bool,
+) -> Result<bool> {
     let desired_cmd = desired_command(binary, no_live);
     let desired = serde_json::json!({
         "type": "command",
@@ -355,7 +362,8 @@ pub fn wire_statusline(settings_path: &Path, binary: &Path, no_live: bool, force
         if s.trim().is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_str(&s).with_context(|| format!("parsing {}", settings_path.display()))?
+            serde_json::from_str(&s)
+                .with_context(|| format!("parsing {}", settings_path.display()))?
         }
     } else {
         if let Some(parent) = settings_path.parent() {
@@ -411,12 +419,13 @@ fn existing_points_at_us(sl: &serde_json::Value) -> bool {
 /// re-run of setup clean up hooks left by an installation at a
 /// different path (e.g. after moving the binary into ~/.cargo/bin).
 fn is_mewxi_hook_command(cmd: &str) -> bool {
-    ["hook awaiting-set", "hook awaiting-clear"].iter().any(|sub| {
-        cmd.split_once(sub)
-            .is_some_and(|(pre, post)| {
+    ["hook awaiting-set", "hook awaiting-clear"]
+        .iter()
+        .any(|sub| {
+            cmd.split_once(sub).is_some_and(|(pre, post)| {
                 pre.ends_with(' ') && (post.is_empty() || post.starts_with(' '))
             })
-    })
+        })
 }
 
 /// Install (or refresh) the awaiting-permission hooks in
@@ -426,12 +435,19 @@ fn is_mewxi_hook_command(cmd: &str) -> bool {
 /// from a previous install (any binary path, detected by the
 /// mewxi-specific subcommand signature) get overwritten in place so a
 /// binary-path change doesn't leave stale entries behind.
-pub fn wire_awaiting_hooks(settings_path: &Path, binary: &Path, account_dir: &Path) -> Result<bool> {
+pub fn wire_awaiting_hooks(
+    settings_path: &Path,
+    binary: &Path,
+    account_dir: &Path,
+) -> Result<bool> {
     let mut root: serde_json::Value = if settings_path.exists() {
         let s = fs::read_to_string(settings_path)
             .with_context(|| format!("reading {}", settings_path.display()))?;
-        if s.trim().is_empty() { serde_json::json!({}) } else {
-            serde_json::from_str(&s).with_context(|| format!("parsing {}", settings_path.display()))?
+        if s.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&s)
+                .with_context(|| format!("parsing {}", settings_path.display()))?
         }
     } else {
         if let Some(parent) = settings_path.parent() {
@@ -482,7 +498,11 @@ pub fn wire_awaiting_hooks(settings_path: &Path, binary: &Path, account_dir: &Pa
 /// *without* returning an error: this rides along the hook-install path
 /// (`wire_awaiting_hooks`'s call sites), and a hard error there would
 /// abort the whole setup step over an optional, best-effort feature.
-pub fn wire_subagent_statusline(settings_path: &Path, binary: &Path, account_dir: &Path) -> Result<bool> {
+pub fn wire_subagent_statusline(
+    settings_path: &Path,
+    binary: &Path,
+    account_dir: &Path,
+) -> Result<bool> {
     let desired_cmd = subagent_status_command(binary, account_dir);
     let desired = serde_json::json!({
         "type": "command",
@@ -492,8 +512,11 @@ pub fn wire_subagent_statusline(settings_path: &Path, binary: &Path, account_dir
     let mut root: serde_json::Value = if settings_path.exists() {
         let s = fs::read_to_string(settings_path)
             .with_context(|| format!("reading {}", settings_path.display()))?;
-        if s.trim().is_empty() { serde_json::json!({}) } else {
-            serde_json::from_str(&s).with_context(|| format!("parsing {}", settings_path.display()))?
+        if s.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&s)
+                .with_context(|| format!("parsing {}", settings_path.display()))?
         }
     } else {
         if let Some(parent) = settings_path.parent() {
@@ -557,8 +580,12 @@ fn upsert_hook(
     // location — so we refresh in place rather than leak duplicates.
     let mut changed = false;
     for group in arr.iter_mut() {
-        let Some(grp) = group.as_object_mut() else { continue };
-        let Some(inner) = grp.get_mut("hooks").and_then(|h| h.as_array_mut()) else { continue };
+        let Some(grp) = group.as_object_mut() else {
+            continue;
+        };
+        let Some(inner) = grp.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            continue;
+        };
         let before = inner.len();
         inner.retain(|h| {
             let c = h.get("command").and_then(|c| c.as_str()).unwrap_or("");
@@ -599,12 +626,16 @@ fn upsert_hook(
     // Try to append to an existing group with the matching matcher
     // (don't fragment unnecessarily) before adding a brand-new group.
     for group in arr.iter_mut() {
-        let Some(grp) = group.as_object_mut() else { continue };
+        let Some(grp) = group.as_object_mut() else {
+            continue;
+        };
         let matcher_ok = match matcher {
             Some(m) => grp.get("matcher").and_then(|x| x.as_str()) == Some(m),
             None => !grp.contains_key("matcher"),
         };
-        if !matcher_ok { continue; }
+        if !matcher_ok {
+            continue;
+        }
         let inner = grp
             .entry("hooks".to_string())
             .or_insert_with(|| serde_json::Value::Array(Vec::new()))
@@ -631,30 +662,47 @@ fn upsert_hook(
 /// if a change was made.
 #[allow(dead_code)]
 pub fn unwire_awaiting_hooks(settings_path: &Path) -> Result<bool> {
-    if !settings_path.exists() { return Ok(false); }
+    if !settings_path.exists() {
+        return Ok(false);
+    }
     let s = fs::read_to_string(settings_path)?;
-    if s.trim().is_empty() { return Ok(false); }
-    let mut root: serde_json::Value = serde_json::from_str(&s)
-        .with_context(|| format!("parsing {}", settings_path.display()))?;
-    let Some(obj) = root.as_object_mut() else { return Ok(false) };
+    if s.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut root: serde_json::Value =
+        serde_json::from_str(&s).with_context(|| format!("parsing {}", settings_path.display()))?;
+    let Some(obj) = root.as_object_mut() else {
+        return Ok(false);
+    };
     let Some(hooks) = obj.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return Ok(false);
     };
     let mut changed = false;
     for events in std::iter::once(HOOK_SET_EVENT).chain(HOOK_CLEAR_EVENTS.iter().copied()) {
-        let Some(arr) = hooks.get_mut(events).and_then(|v| v.as_array_mut()) else { continue };
+        let Some(arr) = hooks.get_mut(events).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
         for group in arr.iter_mut() {
-            let Some(grp) = group.as_object_mut() else { continue };
-            let Some(inner) = grp.get_mut("hooks").and_then(|h| h.as_array_mut()) else { continue };
+            let Some(grp) = group.as_object_mut() else {
+                continue;
+            };
+            let Some(inner) = grp.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+                continue;
+            };
             let before = inner.len();
             inner.retain(|h| {
                 let c = h.get("command").and_then(|c| c.as_str()).unwrap_or("");
                 !is_mewxi_hook_command(c)
             });
-            if inner.len() != before { changed = true; }
+            if inner.len() != before {
+                changed = true;
+            }
         }
         arr.retain(|g| {
-            g.get("hooks").and_then(|h| h.as_array()).map(|a| !a.is_empty()).unwrap_or(true)
+            g.get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(true)
         });
         if arr.is_empty() {
             hooks.remove(events);
@@ -691,9 +739,11 @@ pub fn unwire_subagent_statusline(settings_path: &Path) -> Result<bool> {
     if s.trim().is_empty() {
         return Ok(false);
     }
-    let mut root: serde_json::Value = serde_json::from_str(&s)
-        .with_context(|| format!("parsing {}", settings_path.display()))?;
-    let Some(obj) = root.as_object_mut() else { return Ok(false) };
+    let mut root: serde_json::Value =
+        serde_json::from_str(&s).with_context(|| format!("parsing {}", settings_path.display()))?;
+    let Some(obj) = root.as_object_mut() else {
+        return Ok(false);
+    };
     let is_ours = obj
         .get("subagentStatusLine")
         .and_then(|v| v.get("command"))
@@ -723,9 +773,11 @@ pub fn unwire_statusline(settings_path: &Path) -> Result<bool> {
     if s.trim().is_empty() {
         return Ok(false);
     }
-    let mut root: serde_json::Value = serde_json::from_str(&s)
-        .with_context(|| format!("parsing {}", settings_path.display()))?;
-    let Some(obj) = root.as_object_mut() else { return Ok(false) };
+    let mut root: serde_json::Value =
+        serde_json::from_str(&s).with_context(|| format!("parsing {}", settings_path.display()))?;
+    let Some(obj) = root.as_object_mut() else {
+        return Ok(false);
+    };
     if obj.remove("statusLine").is_none() {
         return Ok(false);
     }
@@ -926,7 +978,9 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
 
     let plist_str = plist_path.to_string_lossy().into_owned();
     // Reload to pick up any binary-path change.
-    let _ = Command::new("launchctl").args(["unload", &plist_str]).output();
+    let _ = Command::new("launchctl")
+        .args(["unload", &plist_str])
+        .output();
     let out = Command::new("launchctl")
         .args(["load", "-w", &plist_str])
         .output()
@@ -1007,7 +1061,16 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
     let schtasks_err = match run_cmd(
         "schtasks",
         &[
-            "/Create", "/TN", WATCH_TASK_NAME, "/SC", "ONLOGON", "/TR", &tr, "/F", "/RL", "LIMITED",
+            "/Create",
+            "/TN",
+            WATCH_TASK_NAME,
+            "/SC",
+            "ONLOGON",
+            "/TR",
+            &tr,
+            "/F",
+            "/RL",
+            "LIMITED",
         ],
     ) {
         Ok(()) => {
@@ -1016,7 +1079,10 @@ pub fn install_watcher(binary: &Path, no_live: bool) -> Result<()> {
             let run_out = Command::new("schtasks")
                 .args(["/Run", "/TN", WATCH_TASK_NAME])
                 .output();
-            let started_now = run_out.as_ref().map(|o| o.status.success()).unwrap_or(false);
+            let started_now = run_out
+                .as_ref()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
             crate::debug_log::log_event(
                 LogOrigin::Setup,
                 LogKind::Proc,
@@ -1073,13 +1139,19 @@ fn spawn_detached_watcher(binary: &Path, no_live: bool) {
     crate::debug_log::log_event(
         LogOrigin::Setup,
         LogKind::Proc,
-        if ok { "started watcher" } else { "watcher spawn failed" },
+        if ok {
+            "started watcher"
+        } else {
+            "watcher spawn failed"
+        },
     );
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn install_watcher(_binary: &Path, _no_live: bool) -> Result<()> {
-    Err(anyhow!("watcher service install is not supported on this OS"))
+    Err(anyhow!(
+        "watcher service install is not supported on this OS"
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -1150,7 +1222,9 @@ pub fn uninstall_watcher() -> Result<()> {
     }
     let plist_str = plist_path.to_string_lossy().into_owned();
     // `-w` persists the stop so launchd won't re-enable on next login.
-    let unload_out = Command::new("launchctl").args(["unload", "-w", &plist_str]).output();
+    let unload_out = Command::new("launchctl")
+        .args(["unload", "-w", &plist_str])
+        .output();
     log_proc_result("launchctl unload", &unload_out);
     fs::remove_file(&plist_path).ok();
     Ok(())
@@ -1162,7 +1236,10 @@ pub fn uninstall_watcher() -> Result<()> {
     if !unit_path.exists() {
         return Ok(());
     }
-    let _ = run_cmd("systemctl", &["--user", "disable", "--now", "mewxi-watch.service"]);
+    let _ = run_cmd(
+        "systemctl",
+        &["--user", "disable", "--now", "mewxi-watch.service"],
+    );
     fs::remove_file(&unit_path).ok();
     let _ = run_cmd("systemctl", &["--user", "daemon-reload"]);
     Ok(())
@@ -1198,7 +1275,9 @@ pub fn uninstall_watcher() -> Result<()> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn uninstall_watcher() -> Result<()> {
-    Err(anyhow!("watcher service uninstall is not supported on this OS"))
+    Err(anyhow!(
+        "watcher service uninstall is not supported on this OS"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,12 +1355,24 @@ fn binary_mtime_epoch(path: &Path) -> Option<i64> {
 /// "auto-restart" something we don't understand).
 #[cfg(target_os = "macos")]
 pub fn watcher_binary_is_stale() -> bool {
-    let Some(pid) = running_watcher_pid() else { return false };
-    let Some(start_epoch) = process_start_epoch(pid) else { return false };
-    let Some(plist) = watcher_plist_path() else { return false };
-    let Some(plist_text) = fs::read_to_string(&plist).ok() else { return false };
-    let Some(bin_path) = plist_program_path(&plist_text) else { return false };
-    let Some(bin_epoch) = binary_mtime_epoch(&bin_path) else { return false };
+    let Some(pid) = running_watcher_pid() else {
+        return false;
+    };
+    let Some(start_epoch) = process_start_epoch(pid) else {
+        return false;
+    };
+    let Some(plist) = watcher_plist_path() else {
+        return false;
+    };
+    let Some(plist_text) = fs::read_to_string(&plist).ok() else {
+        return false;
+    };
+    let Some(bin_path) = plist_program_path(&plist_text) else {
+        return false;
+    };
+    let Some(bin_epoch) = binary_mtime_epoch(&bin_path) else {
+        return false;
+    };
     // 2-second slop in case of fs timestamp rounding.
     bin_epoch > start_epoch + 2
 }
@@ -1339,9 +1430,8 @@ fn restart_watcher_onto(binary: &Path, no_live: bool) -> String {
 /// required on top.
 #[cfg(target_os = "linux")]
 fn restart_watcher_onto(binary: &Path, no_live: bool) -> String {
-    let restarted = install_watcher(binary, no_live).and_then(|()| {
-        run_cmd("systemctl", &["--user", "restart", "mewxi-watch.service"])
-    });
+    let restarted = install_watcher(binary, no_live)
+        .and_then(|()| run_cmd("systemctl", &["--user", "restart", "mewxi-watch.service"]));
     match restarted {
         Ok(()) => "watcher restarted on the new binary".into(),
         Err(e) => format!("watcher restart FAILED: {e}"),
@@ -1419,14 +1509,21 @@ pub fn apply_all(force: bool, no_live: bool) -> Result<ApplyOutcome> {
         // Hooks live alongside the statusLine — quietly wire them in
         // even when statusLine wasn't touched, so the TUI's `awaiting`
         // status starts working after a single re-run of setup.
-        if let Some(acct_full) = view.all_accounts().find(|(a, _)| a.name == acct.account_name).map(|(a, _)| a) {
+        if let Some(acct_full) = view
+            .all_accounts()
+            .find(|(a, _)| a.name == acct.account_name)
+            .map(|(a, _)| a)
+        {
             if let Err(e) = wire_awaiting_hooks(&acct.settings_path, &snap.binary, &acct_full.dir) {
                 out.errors.push(format!("{} hooks: {e}", acct.account_name));
             }
             // Best-effort: wire_subagent_statusline never errors (foreign
             // values are left alone), but keep the same fall-through shape.
-            if let Err(e) = wire_subagent_statusline(&acct.settings_path, &snap.binary, &acct_full.dir) {
-                out.errors.push(format!("{} subagent statusLine: {e}", acct.account_name));
+            if let Err(e) =
+                wire_subagent_statusline(&acct.settings_path, &snap.binary, &acct_full.dir)
+            {
+                out.errors
+                    .push(format!("{} subagent statusLine: {e}", acct.account_name));
             }
         }
     }
@@ -1452,7 +1549,10 @@ pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
     for acct in snap.accounts.iter().filter(|a| !a.ignored) {
         match &acct.statusline {
             StatusLineState::OtherCommand(cmd) if !force => {
-                println!("  [{}] statusLine set to something else:", acct.account_name);
+                println!(
+                    "  [{}] statusLine set to something else:",
+                    acct.account_name
+                );
                 println!("        {cmd}");
                 println!("        re-run with --force to overwrite");
             }
@@ -1461,14 +1561,29 @@ pub fn run(install_service: bool, force: bool, no_live: bool) -> Result<()> {
             // unit by an older binary). It returns Ok(false) when nothing
             // actually changed.
             _ => match wire_statusline(&acct.settings_path, &snap.binary, no_live, force) {
-                Ok(true) => println!("  [{}] wrote statusLine to {}", acct.account_name, acct.settings_path.display()),
-                Ok(false) => println!("  [{}] statusLine already wired ({})", acct.account_name, acct.settings_path.display()),
+                Ok(true) => println!(
+                    "  [{}] wrote statusLine to {}",
+                    acct.account_name,
+                    acct.settings_path.display()
+                ),
+                Ok(false) => println!(
+                    "  [{}] statusLine already wired ({})",
+                    acct.account_name,
+                    acct.settings_path.display()
+                ),
                 Err(e) => println!("  [{}] FAILED: {e}", acct.account_name),
             },
         }
-        if let Some(acct_full) = view.all_accounts().find(|(a, _)| a.name == acct.account_name).map(|(a, _)| a) {
+        if let Some(acct_full) = view
+            .all_accounts()
+            .find(|(a, _)| a.name == acct.account_name)
+            .map(|(a, _)| a)
+        {
             match wire_awaiting_hooks(&acct.settings_path, &snap.binary, &acct_full.dir) {
-                Ok(true) => println!("  [{}] installed awaiting-permission hooks", acct.account_name),
+                Ok(true) => println!(
+                    "  [{}] installed awaiting-permission hooks",
+                    acct.account_name
+                ),
                 Ok(false) => {}
                 Err(e) => println!("  [{}] hooks FAILED: {e}", acct.account_name),
             }
@@ -1552,12 +1667,19 @@ fn log_proc_result(action: &str, out: &std::io::Result<std::process::Output>) {
                 LogKind::Proc,
                 &format!(
                     "{action} failed — exit {}",
-                    o.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+                    o.status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".into())
                 ),
             );
         }
         Err(e) => {
-            crate::debug_log::log_event(LogOrigin::Setup, LogKind::Proc, &format!("{action} failed — {e}"));
+            crate::debug_log::log_event(
+                LogOrigin::Setup,
+                LogKind::Proc,
+                &format!("{action} failed — {e}"),
+            );
         }
     }
 }
@@ -1574,7 +1696,10 @@ fn log_proc_status(action: &str, out: &std::process::Output) {
             LogKind::Proc,
             &format!(
                 "{action} failed — exit {}",
-                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+                out.status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".into())
             ),
         );
     }
@@ -1600,7 +1725,10 @@ fn run_cmd(bin: &str, args: &[&str]) -> Result<()> {
             &format!(
                 "{bin} {} failed — exit {}",
                 args.join(" "),
-                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+                out.status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".into())
             ),
         );
     }
@@ -1666,7 +1794,9 @@ fn decode_console(bytes: &[u8]) -> String {
 
 #[cfg(target_os = "macos")]
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1674,8 +1804,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
     {
-        let mut f = fs::File::create(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
+        let mut f =
+            fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
         f.write_all(bytes)?;
         f.sync_data().ok();
     }
@@ -1745,11 +1875,21 @@ mod tests {
         // Any binary path counts (so an update that moves the binary still
         // reads as "wired"), with or without --no-live, quoted or not.
         assert!(is_mewxi_statusline_command("/old/place/mewxi status"));
-        assert!(is_mewxi_statusline_command("/home/u/.cargo/bin/mewxi status"));
-        assert!(is_mewxi_statusline_command("/old/place/mewxi --no-live status"));
-        assert!(is_mewxi_statusline_command("'/path with spaces/mewxi' status"));
-        assert!(is_mewxi_statusline_command(r#""C:\Program Files\mewxi.exe" status"#));
-        assert!(is_mewxi_statusline_command(r"C:\tools\mewxi.exe --no-live status"));
+        assert!(is_mewxi_statusline_command(
+            "/home/u/.cargo/bin/mewxi status"
+        ));
+        assert!(is_mewxi_statusline_command(
+            "/old/place/mewxi --no-live status"
+        ));
+        assert!(is_mewxi_statusline_command(
+            "'/path with spaces/mewxi' status"
+        ));
+        assert!(is_mewxi_statusline_command(
+            r#""C:\Program Files\mewxi.exe" status"#
+        ));
+        assert!(is_mewxi_statusline_command(
+            r"C:\tools\mewxi.exe --no-live status"
+        ));
         // A self-update can leave a `(deleted)` marker on the path; still
         // recognized as ours so it heals to the live path in place.
         assert!(is_mewxi_statusline_command(
@@ -1814,7 +1954,10 @@ mod tests {
                 .collect()
         };
         // Old-path mewxi hooks are gone, new ones present exactly once.
-        assert_eq!(as_cmds("PermissionRequest"), vec!["/new/mewxi hook awaiting-set --dir /acct"]);
+        assert_eq!(
+            as_cmds("PermissionRequest"),
+            vec!["/new/mewxi hook awaiting-set --dir /acct"]
+        );
         // Non-mewxi entry untouched, old mewxi entry replaced.
         let post = as_cmds("PostToolUse");
         assert!(post.contains(&"third-party-formatter".to_string()));
@@ -1836,7 +1979,9 @@ mod tests {
         let settings = dir.path().join("settings.json");
         wire_awaiting_hooks(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap();
         let groups = read_hooks(&dir)["PostToolUse"].as_array().unwrap().clone();
-        assert!(groups.iter().all(|g| !g["hooks"].as_array().unwrap().is_empty()));
+        assert!(groups
+            .iter()
+            .all(|g| !g["hooks"].as_array().unwrap().is_empty()));
         assert!(!groups
             .iter()
             .any(|g| g.get("matcher").and_then(|m| m.as_str()) == Some("Bash")));
@@ -1862,7 +2007,10 @@ mod tests {
         assert!(unwire_awaiting_hooks(&settings).unwrap());
         let hooks = read_hooks(&dir);
         assert!(hooks.get("PermissionRequest").is_none());
-        let stop_cmds: Vec<&str> = hooks["Stop"].as_array().unwrap().iter()
+        let stop_cmds: Vec<&str> = hooks["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
             .flat_map(|g| g["hooks"].as_array().unwrap().iter())
             .map(|h| h["command"].as_str().unwrap())
             .collect();
@@ -1879,7 +2027,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         let changed =
-            wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap();
+            wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct"))
+                .unwrap();
         assert!(changed);
         let s = fs::read_to_string(&settings).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -1895,17 +2044,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         assert!(
-            wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap()
+            wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct"))
+                .unwrap()
         );
         // Second call with identical args should be a no-op.
         assert!(
-            !wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap()
+            !wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct"))
+                .unwrap()
         );
         // Rewiring with a different binary path (e.g. after a relocate)
         // still upgrades in place, since the old value is recognized as
         // ours by subcommand signature.
         assert!(
-            wire_subagent_statusline(&settings, Path::new("/newer/mewxi"), Path::new("/acct")).unwrap()
+            wire_subagent_statusline(&settings, Path::new("/newer/mewxi"), Path::new("/acct"))
+                .unwrap()
         );
         let s = fs::read_to_string(&settings).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -1925,11 +2077,15 @@ mod tests {
         fs::write(&settings, serde_json::to_string_pretty(&root).unwrap()).unwrap();
 
         let changed =
-            wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct")).unwrap();
+            wire_subagent_statusline(&settings, Path::new("/new/mewxi"), Path::new("/acct"))
+                .unwrap();
         assert!(!changed);
         let s = fs::read_to_string(&settings).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v["subagentStatusLine"]["command"], "/usr/bin/other-tool status");
+        assert_eq!(
+            v["subagentStatusLine"]["command"],
+            "/usr/bin/other-tool status"
+        );
     }
 
     #[test]
@@ -1945,7 +2101,10 @@ mod tests {
         assert!(!unwire_subagent_statusline(&settings).unwrap());
         let s = fs::read_to_string(&settings).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v["subagentStatusLine"]["command"], "/usr/bin/other-tool status");
+        assert_eq!(
+            v["subagentStatusLine"]["command"],
+            "/usr/bin/other-tool status"
+        );
 
         // Our value: gets removed. Start from clean settings — wiring
         // over the foreign value above is deliberately a no-op.

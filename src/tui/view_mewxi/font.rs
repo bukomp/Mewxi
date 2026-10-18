@@ -209,11 +209,7 @@ mod tests {
     #[test]
     fn gradient_separator_widths() {
         let line = gradient_separator(10);
-        let width: usize = line
-            .spans
-            .iter()
-            .map(|s| s.content.chars().count())
-            .sum();
+        let width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
         assert_eq!(width, 10);
 
         let zero = gradient_separator(0);

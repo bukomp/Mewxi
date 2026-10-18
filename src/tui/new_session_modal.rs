@@ -36,11 +36,11 @@
 use crate::accounts::{self, Account, RecentProject, RecentSession};
 use crate::tui::text_input::{EditOutcome, TextInput};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::Frame;
 use std::path::{Path, PathBuf};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -116,7 +116,11 @@ impl NewSessionModal {
             Err(e) => {
                 let fallback = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
                 let entries = read_dirs(&fallback).unwrap_or_default();
-                (fallback, entries, Some(format!("{}: {}", initial_dir.display(), e)))
+                (
+                    fallback,
+                    entries,
+                    Some(format!("{}: {}", initial_dir.display(), e)),
+                )
             }
         };
         // Trailing slash on the path input keeps the dir/tail split
@@ -425,8 +429,7 @@ impl NewSessionModal {
                         if typed.is_dir() || self.browse_cwd.is_dir() {
                             return self.confirm_spawn();
                         }
-                        self.error =
-                            Some(format!("not a directory: {}", typed.display()));
+                        self.error = Some(format!("not a directory: {}", typed.display()));
                     } else if !self.complete_to_highlighted() {
                         self.error = Some(format!(
                             "no match for `{}` in {}",
@@ -524,7 +527,9 @@ impl NewSessionModal {
 
         let outer = Block::default()
             .borders(Borders::ALL)
-            .title(" New session — Tab cycles panes · Enter selects · . spawn fresh now · Esc cancel ")
+            .title(
+                " New session — Tab cycles panes · Enter selects · . spawn fresh now · Esc cancel ",
+            )
             .border_style(Style::default().fg(Color::Magenta));
         let inner = outer.inner(modal_area);
         f.render_widget(outer, modal_area);
@@ -590,7 +595,8 @@ impl NewSessionModal {
         let visible_rows = inner.height as usize;
         let focused = self.focus == ModalFocus::Recent;
         let offset = if focused {
-            self.recent_idx.saturating_sub(visible_rows.saturating_sub(1))
+            self.recent_idx
+                .saturating_sub(visible_rows.saturating_sub(1))
         } else {
             0
         };
@@ -677,7 +683,8 @@ impl NewSessionModal {
         let total = self.sessions.len() + 1;
         let visible_rows = inner.height as usize;
         let offset = if focused {
-            self.sessions_idx.saturating_sub(visible_rows.saturating_sub(1))
+            self.sessions_idx
+                .saturating_sub(visible_rows.saturating_sub(1))
         } else {
             0
         };
@@ -808,11 +815,11 @@ impl NewSessionModal {
         }
 
         let filtered = self.filtered_indices();
-        let list_focused =
-            self.focus == ModalFocus::EntryList || self.focus == ModalFocus::PathBar;
+        let list_focused = self.focus == ModalFocus::EntryList || self.focus == ModalFocus::PathBar;
         let visible_rows = rows[3].height as usize;
         let offset = if list_focused {
-            self.entry_idx.saturating_sub(visible_rows.saturating_sub(1))
+            self.entry_idx
+                .saturating_sub(visible_rows.saturating_sub(1))
         } else {
             0
         };
@@ -827,11 +834,8 @@ impl NewSessionModal {
                 let p = &self.entries[real];
                 let label = entry_label(p);
                 let is_parent = label == "..";
-                let mut style = Style::default().fg(if is_parent {
-                    Color::Cyan
-                } else {
-                    Color::White
-                });
+                let mut style =
+                    Style::default().fg(if is_parent { Color::Cyan } else { Color::White });
                 if selected {
                     style = style.add_modifier(Modifier::BOLD).bg(Color::DarkGray);
                 }
@@ -900,13 +904,25 @@ fn input_spans_split(
         0
     };
 
-    let dir_color = if focused { Color::Gray } else { Color::DarkGray };
+    let dir_color = if focused {
+        Color::Gray
+    } else {
+        Color::DarkGray
+    };
     let filter_color = if focused { Color::Yellow } else { Color::Gray };
     let dir_style = Style::default().fg(dir_color);
-    let filter_style = Style::default().fg(filter_color).add_modifier(Modifier::BOLD);
+    let filter_style = Style::default()
+        .fg(filter_color)
+        .add_modifier(Modifier::BOLD);
 
     // Helper to style a char by its absolute index (dir vs filter).
-    let style_at = |abs: usize| if abs < dir_len { dir_style } else { filter_style };
+    let style_at = |abs: usize| {
+        if abs < dir_len {
+            dir_style
+        } else {
+            filter_style
+        }
+    };
     // Build a visible char list with original absolute indices preserved
     // so we can split around the cursor and keep dir/filter coloring.
     let visible: Vec<(usize, char)> = dir_chars
@@ -959,13 +975,7 @@ fn input_spans_split(
     spans
 }
 
-fn center_rect(
-    area: Rect,
-    width_pct: u16,
-    height_pct: u16,
-    min_w: u16,
-    min_h: u16,
-) -> Rect {
+fn center_rect(area: Rect, width_pct: u16, height_pct: u16, min_w: u16, min_h: u16) -> Rect {
     let w = ((area.width as u32 * width_pct as u32) / 100) as u16;
     let h = ((area.height as u32 * height_pct as u32) / 100) as u16;
     let w = w.max(min_w).min(area.width);

@@ -28,11 +28,11 @@
 use super::widgets::render_footer;
 use crate::setup::{SetupSnapshot, StatusLineState, WatcherState};
 use crate::update::{UpdateChannel, UpdateInterval, UpdateStatus};
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 
 /// One actionable row in the Config list. `items()` defines the
 /// canonical order; the key handler in `tui::mod` and the renderer
@@ -395,7 +395,13 @@ impl MewxiRowsUi<'static> {
     /// "subtle", streaks on, fx "rave", ascii "y2k".
     #[cfg(test)]
     pub fn fallback() -> Self {
-        MewxiRowsUi { visualizer: true, shake: "subtle", streaks: true, fx_intensity: "rave", ascii_style: "y2k" }
+        MewxiRowsUi {
+            visualizer: true,
+            shake: "subtle",
+            streaks: true,
+            fx_intensity: "rave",
+            ascii_style: "y2k",
+        }
     }
 }
 
@@ -455,8 +461,34 @@ pub fn render(
 
     render_header(f, rows[0], snap, update);
     *setup_rect = Some(rows[1]);
-    render_list(f, rows[1], snap, selected, scroll, defocus_input_after_send, subagent_tool_action, default_view, live_poll, log_max_lines, mewxi, update);
-    render_info(f, rows[2], snap, selected, defocus_input_after_send, subagent_tool_action, default_view, live_poll, log_max_lines, mewxi, update, last_message);
+    render_list(
+        f,
+        rows[1],
+        snap,
+        selected,
+        scroll,
+        defocus_input_after_send,
+        subagent_tool_action,
+        default_view,
+        live_poll,
+        log_max_lines,
+        mewxi,
+        update,
+    );
+    render_info(
+        f,
+        rows[2],
+        snap,
+        selected,
+        defocus_input_after_send,
+        subagent_tool_action,
+        default_view,
+        live_poll,
+        log_max_lines,
+        mewxi,
+        update,
+        last_message,
+    );
     render_logs(f, rows[3], logs);
     render_footer(
         f,
@@ -502,11 +534,18 @@ fn render_logs(f: &mut Frame, area: Rect, logs: &LogsUi) {
         .kind_filter
         .map(|k| k.as_str().to_string())
         .unwrap_or_else(|| "all".to_string());
-    let mut title = format!(" Logs · origin: {origin_label} · type: {kind_label} · {}", filtered.len());
+    let mut title = format!(
+        " Logs · origin: {origin_label} · type: {kind_label} · {}",
+        filtered.len()
+    );
     if effective_scroll > 0 {
         title.push_str(&format!(" · ↑{effective_scroll}"));
     }
-    title.push_str(if logs.expanded { " · L shrink" } else { " · L expand" });
+    title.push_str(if logs.expanded {
+        " · L shrink"
+    } else {
+        " · L expand"
+    });
     title.push(' ');
 
     let lines: Vec<Line> = if window.is_empty() {
@@ -566,7 +605,9 @@ fn render_logs(f: &mut Frame, area: Rect, logs: &LogsUi) {
 fn render_header(f: &mut Frame, area: Rect, snap: Option<&SetupSnapshot>, update: &UpdateUi) {
     let mut spans: Vec<Span> = vec![Span::styled(
         "Config",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )];
 
     match snap {
@@ -579,7 +620,9 @@ fn render_header(f: &mut Frame, area: Rect, snap: Option<&SetupSnapshot>, update
             if unwired == 0 && s.watcher.is_ok() {
                 spans.push(Span::styled(
                     "   ✓ all wired · watcher running",
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 ));
             } else {
                 let mut parts: Vec<String> = Vec::new();
@@ -591,7 +634,9 @@ fn render_header(f: &mut Frame, area: Rect, snap: Option<&SetupSnapshot>, update
                 }
                 spans.push(Span::styled(
                     format!("   ⚠ {}", parts.join(" · ")),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(
                     "  — press a to fix everything",
@@ -609,7 +654,9 @@ fn render_header(f: &mut Frame, area: Rect, snap: Option<&SetupSnapshot>, update
     } else if let Some(st) = update.status.filter(|s| s.available) {
         spans.push(Span::styled(
             format!("   · ⬆ {} available", st.latest),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -643,10 +690,15 @@ fn build_lines(
     let header = |text: &str| {
         Line::from(Span::styled(
             format!(" {text}"),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ))
     };
-    let push_header = |lines: &mut Vec<Line<'static>>, owners: &mut Vec<Option<usize>>, text: &str, first: bool| {
+    let push_header = |lines: &mut Vec<Line<'static>>,
+                       owners: &mut Vec<Option<usize>>,
+                       text: &str,
+                       first: bool| {
         if !first {
             lines.push(Line::from(""));
             owners.push(None);
@@ -663,7 +715,9 @@ fn build_lines(
         let mut spans = vec![
             Span::styled(
                 arrow.to_string(),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{label:<24}"),
@@ -689,20 +743,27 @@ fn build_lines(
     };
 
     let bold = |text: String, color: Color| {
-        Span::styled(text, Style::default().fg(color).add_modifier(Modifier::BOLD))
+        Span::styled(
+            text,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )
     };
 
     push_header(&mut lines, &mut owners, "Claude Code integration", true);
     for (i, item) in list.iter().enumerate() {
         match item {
             ConfigItem::Account(ai) => {
-                let Some(a) = snap.and_then(|s| s.accounts.get(*ai)) else { continue };
+                let Some(a) = snap.and_then(|s| s.accounts.get(*ai)) else {
+                    continue;
+                };
                 let (state_text, color) = if a.ignored {
                     ("ignored".to_string(), Color::DarkGray)
                 } else {
                     match &a.statusline {
                         StatusLineState::Wired => ("✓ wired".to_string(), Color::Green),
-                        StatusLineState::OtherCommand(_) => ("other command".to_string(), Color::Yellow),
+                        StatusLineState::OtherCommand(_) => {
+                            ("other command".to_string(), Color::Yellow)
+                        }
                         StatusLineState::Missing => ("not wired".to_string(), Color::Red),
                         StatusLineState::Unreadable(why) => (format!("error: {why}"), Color::Red),
                     }
@@ -720,7 +781,9 @@ fn build_lines(
                     Some(WatcherState::Running) => ("✓ running".to_string(), Color::Green),
                     Some(WatcherState::Installed) => ("stopped".to_string(), Color::Yellow),
                     Some(WatcherState::NotInstalled) => ("not installed".to_string(), Color::Red),
-                    Some(WatcherState::Unknown(why)) => (format!("unknown ({why})"), Color::DarkGray),
+                    Some(WatcherState::Unknown(why)) => {
+                        (format!("unknown ({why})"), Color::DarkGray)
+                    }
                     None => ("…".to_string(), Color::DarkGray),
                 };
                 lines.push(row(
@@ -800,7 +863,12 @@ fn build_lines(
                         ),
                     }
                 };
-                lines.push(row(i, "update build dir".to_string(), bold(format!("{txt:<16}"), color), extra));
+                lines.push(row(
+                    i,
+                    "update build dir".to_string(),
+                    bold(format!("{txt:<16}"), color),
+                    extra,
+                ));
                 owners.push(Some(i));
             }
             ConfigItem::UpdateCheckNow => {
@@ -819,9 +887,18 @@ fn build_lines(
                         ("✓ up to date".to_string(), Color::Green, st.detail.clone())
                     }
                 } else {
-                    ("not checked yet".to_string(), Color::DarkGray, String::new())
+                    (
+                        "not checked yet".to_string(),
+                        Color::DarkGray,
+                        String::new(),
+                    )
                 };
-                lines.push(row(i, "check for updates".to_string(), bold(format!("{txt:<16}"), color), extra));
+                lines.push(row(
+                    i,
+                    "check for updates".to_string(),
+                    bold(format!("{txt:<16}"), color),
+                    extra,
+                ));
                 owners.push(Some(i));
 
                 push_header(&mut lines, &mut owners, "Preferences", false);
@@ -836,7 +913,11 @@ fn build_lines(
                 owners.push(Some(i));
             }
             ConfigItem::DefocusToggle => {
-                let (txt, color) = if defocus { ("✓ on", Color::Green) } else { ("off", Color::Yellow) };
+                let (txt, color) = if defocus {
+                    ("✓ on", Color::Green)
+                } else {
+                    ("off", Color::Yellow)
+                };
                 lines.push(row(
                     i,
                     "defocus input after send".to_string(),
@@ -859,7 +940,12 @@ fn build_lines(
                         "min time between usage-endpoint probes (per account)".to_string(),
                     )
                 };
-                lines.push(row(i, "usage poll interval".to_string(), bold(format!("{txt:<16}"), color), extra));
+                lines.push(row(
+                    i,
+                    "usage poll interval".to_string(),
+                    bold(format!("{txt:<16}"), color),
+                    extra,
+                ));
                 owners.push(Some(i));
             }
             ConfigItem::LogMaxLines => {
@@ -873,10 +959,16 @@ fn build_lines(
                     (
                         fmt_log_lines(log_max_lines.lines),
                         Color::Magenta,
-                        "line cap for the debug-log file — oldest trimmed (default 10k)".to_string(),
+                        "line cap for the debug-log file — oldest trimmed (default 10k)"
+                            .to_string(),
                     )
                 };
-                lines.push(row(i, "log file max lines".to_string(), bold(format!("{txt:<16}"), color), extra));
+                lines.push(row(
+                    i,
+                    "log file max lines".to_string(),
+                    bold(format!("{txt:<16}"), color),
+                    extra,
+                ));
                 owners.push(Some(i));
             }
             ConfigItem::SubagentToolActionToggle => {
@@ -1027,7 +1119,11 @@ fn render_list(
         }
     }
     *scroll = offset;
-    let windowed: Vec<Line> = lines.into_iter().skip(offset).take(visible_h.max(1)).collect();
+    let windowed: Vec<Line> = lines
+        .into_iter()
+        .skip(offset)
+        .take(visible_h.max(1))
+        .collect();
 
     f.render_widget(Paragraph::new(windowed).block(block), area);
 }
@@ -1219,7 +1315,10 @@ fn render_info(
         update,
     );
     let msg_line = match last_message {
-        Some(m) => Line::from(Span::styled(m.to_string(), Style::default().fg(Color::Cyan))),
+        Some(m) => Line::from(Span::styled(
+            m.to_string(),
+            Style::default().fg(Color::Cyan),
+        )),
         None => Line::from(Span::styled(
             "no actions taken yet",
             Style::default().fg(Color::DarkGray),
@@ -1456,8 +1555,14 @@ mod tests {
                     true,
                     false,
                     DefaultView::All,
-                    LivePollUi { secs: 60, edit: None },
-                    LogMaxLinesUi { lines: 10_000, edit: None },
+                    LivePollUi {
+                        secs: 60,
+                        edit: None,
+                    },
+                    LogMaxLinesUi {
+                        lines: 10_000,
+                        edit: None,
+                    },
                     &MewxiRowsUi::fallback(),
                     &update_ui(status.as_ref()),
                     &logs,
@@ -1511,7 +1616,10 @@ mod tests {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
         // Selected row 0 (wired account) hints at unwiring.
-        assert!(text.contains("remove mewxi's statusLine"), "hint missing:\n{text}");
+        assert!(
+            text.contains("remove mewxi's statusLine"),
+            "hint missing:\n{text}"
+        );
     }
 
     #[test]
@@ -1525,8 +1633,14 @@ mod tests {
         };
         // Select the check-now row (index 8 with two accounts).
         let text = render_to_text(8, Some(status));
-        assert!(text.contains("⬆ v0.2.0 available"), "header notice missing:\n{text}");
-        assert!(text.contains("install the update now"), "hint missing:\n{text}");
+        assert!(
+            text.contains("⬆ v0.2.0 available"),
+            "header notice missing:\n{text}"
+        );
+        assert!(
+            text.contains("install the update now"),
+            "hint missing:\n{text}"
+        );
     }
 
     #[test]
@@ -1567,8 +1681,14 @@ mod tests {
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
-        assert!(text.contains("origin: all"), "title missing origin:all in:\n{text}");
-        assert!(text.contains("type: all · 3"), "title missing count in:\n{text}");
+        assert!(
+            text.contains("origin: all"),
+            "title missing origin:all in:\n{text}"
+        );
+        assert!(
+            text.contains("type: all · 3"),
+            "title missing count in:\n{text}"
+        );
     }
 
     #[test]
@@ -1590,16 +1710,31 @@ mod tests {
             },
         ];
         let text = render_to_text_full(0, None, &entries, Some(LogOrigin::Usage), None, 0, false);
-        assert!(text.contains("usage message"), "kept entry missing:\n{text}");
-        assert!(!text.contains("setup message"), "filtered entry leaked:\n{text}");
-        assert!(text.contains("origin: usage"), "title missing filter in:\n{text}");
-        assert!(text.contains("type: all · 1"), "title missing filtered count in:\n{text}");
+        assert!(
+            text.contains("usage message"),
+            "kept entry missing:\n{text}"
+        );
+        assert!(
+            !text.contains("setup message"),
+            "filtered entry leaked:\n{text}"
+        );
+        assert!(
+            text.contains("origin: usage"),
+            "title missing filter in:\n{text}"
+        );
+        assert!(
+            text.contains("type: all · 1"),
+            "title missing filtered count in:\n{text}"
+        );
     }
 
     #[test]
     fn logs_panel_empty_state() {
         let text = render_to_text_full(0, None, &[], None, None, 0, false);
-        assert!(text.contains("no log entries"), "empty-state text missing:\n{text}");
+        assert!(
+            text.contains("no log entries"),
+            "empty-state text missing:\n{text}"
+        );
 
         use crate::debug_log::{LogEntry, LogKind, LogOrigin};
         let entries = vec![LogEntry {
@@ -1608,7 +1743,8 @@ mod tests {
             kind: LogKind::Info,
             message: "setup message".into(),
         }];
-        let filtered_out = render_to_text_full(0, None, &entries, Some(LogOrigin::Usage), None, 0, false);
+        let filtered_out =
+            render_to_text_full(0, None, &entries, Some(LogOrigin::Usage), None, 0, false);
         assert!(
             filtered_out.contains("no entries match filters"),
             "filtered-empty-state text missing:\n{filtered_out}"
@@ -1631,7 +1767,10 @@ mod tests {
         // Collapsed (9-row) panel only has room for the last 7 lines, so
         // an early entry is scrolled off the top.
         let collapsed = render_to_text_full(0, None, &entries, None, None, 0, false);
-        assert!(collapsed.contains("L expand"), "collapsed title missing hint:\n{collapsed}");
+        assert!(
+            collapsed.contains("L expand"),
+            "collapsed title missing hint:\n{collapsed}"
+        );
         assert!(
             !collapsed.contains("entry 5"),
             "entry 5 should be cut off in the collapsed panel:\n{collapsed}"
@@ -1640,7 +1779,10 @@ mod tests {
         // Expanded, the logs panel takes the flexible share of the
         // layout and has room for all 20 entries.
         let expanded = render_to_text_full(0, None, &entries, None, None, 0, true);
-        assert!(expanded.contains("L shrink"), "expanded title missing hint:\n{expanded}");
+        assert!(
+            expanded.contains("L shrink"),
+            "expanded title missing hint:\n{expanded}"
+        );
         assert!(
             expanded.contains("entry 5"),
             "entry 5 should be visible once the logs panel expands:\n{expanded}"
@@ -1709,8 +1851,14 @@ mod tests {
                     true,
                     false,
                     DefaultView::All,
-                    LivePollUi { secs: 60, edit: None },
-                    LogMaxLinesUi { lines: 10_000, edit: None },
+                    LivePollUi {
+                        secs: 60,
+                        edit: None,
+                    },
+                    LogMaxLinesUi {
+                        lines: 10_000,
+                        edit: None,
+                    },
                     mewxi,
                     &update_ui(None),
                     &logs,
@@ -1739,10 +1887,19 @@ mod tests {
             ascii_style: "classic",
         };
         let text = render_to_text_mewxi(0, &mewxi);
-        assert!(text.contains("Mewxi view"), "section header missing:\n{text}");
+        assert!(
+            text.contains("Mewxi view"),
+            "section header missing:\n{text}"
+        );
         assert!(text.contains("full"), "shake value missing:\n{text}");
-        assert!(text.contains("insane"), "fx intensity value missing:\n{text}");
-        assert!(text.contains("classic"), "ascii style value missing:\n{text}");
+        assert!(
+            text.contains("insane"),
+            "fx intensity value missing:\n{text}"
+        );
+        assert!(
+            text.contains("classic"),
+            "ascii style value missing:\n{text}"
+        );
         assert!(text.contains("off"), "visualizer-off row missing:\n{text}");
     }
 }

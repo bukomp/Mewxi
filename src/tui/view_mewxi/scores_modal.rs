@@ -5,11 +5,11 @@
 use super::palette::{P_DIM, P_HOT, P_LABEL, P_MID, P_TEXT};
 use super::streaks;
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
 
 pub struct ScoresModal;
 
@@ -94,7 +94,10 @@ impl ScoresModal {
             stat_line("BEST COMBO", best_combo_str),
             stat_line("STREAK", streak_str),
             Line::from(""),
-            Line::from(Span::styled(format!("  {footer}"), Style::default().fg(P_DIM))),
+            Line::from(Span::styled(
+                format!("  {footer}"),
+                Style::default().fg(P_DIM),
+            )),
             Line::from(""),
             Line::from(Span::styled("  RECENT RUNS", heading_style)),
         ];
@@ -162,8 +165,8 @@ fn center_rect(area: Rect, w: u16, h: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     #[test]
     fn render_does_not_panic_at_any_size_and_shows_labels() {

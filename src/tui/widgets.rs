@@ -4,13 +4,13 @@
 //! reuse the same gauges, sparklines, and formatters without copy.
 
 use crate::live_usage::LiveUsage;
-use crate::stats::{self, Aggregate, UsageRecord, UsageTotals, fmt_num};
+use crate::stats::{self, fmt_num, Aggregate, UsageRecord, UsageTotals};
 use chrono::{Local, Utc};
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Sparkline, Table};
+use ratatui::Frame;
 
 /// Token cap used for the local 5h estimate; must match watch::DEFAULT_5H_CAP_TOKENS.
 pub const LOCAL_5H_CAP: u64 = 11_500_000;
@@ -50,7 +50,11 @@ pub fn compute_metrics(agg: &Aggregate) -> Metrics {
 
     let daily_14d_tokens = daily_series(agg, 14);
     let daily_14d_peak = daily_14d_tokens.iter().copied().max().unwrap_or(0);
-    let active_days: Vec<u64> = daily_14d_tokens.iter().copied().filter(|n| *n > 0).collect();
+    let active_days: Vec<u64> = daily_14d_tokens
+        .iter()
+        .copied()
+        .filter(|n| *n > 0)
+        .collect();
     let daily_14d_avg = if active_days.is_empty() {
         0
     } else {
@@ -152,7 +156,10 @@ pub fn kv_line(key: impl Into<String>, value: impl Into<String>, color: Color) -
     let k = key.into();
     Line::from(vec![
         Span::styled(format!("{k:<13}"), Style::default().fg(Color::DarkGray)),
-        Span::styled(value.into(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            value.into(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
     ])
 }
 
@@ -178,17 +185,36 @@ pub fn render_header(
         None => "• live: off".to_string(),
     };
     let line = Line::from(vec![
-        Span::styled(title.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("   sessions "),
-        Span::styled(agg.sessions_count.to_string(), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            agg.sessions_count.to_string(),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::raw("   projects "),
-        Span::styled(agg.projects_count.to_string(), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            agg.projects_count.to_string(),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::raw("   total "),
-        Span::styled(format!("${:.2}", agg.all.cost_usd), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("${:.2}", agg.all.cost_usd),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("   "),
         Span::styled(source, Style::default().fg(Color::DarkGray)),
     ]);
-    f.render_widget(Paragraph::new(line).block(Block::default().borders(Borders::ALL)), area);
+    f.render_widget(
+        Paragraph::new(line).block(Block::default().borders(Borders::ALL)),
+        area,
+    );
 }
 
 pub fn render_5h_gauge(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<&LiveUsage>) {
@@ -198,7 +224,11 @@ pub fn render_5h_gauge(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<
                 .resets_at
                 .map(|t| {
                     let remaining = (t - Utc::now()).num_minutes().max(0);
-                    format!("  reset {} ({:>3}m)", t.with_timezone(&Local).format("%H:%M"), remaining)
+                    format!(
+                        "  reset {} ({:>3}m)",
+                        t.with_timezone(&Local).format("%H:%M"),
+                        remaining
+                    )
                 })
                 .unwrap_or_default();
             let tag: String = match live {
@@ -213,7 +243,11 @@ pub fn render_5h_gauge(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<
                 .five_h_resets_at
                 .map(|t| {
                     let remaining = (t - Utc::now()).num_minutes().max(0);
-                    format!("  reset {} ({:>3}m)", t.with_timezone(&Local).format("%H:%M"), remaining)
+                    format!(
+                        "  reset {} ({:>3}m)",
+                        t.with_timezone(&Local).format("%H:%M"),
+                        remaining
+                    )
                 })
                 .unwrap_or_default();
             (p, reset, "5h (estimate)".to_string())
@@ -239,7 +273,11 @@ pub fn render_7d_gauge(f: &mut Frame, area: Rect, live: Option<&LiveUsage>) {
             let ratio = (w.utilization / 100.0).clamp(0.0, 1.0);
             let gauge = Gauge::default()
                 .block(Block::default().borders(Borders::ALL).title("Weekly"))
-                .gauge_style(Style::default().fg(gauge_color(w.utilization)).bg(Color::Black))
+                .gauge_style(
+                    Style::default()
+                        .fg(gauge_color(w.utilization))
+                        .bg(Color::Black),
+                )
                 .ratio(ratio)
                 .label(format!("{:.1}%{}", w.utilization, reset));
             f.render_widget(gauge, area);
@@ -300,7 +338,11 @@ pub fn render_extra_gauge(f: &mut Frame, area: Rect, live: Option<&LiveUsage>) {
             f.render_widget(gauge, area);
         }
         _ => {
-            let msg = if extra.is_some() { "disabled" } else { "no live data" };
+            let msg = if extra.is_some() {
+                "disabled"
+            } else {
+                "no live data"
+            };
             let p = Paragraph::new(Line::from(Span::styled(
                 msg,
                 Style::default().fg(Color::DarkGray),
@@ -314,8 +356,16 @@ pub fn render_extra_gauge(f: &mut Frame, area: Rect, live: Option<&LiveUsage>) {
 
 pub fn render_burn_panel(f: &mut Frame, area: Rect, m: &Metrics) {
     let lines = vec![
-        kv_line("tok/hr", fmt_tokens_compact(m.recent_burn_tok_hr as u64), Color::Cyan),
-        kv_line("$/hr", format!("${:.2}", m.recent_burn_usd_hr), Color::Green),
+        kv_line(
+            "tok/hr",
+            fmt_tokens_compact(m.recent_burn_tok_hr as u64),
+            Color::Cyan,
+        ),
+        kv_line(
+            "$/hr",
+            format!("${:.2}", m.recent_burn_usd_hr),
+            Color::Green,
+        ),
         kv_line(
             "ETA to cap",
             match m.eta_minutes_to_local_cap {
@@ -325,11 +375,18 @@ pub fn render_burn_panel(f: &mut Frame, area: Rect, m: &Metrics) {
             },
             Color::Yellow,
         ),
-        kv_line("block cost", format!("${:.2}", m.block_cost_usd), Color::Green),
+        kv_line(
+            "block cost",
+            format!("${:.2}", m.block_cost_usd),
+            Color::Green,
+        ),
         kv_line("block msgs", fmt_num(m.block_messages), Color::White),
     ];
-    let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Burn rate (last 15m)"));
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Burn rate (last 15m)"),
+    );
     f.render_widget(p, area);
 }
 
@@ -349,9 +406,15 @@ pub fn render_sparkline_panel(f: &mut Frame, area: Rect, m: &Metrics) {
     f.render_widget(spark, split[0]);
     let caption = Line::from(vec![
         Span::raw(" peak "),
-        Span::styled(fmt_tokens_compact(m.daily_14d_peak), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            fmt_tokens_compact(m.daily_14d_peak),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::raw("   avg "),
-        Span::styled(fmt_tokens_compact(m.daily_14d_avg), Style::default().fg(Color::Green)),
+        Span::styled(
+            fmt_tokens_compact(m.daily_14d_avg),
+            Style::default().fg(Color::Green),
+        ),
         Span::raw("   today "),
         Span::styled(
             fmt_tokens_compact(*m.daily_14d_tokens.last().unwrap_or(&0)),
@@ -378,15 +441,32 @@ pub fn render_efficiency_panel(f: &mut Frame, area: Rect, agg: &Aggregate, m: &M
     let lines = vec![
         Line::from(vec![
             Span::styled("cache hit ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{hit_pct:>5.1}%"), Style::default().fg(hit_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{hit_pct:>5.1}%"),
+                Style::default().fg(hit_color).add_modifier(Modifier::BOLD),
+            ),
         ]),
-        kv_line("5h overage", format!("${:.2}", m.overage_usd),
-            if m.overage_usd > 0.0 { Color::Red } else { Color::Green }),
-        kv_line("$/msg avg", format!("${:.4}", avg_cost_per_msg), Color::White),
-        kv_line("all-time cost", format!("${:.2}", agg.all.cost_usd), Color::Green),
+        kv_line(
+            "5h overage",
+            format!("${:.2}", m.overage_usd),
+            if m.overage_usd > 0.0 {
+                Color::Red
+            } else {
+                Color::Green
+            },
+        ),
+        kv_line(
+            "$/msg avg",
+            format!("${:.4}", avg_cost_per_msg),
+            Color::White,
+        ),
+        kv_line(
+            "all-time cost",
+            format!("${:.2}", agg.all.cost_usd),
+            Color::Green,
+        ),
     ];
-    let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Efficiency"));
+    let p = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Efficiency"));
     f.render_widget(p, area);
 }
 
@@ -402,7 +482,9 @@ pub fn render_burn_and_efficiency_narrow(f: &mut Frame, area: Rect, agg: &Aggreg
             Span::styled("burn ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 fmt_tokens_compact(m.recent_burn_tok_hr as u64),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("/hr  "),
             Span::styled(
@@ -416,15 +498,16 @@ pub fn render_burn_and_efficiency_narrow(f: &mut Frame, area: Rect, agg: &Aggreg
             Span::raw("    overage "),
             Span::styled(
                 format!("${:.2}", m.overage_usd),
-                Style::default().fg(if m.overage_usd > 0.0 { Color::Red } else { Color::Green }),
+                Style::default().fg(if m.overage_usd > 0.0 {
+                    Color::Red
+                } else {
+                    Color::Green
+                }),
             ),
         ]),
         Line::from(vec![
             Span::styled("cache hit ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{hit_pct:>5.1}%"),
-                Style::default().fg(Color::Cyan),
-            ),
+            Span::styled(format!("{hit_pct:>5.1}%"), Style::default().fg(Color::Cyan)),
             Span::raw("    total "),
             Span::styled(
                 format!("${:.2}", agg.all.cost_usd),
@@ -440,8 +523,16 @@ pub fn render_burn_and_efficiency_narrow(f: &mut Frame, area: Rect, agg: &Aggreg
 
 pub fn render_by_project(f: &mut Frame, area: Rect, agg: &Aggregate) {
     let mut rows: Vec<(&String, &UsageTotals)> = agg.by_project.iter().collect();
-    rows.sort_by(|a, b| b.1.cost_usd.partial_cmp(&a.1.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
-    let max_cost = rows.first().map(|(_, t)| t.cost_usd).unwrap_or(0.0).max(0.01);
+    rows.sort_by(|a, b| {
+        b.1.cost_usd
+            .partial_cmp(&a.1.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let max_cost = rows
+        .first()
+        .map(|(_, t)| t.cost_usd)
+        .unwrap_or(0.0)
+        .max(0.01);
     let height = area.height.saturating_sub(3) as usize;
 
     fn bar(cost: f64, max: f64, width: usize) -> String {
@@ -472,8 +563,11 @@ pub fn render_by_project(f: &mut Frame, area: Rect, agg: &Aggregate) {
         ],
     )
     .header(
-        Row::new(vec!["project", "tokens", "", "cost"])
-            .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+        Row::new(vec!["project", "tokens", "", "cost"]).style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
     )
     .block(Block::default().borders(Borders::ALL).title("By project"));
     f.render_widget(table, area);
@@ -665,4 +759,3 @@ mod ansi_tests {
         assert!(ansi_to_spans("").is_empty());
     }
 }
-

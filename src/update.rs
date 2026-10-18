@@ -213,7 +213,11 @@ pub fn load_cached() -> Option<CachedCheck> {
             crate::debug_log::log_event(
                 crate::debug_log::LogOrigin::Update,
                 crate::debug_log::LogKind::FileRead,
-                &format!("{} unreadable — {}", basename(&path), first_line(&e.to_string())),
+                &format!(
+                    "{} unreadable — {}",
+                    basename(&path),
+                    first_line(&e.to_string())
+                ),
             );
             return None;
         }
@@ -250,7 +254,11 @@ fn write_cache(status: &UpdateStatus) {
             Err(e) => crate::debug_log::log_event(
                 crate::debug_log::LogOrigin::Update,
                 crate::debug_log::LogKind::FileWrite,
-                &format!("{} write failed — {}", basename(&path), first_line(&e.to_string())),
+                &format!(
+                    "{} write failed — {}",
+                    basename(&path),
+                    first_line(&e.to_string())
+                ),
             ),
         }
     }
@@ -492,13 +500,21 @@ fn dev_baseline(repo: &Path, build_commit: &str) -> Result<String> {
 /// Origin's default branch: `origin/HEAD` when the clone recorded it,
 /// otherwise the first of main/master that exists remotely.
 fn remote_default_branch(repo: &Path) -> String {
-    if let Ok(s) = git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+    if let Ok(s) = git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
         if let Some(b) = s.strip_prefix("origin/") {
             return b.to_string();
         }
     }
     for b in ["main", "master"] {
-        if git(repo, &["rev-parse", "--verify", "--quiet", &format!("origin/{b}")]).is_ok() {
+        if git(
+            repo,
+            &["rev-parse", "--verify", "--quiet", &format!("origin/{b}")],
+        )
+        .is_ok()
+        {
             return b.to_string();
         }
     }
@@ -638,7 +654,13 @@ fn check_local(repo: &Path, channel: UpdateChannel) -> Result<UpdateStatus> {
                     } else {
                         format!("v{current} matches the newest tag")
                     };
-                    UpdateStatus { channel, available, current: format!("v{current}"), latest: tag, detail }
+                    UpdateStatus {
+                        channel,
+                        available,
+                        current: format!("v{current}"),
+                        latest: tag,
+                        detail,
+                    }
                 }
                 None => UpdateStatus {
                     channel,
@@ -652,9 +674,16 @@ fn check_local(repo: &Path, channel: UpdateChannel) -> Result<UpdateStatus> {
         UpdateChannel::Dev => {
             let branch = remote_default_branch(repo);
             let current = dev_baseline(repo, BUILD_COMMIT)?;
-            let behind: u64 = git(repo, &["rev-list", "--count", &format!("{current}..origin/{branch}")])?
-                .parse()
-                .unwrap_or(0);
+            let behind: u64 = git(
+                repo,
+                &[
+                    "rev-list",
+                    "--count",
+                    &format!("{current}..origin/{branch}"),
+                ],
+            )?
+            .parse()
+            .unwrap_or(0);
             let latest = git(repo, &["rev-parse", "--short", &format!("origin/{branch}")])?;
             UpdateStatus {
                 channel,
@@ -682,7 +711,10 @@ fn check_remote(url: &str, channel: UpdateChannel) -> Result<UpdateStatus> {
             let current = env!("CARGO_PKG_VERSION").to_string();
             let out = git_norepo(&["ls-remote", "--tags", "--refs", url])
                 .context("ls-remote --tags origin")?;
-            match parse_ls_remote_tags(&out).into_iter().max_by_key(|t| parse_version(t)) {
+            match parse_ls_remote_tags(&out)
+                .into_iter()
+                .max_by_key(|t| parse_version(t))
+            {
                 Some(tag) => {
                     let available = version_newer(&tag, &current);
                     let detail = if available {
@@ -690,7 +722,13 @@ fn check_remote(url: &str, channel: UpdateChannel) -> Result<UpdateStatus> {
                     } else {
                         format!("v{current} matches the newest tag")
                     };
-                    UpdateStatus { channel, available, current: format!("v{current}"), latest: tag, detail }
+                    UpdateStatus {
+                        channel,
+                        available,
+                        current: format!("v{current}"),
+                        latest: tag,
+                        detail,
+                    }
                 }
                 None => UpdateStatus {
                     channel,
@@ -836,11 +874,13 @@ pub fn apply_now() -> Result<String> {
     // run did) and MEWXI_ORIGIN_URL (correctly, from the clone's own git
     // context) — the new binary self-heals into the same remote-only
     // path rather than losing update capability entirely.
-    let (origin, git_ref, source_repo) = match resolve_repo_source(view.update_repo_dir.as_deref())? {
+    let (origin, git_ref, source_repo) = match resolve_repo_source(view.update_repo_dir.as_deref())?
+    {
         RepoSource::Local(repo) => {
             println!("  fetching origin …");
             git(&repo, &["fetch", "--quiet", "--tags", "origin"]).context("fetching origin")?;
-            let origin = git(&repo, &["remote", "get-url", "origin"]).context("reading origin URL")?;
+            let origin =
+                git(&repo, &["remote", "get-url", "origin"]).context("reading origin URL")?;
             let git_ref = match channel {
                 UpdateChannel::Release => latest_version_tag(&repo)?.ok_or_else(|| {
                     anyhow!("no version tags on origin — switch to the dev channel?")
@@ -878,9 +918,13 @@ pub fn apply_now() -> Result<String> {
             crate::debug_log::log_event(
                 crate::debug_log::LogOrigin::Update,
                 crate::debug_log::LogKind::Error,
-                &format!("build workdir clear failed — {}", first_line(&e.to_string())),
+                &format!(
+                    "build workdir clear failed — {}",
+                    first_line(&e.to_string())
+                ),
             );
-            return Err(e).with_context(|| format!("clearing stale build dir {}", workdir.display()));
+            return Err(e)
+                .with_context(|| format!("clearing stale build dir {}", workdir.display()));
         }
         crate::debug_log::log_event(
             crate::debug_log::LogOrigin::Update,
@@ -893,7 +937,10 @@ pub fn apply_now() -> Result<String> {
             crate::debug_log::log_event(
                 crate::debug_log::LogOrigin::Update,
                 crate::debug_log::LogKind::Error,
-                &format!("build workdir create failed — {}", first_line(&e.to_string())),
+                &format!(
+                    "build workdir create failed — {}",
+                    first_line(&e.to_string())
+                ),
             );
             return Err(e).with_context(|| format!("creating build dir {}", parent.display()));
         }
@@ -950,7 +997,11 @@ pub fn apply_now() -> Result<String> {
     // Left unset in remote mode (source_repo is None) — see the comment
     // above on why that's the right call there.
     let mut cargo_cmd = Command::new("cargo");
-    cargo_cmd.arg("install").arg("--path").arg(&workdir).arg("--force");
+    cargo_cmd
+        .arg("install")
+        .arg("--path")
+        .arg(&workdir)
+        .arg("--force");
     if let Some(repo) = &source_repo {
         cargo_cmd.env("MEWXI_SOURCE_REPO", repo);
     }
@@ -1008,7 +1059,8 @@ pub fn apply_now() -> Result<String> {
     let installed = cargo_bin_path();
     if let Ok(running) = std::env::current_exe() {
         let running = std::fs::canonicalize(&running).unwrap_or(running);
-        let installed_real = std::fs::canonicalize(&installed).unwrap_or_else(|_| installed.clone());
+        let installed_real =
+            std::fs::canonicalize(&installed).unwrap_or_else(|_| installed.clone());
         crate::debug_log::log_event(
             crate::debug_log::LogOrigin::Update,
             crate::debug_log::LogKind::FileRead,
@@ -1130,8 +1182,7 @@ fn replace_binary(src: &Path, dst: &Path) -> Result<()> {
                     // Roll back so we don't leave dst missing.
                     let _ = std::fs::rename(&aside, dst);
                     let _ = std::fs::remove_file(&tmp);
-                    return Err(e2)
-                        .with_context(|| format!("renaming into {}", dst.display()));
+                    return Err(e2).with_context(|| format!("renaming into {}", dst.display()));
                 }
                 let _ = std::fs::remove_file(&aside);
                 return Ok(());
@@ -1166,9 +1217,7 @@ pub fn statusline_segment() -> Option<String> {
     // Leading-style segment (trailing separator) so it can sit at the
     // front of the statusline and stay visible when narrow terminals
     // truncate the tail. Mirrors the setup-incomplete hint's shape.
-    Some(format!(
-        "\x1b[35m↑ mewxi {what}\x1b[0m \x1b[90m|\x1b[0m "
-    ))
+    Some(format!("\x1b[35m↑ mewxi {what}\x1b[0m \x1b[90m|\x1b[0m "))
 }
 
 #[cfg(test)]
@@ -1232,8 +1281,14 @@ ccc333\trefs/heads/main";
     fn channel_parses_with_release_fallback() {
         assert_eq!(UpdateChannel::from_config(Some("dev")), UpdateChannel::Dev);
         assert_eq!(UpdateChannel::from_config(Some("main")), UpdateChannel::Dev);
-        assert_eq!(UpdateChannel::from_config(Some("release")), UpdateChannel::Release);
-        assert_eq!(UpdateChannel::from_config(Some("garbage")), UpdateChannel::Release);
+        assert_eq!(
+            UpdateChannel::from_config(Some("release")),
+            UpdateChannel::Release
+        );
+        assert_eq!(
+            UpdateChannel::from_config(Some("garbage")),
+            UpdateChannel::Release
+        );
         assert_eq!(UpdateChannel::from_config(None), UpdateChannel::Release);
     }
 
@@ -1245,11 +1300,26 @@ ccc333\trefs/heads/main";
 
     #[test]
     fn interval_parses_with_6h_fallback() {
-        assert_eq!(UpdateInterval::from_config(Some("15m")), UpdateInterval::Min15);
-        assert_eq!(UpdateInterval::from_config(Some("1h")), UpdateInterval::Hour1);
-        assert_eq!(UpdateInterval::from_config(Some("6h")), UpdateInterval::Hour6);
-        assert_eq!(UpdateInterval::from_config(Some("24h")), UpdateInterval::Hour24);
-        assert_eq!(UpdateInterval::from_config(Some("garbage")), UpdateInterval::Hour6);
+        assert_eq!(
+            UpdateInterval::from_config(Some("15m")),
+            UpdateInterval::Min15
+        );
+        assert_eq!(
+            UpdateInterval::from_config(Some("1h")),
+            UpdateInterval::Hour1
+        );
+        assert_eq!(
+            UpdateInterval::from_config(Some("6h")),
+            UpdateInterval::Hour6
+        );
+        assert_eq!(
+            UpdateInterval::from_config(Some("24h")),
+            UpdateInterval::Hour24
+        );
+        assert_eq!(
+            UpdateInterval::from_config(Some("garbage")),
+            UpdateInterval::Hour6
+        );
         assert_eq!(UpdateInterval::from_config(None), UpdateInterval::Hour6);
     }
 
@@ -1287,7 +1357,11 @@ ccc333\trefs/heads/main";
                 .env("GIT_COMMITTER_EMAIL", "t@t")
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         run(&["init", "--quiet"]);

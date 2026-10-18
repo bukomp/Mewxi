@@ -186,8 +186,10 @@ pub fn composer_rows(view: &AccountsView) -> Vec<(Block, bool, bool)> {
     let known = known_blocks(view); // (Block, is_builtin), defaults-first then user
     let builtin: std::collections::HashMap<String, bool> =
         known.iter().map(|(b, bi)| (b.id.clone(), *bi)).collect();
-    let by_id: std::collections::HashMap<String, Block> =
-        known.iter().map(|(b, _)| (b.id.clone(), b.clone())).collect();
+    let by_id: std::collections::HashMap<String, Block> = known
+        .iter()
+        .map(|(b, _)| (b.id.clone(), b.clone()))
+        .collect();
 
     let mut out: Vec<(Block, bool, bool)> = Vec::new();
     let mut placed: HashSet<String> = HashSet::new();
@@ -254,7 +256,10 @@ pub fn preview_ctx() -> Ctx {
     );
     f.insert("account", "priv".into());
     f.insert("model", "Opus 4.8".into());
-    f.insert("think", " \x1b[90m·\x1b[0m \x1b[35mthink:high\x1b[0m".into());
+    f.insert(
+        "think",
+        " \x1b[90m·\x1b[0m \x1b[35mthink:high\x1b[0m".into(),
+    );
     f.insert(
         "five_h_segment",
         "\x1b[36m5h\x1b[0m \x1b[32m12.3%\x1b[0m \x1b[90m(live)\x1b[0m".into(),
@@ -352,10 +357,7 @@ pub(crate) fn compose_default_from_data(
 mod tests {
     use super::*;
 
-    fn view(
-        status_blocks: Option<Vec<(String, bool)>>,
-        dir: std::path::PathBuf,
-    ) -> AccountsView {
+    fn view(status_blocks: Option<Vec<(String, bool)>>, dir: std::path::PathBuf) -> AccountsView {
         AccountsView {
             accounts: vec![],
             ignored: vec![],
@@ -399,7 +401,10 @@ mod tests {
         let v = view(None, tmp.path().to_path_buf());
         assert_eq!(
             ids(load_blocks(&v)),
-            DEFAULT_ORDER.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            DEFAULT_ORDER
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -424,7 +429,10 @@ mod tests {
         .unwrap();
         let v = view(Some(vec![("model".into(), true)]), tmp.path().to_path_buf());
         // model (listed) then git (freshly-dropped user block, appended).
-        assert_eq!(ids(load_blocks(&v)), vec!["model".to_string(), "git".to_string()]);
+        assert_eq!(
+            ids(load_blocks(&v)),
+            vec!["model".to_string(), "git".to_string()]
+        );
     }
 
     #[test]

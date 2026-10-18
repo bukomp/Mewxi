@@ -117,7 +117,11 @@ pub(crate) fn user_text(content: &serde_json::Value) -> Option<String> {
             }
         }
     }
-    if buf.is_empty() { None } else { Some(buf) }
+    if buf.is_empty() {
+        None
+    } else {
+        Some(buf)
+    }
 }
 
 fn classify_tool(name: &str) -> Activity {
@@ -155,7 +159,13 @@ const NARRATION_MAX_CHARS: usize = 80;
 fn sanitize_snippet(s: &str, max_chars: usize) -> String {
     let collapsed: String = s
         .chars()
-        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let trimmed = collapsed.trim();
     if trimmed.chars().count() > max_chars {
@@ -241,7 +251,9 @@ fn classify_record(j: &serde_json::Value) -> Option<Activity> {
             // Walk content items in reverse — the last meaningful item is
             // what Claude was producing when the record was written.
             for ci in arr.iter().rev() {
-                let Some(ct) = ci.get("type").and_then(|x| x.as_str()) else { continue };
+                let Some(ct) = ci.get("type").and_then(|x| x.as_str()) else {
+                    continue;
+                };
                 match ct {
                     "tool_use" => {
                         let name = ci.get("name").and_then(|x| x.as_str()).unwrap_or("");
@@ -265,9 +277,7 @@ fn classify_record(j: &serde_json::Value) -> Option<Activity> {
             // pre-compaction turn record, which represents what the user was
             // last actually doing.
             if let Some(text) = user_text(content) {
-                if text.contains("<local-command-stdout>")
-                    && text.contains("Compacted")
-                {
+                if text.contains("<local-command-stdout>") && text.contains("Compacted") {
                     return None;
                 }
                 if text.contains("<command-name>/compact</command-name>") {
@@ -279,9 +289,9 @@ fn classify_record(j: &serde_json::Value) -> Option<Activity> {
                 return None;
             }
             if let Some(arr) = content.as_array() {
-                let has_tool_result = arr.iter().any(|ci| {
-                    ci.get("type").and_then(|x| x.as_str()) == Some("tool_result")
-                });
+                let has_tool_result = arr
+                    .iter()
+                    .any(|ci| ci.get("type").and_then(|x| x.as_str()) == Some("tool_result"));
                 if has_tool_result {
                     // Tool returned, Claude is processing the result before
                     // its next move.
@@ -304,7 +314,9 @@ fn classify_record(j: &serde_json::Value) -> Option<Activity> {
 fn last_tool_use(j: &serde_json::Value) -> Option<&serde_json::Value> {
     let arr = j.get("message")?.get("content")?.as_array()?;
     for ci in arr.iter().rev() {
-        let Some(ct) = ci.get("type").and_then(|x| x.as_str()) else { continue };
+        let Some(ct) = ci.get("type").and_then(|x| x.as_str()) else {
+            continue;
+        };
         match ct {
             "tool_use" => return Some(ci),
             "thinking" | "text" => return None,
@@ -421,7 +433,9 @@ fn latest_narration(tail: &str) -> Option<String> {
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         if v.get("type").and_then(|x| x.as_str()) != Some("assistant") {
             continue;
         }
@@ -436,7 +450,9 @@ fn latest_narration(tail: &str) -> Option<String> {
             if ci.get("type").and_then(|x| x.as_str()) != Some("text") {
                 continue;
             }
-            let Some(text) = ci.get("text").and_then(|x| x.as_str()) else { continue };
+            let Some(text) = ci.get("text").and_then(|x| x.as_str()) else {
+                continue;
+            };
             if let Some(first) = text.lines().map(str::trim).find(|l| !l.is_empty()) {
                 return Some(sanitize_snippet(first, NARRATION_MAX_CHARS));
             }
@@ -469,7 +485,9 @@ fn tail_permission_mode(path: &Path) -> Option<(String, DateTime<Utc>)> {
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         let record_type = v.get("type").and_then(|x| x.as_str());
         // Fallback only for `user` records — assistant/system records
         // can echo a permissionMode field that doesn't reflect a real
@@ -519,8 +537,12 @@ fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailStatus> {
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let Some(a) = classify_record(&v) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(a) = classify_record(&v) else {
+            continue;
+        };
         let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
 
         // Fast tools (Read/Grep/Glob) complete in <15 ms, well under the
@@ -552,9 +574,21 @@ fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailStatus> {
         // captioning — completed thinking/text/starting records don't.
         // Narration is filled in by `tail_status` from a separate walk —
         // it needs to look past the newest record this walk stops at.
-        let action = if is_pending { tool_use_caption(&v) } else { None };
-        let kind = if is_pending { TailKind::PendingTool(a) } else { TailKind::Completed(a) };
-        return Some(TailStatus { kind, action, narration: None });
+        let action = if is_pending {
+            tool_use_caption(&v)
+        } else {
+            None
+        };
+        let kind = if is_pending {
+            TailKind::PendingTool(a)
+        } else {
+            TailKind::Completed(a)
+        };
+        return Some(TailStatus {
+            kind,
+            action,
+            narration: None,
+        });
     }
     None
 }
@@ -565,7 +599,9 @@ fn classify_tail(tail: &str, now: DateTime<Utc>) -> Option<TailStatus> {
 /// malformed records degrade to the (safer) carry-back path rather
 /// than flipping to a confident `Thinking`.
 fn record_is_recent(v: &serde_json::Value, now: DateTime<Utc>) -> bool {
-    let Some(ts_str) = v.get("timestamp").and_then(|x| x.as_str()) else { return true };
+    let Some(ts_str) = v.get("timestamp").and_then(|x| x.as_str()) else {
+        return true;
+    };
     match DateTime::parse_from_rfc3339(ts_str) {
         Ok(ts) => now - ts.with_timezone(&Utc) < TOOL_RESULT_CARRY_WINDOW,
         Err(_) => true,
@@ -582,7 +618,9 @@ fn preceding_tool_activity(prior: &[&str]) -> Option<(Activity, Option<String>)>
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         if v.get("type").and_then(|x| x.as_str()) != Some("assistant") {
             continue;
         }
@@ -731,12 +769,17 @@ fn read_markers(account: &Account, alive: &HashSet<u32>) -> Vec<SessionMarker> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_str(&raw) else {
             continue;
         };
         let pid = v.get("pid").and_then(|p| p.as_u64()).map(|n| n as u32);
-        let session_id = v.get("sessionId").and_then(|s| s.as_str()).map(String::from);
+        let session_id = v
+            .get("sessionId")
+            .and_then(|s| s.as_str())
+            .map(String::from);
         let cwd = v.get("cwd").and_then(|s| s.as_str()).map(PathBuf::from);
         let status = v
             .get("status")
@@ -781,11 +824,7 @@ fn ms_to_utc(ms: i64) -> Option<DateTime<Utc>> {
 /// `previous` is the result of the most recent scan for this account (or
 /// `&[]` on a cold start / one-shot caller). It's used solely to preserve
 /// `state_since` across scans when the session's state hasn't flipped.
-pub fn scan(
-    account: &Account,
-    alive: &HashSet<u32>,
-    previous: &[LiveSession],
-) -> Vec<LiveSession> {
+pub fn scan(account: &Account, alive: &HashSet<u32>, previous: &[LiveSession]) -> Vec<LiveSession> {
     let projects = account.projects_dir();
     if !projects.exists() {
         return Vec::new();
@@ -868,7 +907,11 @@ pub fn scan(
         }
         let (current_context, context_cap) = if transcript_exists {
             match stats::current_context_from_transcript(&transcript) {
-                Some(SessionContext { current, max_observed, model: m }) => {
+                Some(SessionContext {
+                    current,
+                    max_observed,
+                    model: m,
+                }) => {
                     let cap = stats::context_cap_for(
                         &m,
                         max_observed,
@@ -992,11 +1035,8 @@ pub fn scan(
         // isn't delegating: it early-outs on a missing `subagents/` dir.
         // `account.dir` also lets it pick up the `subagentStatusLine` feed
         // for live per-agent status captions, when one is being written.
-        let subagents = crate::subagents::scan_running(
-            &transcript,
-            &marker.session_id,
-            Some(&account.dir),
-        );
+        let subagents =
+            crate::subagents::scan_running(&transcript, &marker.session_id, Some(&account.dir));
 
         out.push(LiveSession {
             account_name: account.name.clone(),

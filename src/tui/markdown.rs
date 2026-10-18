@@ -200,10 +200,8 @@ impl Renderer {
             return;
         }
         let plen = prefix.chars().count();
-        self.current.push(Span::styled(
-            prefix,
-            Style::default().fg(Color::DarkGray),
-        ));
+        self.current
+            .push(Span::styled(prefix, Style::default().fg(Color::DarkGray)));
         self.cur_w = plen;
     }
 
@@ -212,8 +210,7 @@ impl Renderer {
             // Nothing on this line — push a true blank.
             self.out.push(Line::default());
         } else {
-            self.out
-                .push(Line::from(std::mem::take(&mut self.current)));
+            self.out.push(Line::from(std::mem::take(&mut self.current)));
         }
         self.cur_w = 0;
         self.body_started = false;
@@ -221,11 +218,7 @@ impl Renderer {
 
     fn blank_line(&mut self) {
         // Coalesce runs of blanks; never start with a blank.
-        let last_blank = self
-            .out
-            .last()
-            .map(|l| l.spans.is_empty())
-            .unwrap_or(true);
+        let last_blank = self.out.last().map(|l| l.spans.is_empty()).unwrap_or(true);
         if !last_blank {
             self.out.push(Line::default());
         }
@@ -266,8 +259,7 @@ impl Renderer {
             self.cur_w += wlen;
         } else {
             if need_space {
-                self.current
-                    .push(Span::styled(" ".to_string(), self.base));
+                self.current.push(Span::styled(" ".to_string(), self.base));
                 self.cur_w += 1;
             }
             self.current.push(Span::styled(word.to_string(), style));
@@ -285,8 +277,7 @@ impl Renderer {
                     self.table_current_row.clear();
                 }
                 Event::End(TagEnd::TableHead) => {
-                    self.table_head =
-                        std::mem::take(&mut self.table_current_row);
+                    self.table_head = std::mem::take(&mut self.table_current_row);
                     self.table_in_head = false;
                 }
                 Event::Start(Tag::TableRow) => {
@@ -318,9 +309,7 @@ impl Renderer {
                 Event::Code(s) if self.in_table_cell => {
                     self.table_cell_buf.push_str(&s);
                 }
-                Event::SoftBreak | Event::HardBreak
-                    if self.in_table_cell =>
-                {
+                Event::SoftBreak | Event::HardBreak if self.in_table_cell => {
                     self.table_cell_buf.push(' ');
                 }
                 _ => {}
@@ -371,19 +360,13 @@ impl Renderer {
             }
 
             Event::Start(Tag::Emphasis) => self.italic += 1,
-            Event::End(TagEnd::Emphasis) => {
-                self.italic = self.italic.saturating_sub(1)
-            }
+            Event::End(TagEnd::Emphasis) => self.italic = self.italic.saturating_sub(1),
             Event::Start(Tag::Strong) => self.bold += 1,
             Event::End(TagEnd::Strong) => self.bold = self.bold.saturating_sub(1),
             Event::Start(Tag::Strikethrough) => self.strike += 1,
-            Event::End(TagEnd::Strikethrough) => {
-                self.strike = self.strike.saturating_sub(1)
-            }
+            Event::End(TagEnd::Strikethrough) => self.strike = self.strike.saturating_sub(1),
             Event::Start(Tag::Link { .. }) => self.underline += 1,
-            Event::End(TagEnd::Link) => {
-                self.underline = self.underline.saturating_sub(1)
-            }
+            Event::End(TagEnd::Link) => self.underline = self.underline.saturating_sub(1),
 
             Event::Start(Tag::BlockQuote(_)) => {
                 if self.body_started {
@@ -484,8 +467,7 @@ impl Renderer {
             }
             Event::SoftBreak => {
                 if self.body_started && self.cur_w < self.width {
-                    self.current
-                        .push(Span::styled(" ".to_string(), self.base));
+                    self.current.push(Span::styled(" ".to_string(), self.base));
                     self.cur_w += 1;
                 }
             }
@@ -506,8 +488,7 @@ impl Renderer {
             Event::TaskListMarker(checked) => {
                 let mark = if checked { "[x] " } else { "[ ] " };
                 self.ensure_prefix();
-                self.current
-                    .push(Span::styled(mark.to_string(), self.base));
+                self.current.push(Span::styled(mark.to_string(), self.base));
                 self.cur_w += 4;
                 self.body_started = true;
             }
@@ -529,8 +510,7 @@ impl Renderer {
             let pad = self.width.saturating_sub(hw);
             format!("{head}{}", "─".repeat(pad))
         };
-        self.out
-            .push(Line::from(Span::styled(header, rule_style)));
+        self.out.push(Line::from(Span::styled(header, rule_style)));
         // pulldown emits a trailing newline; lines() handles that correctly.
         for raw in body.lines() {
             let line_text = truncate_to(raw, avail);
@@ -557,12 +537,7 @@ impl Renderer {
         self.blank_line();
     }
 
-    fn emit_table(
-        &mut self,
-        aligns: &[Alignment],
-        head: &[String],
-        rows: &[Vec<String>],
-    ) {
+    fn emit_table(&mut self, aligns: &[Alignment], head: &[String], rows: &[Vec<String>]) {
         let rule_style = Style::default().fg(Color::DarkGray);
         let head_style = Style::default()
             .fg(Color::Cyan)
@@ -577,9 +552,7 @@ impl Renderer {
         }
 
         // Normalize all rows to ncols and trim/collapse whitespace per cell.
-        let norm = |s: &str| -> String {
-            s.split_whitespace().collect::<Vec<_>>().join(" ")
-        };
+        let norm = |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") };
         let head_n: Vec<String> = (0..ncols)
             .map(|i| head.get(i).map(|s| norm(s)).unwrap_or_default())
             .collect();
@@ -614,11 +587,7 @@ impl Renderer {
         let mut total = col_w.iter().sum::<usize>() + border_overhead + padding;
         // Shrink widest column until it fits.
         while total > target {
-            let (i, _) = col_w
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, w)| **w)
-                .unwrap();
+            let (i, _) = col_w.iter().enumerate().max_by_key(|(_, w)| **w).unwrap();
             if col_w[i] <= 1 {
                 break;
             }
@@ -632,8 +601,7 @@ impl Renderer {
                 if w <= 1 {
                     chars.into_iter().take(w).collect()
                 } else {
-                    let mut t: String =
-                        chars.into_iter().take(w - 1).collect();
+                    let mut t: String = chars.into_iter().take(w - 1).collect();
                     t.push('…');
                     t
                 }
@@ -668,8 +636,10 @@ impl Renderer {
         };
 
         // Top rule.
-        self.out
-            .push(Line::from(Span::styled(make_rule("┌", "┬", "┐"), rule_style)));
+        self.out.push(Line::from(Span::styled(
+            make_rule("┌", "┬", "┐"),
+            rule_style,
+        )));
 
         // Header row.
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -683,8 +653,10 @@ impl Renderer {
         self.out.push(Line::from(spans));
 
         // Header/body separator.
-        self.out
-            .push(Line::from(Span::styled(make_rule("├", "┼", "┤"), rule_style)));
+        self.out.push(Line::from(Span::styled(
+            make_rule("├", "┼", "┤"),
+            rule_style,
+        )));
 
         // Body rows.
         for row in &rows_n {
@@ -700,8 +672,10 @@ impl Renderer {
         }
 
         // Bottom rule.
-        self.out
-            .push(Line::from(Span::styled(make_rule("└", "┴", "┘"), rule_style)));
+        self.out.push(Line::from(Span::styled(
+            make_rule("└", "┴", "┘"),
+            rule_style,
+        )));
         self.blank_line();
     }
 
@@ -709,12 +683,7 @@ impl Renderer {
         if self.body_started || !self.current.is_empty() {
             self.flush_line();
         }
-        while self
-            .out
-            .last()
-            .map(|l| l.spans.is_empty())
-            .unwrap_or(false)
-        {
+        while self.out.last().map(|l| l.spans.is_empty()).unwrap_or(false) {
             self.out.pop();
         }
         // Leading blanks are removed from the front, which shifts every
@@ -839,10 +808,9 @@ mod tests {
     fn inline_code_is_yellow() {
         let lines = render("use `foo` here", 80, Style::default());
         let has = lines.iter().any(|l| {
-            l.spans.iter().any(|s| {
-                s.content.as_ref() == "foo"
-                    && s.style.fg == Some(Color::LightYellow)
-            })
+            l.spans
+                .iter()
+                .any(|s| s.content.as_ref() == "foo" && s.style.fg == Some(Color::LightYellow))
         });
         assert!(has);
     }
@@ -876,7 +844,9 @@ mod tests {
             "expected header row with A, got: {texts:#?}"
         );
         assert!(
-            texts.iter().any(|t| t.contains("│") && t.contains("1") && t.contains("2")),
+            texts
+                .iter()
+                .any(|t| t.contains("│") && t.contains("1") && t.contains("2")),
             "expected body row with 1 and 2"
         );
         assert!(

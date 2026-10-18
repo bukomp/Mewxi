@@ -94,7 +94,9 @@ pub fn load() -> ScoresFile {
 /// Stamp `updated_at = Utc::now().to_rfc3339()`, then `save_to` the real path.
 /// Errors are SWALLOWED (best-effort debug_log, never propagated/panicked).
 pub fn save(scores: &ScoresFile) {
-    let Some(path) = scores_file_path() else { return };
+    let Some(path) = scores_file_path() else {
+        return;
+    };
     let mut stamped = scores.clone();
     stamped.updated_at = chrono::Utc::now().to_rfc3339();
     if let Err(e) = save_to(&path, &stamped) {

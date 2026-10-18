@@ -80,7 +80,11 @@ pub fn context_window_for(family: &str, major: u32, minor: u32) -> Option<u64> {
 fn find_key(obj: &serde_json::Map<String, Value>, candidate: &str) -> Option<String> {
     for key in obj.keys() {
         let k = key.to_ascii_lowercase();
-        if k.starts_with("us.") || k.starts_with("eu.") || k.starts_with("au.") || k.starts_with("apac.") {
+        if k.starts_with("us.")
+            || k.starts_with("eu.")
+            || k.starts_with("au.")
+            || k.starts_with("apac.")
+        {
             continue;
         }
         if !(k.starts_with("anthropic.") || k.starts_with("claude-")) {
@@ -103,7 +107,10 @@ fn raw_table() -> Option<&'static serde_json::Map<String, Value>> {
     static RAW: OnceLock<Option<serde_json::Map<String, Value>>> = OnceLock::new();
     RAW.get_or_init(|| {
         let raw = load_or_fetch_raw()?;
-        serde_json::from_str::<Value>(&raw).ok()?.as_object().cloned()
+        serde_json::from_str::<Value>(&raw)
+            .ok()?
+            .as_object()
+            .cloned()
     })
     .as_ref()
 }
@@ -116,7 +123,11 @@ fn load_or_fetch_raw() -> Option<String> {
     if let Some(p) = cache_path() {
         if let Ok(meta) = fs::metadata(&p) {
             if let Ok(modified) = meta.modified() {
-                if SystemTime::now().duration_since(modified).unwrap_or(CACHE_TTL) < CACHE_TTL {
+                if SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or(CACHE_TTL)
+                    < CACHE_TTL
+                {
                     if let Ok(s) = fs::read_to_string(&p) {
                         return Some(s);
                     }
@@ -146,7 +157,9 @@ fn fetch_remote() -> Option<String> {
 fn parse_table(obj: &serde_json::Map<String, Value>) -> Table {
     let mut t = Table::default();
     for family in ["opus", "sonnet", "haiku"] {
-        let Some(key) = best_key_for(obj, family) else { continue };
+        let Some(key) = best_key_for(obj, family) else {
+            continue;
+        };
         if let Some(price) = extract_price(&obj[&key]) {
             match family {
                 "opus" => t.opus = Some(price),
@@ -170,7 +183,11 @@ fn best_key_for(obj: &serde_json::Map<String, Value>, family: &str) -> Option<St
         if !k.contains(&needle) {
             continue;
         }
-        if k.starts_with("us.") || k.starts_with("eu.") || k.starts_with("au.") || k.starts_with("apac.") {
+        if k.starts_with("us.")
+            || k.starts_with("eu.")
+            || k.starts_with("au.")
+            || k.starts_with("apac.")
+        {
             continue;
         }
         if !(k.starts_with("anthropic.") || k.starts_with("claude-")) {
@@ -190,8 +207,7 @@ fn extract_price(entry: &Value) -> Option<ModelPrice> {
     let input = num(entry, "input_cost_per_token")?;
     let output = num(entry, "output_cost_per_token")?;
     let cache_read = num(entry, "cache_read_input_token_cost").unwrap_or(input * 0.1);
-    let cache_write_5m =
-        num(entry, "cache_creation_input_token_cost").unwrap_or(input * 1.25);
+    let cache_write_5m = num(entry, "cache_creation_input_token_cost").unwrap_or(input * 1.25);
     let cache_write_1h =
         num(entry, "cache_creation_input_token_cost_above_1hr").unwrap_or(input * 2.0);
     Some(ModelPrice {
@@ -221,12 +237,24 @@ mod tests {
         let sonnet = price_for("claude-sonnet-4-6");
         let haiku = price_for("claude-haiku-4-5");
         // Sanity ranges so a wildly wrong parse fails CI.
-        assert!(opus.input > 1.0 && opus.input < 20.0, "opus.input={}", opus.input);
-        assert!(sonnet.input > 1.0 && sonnet.input < 10.0, "sonnet.input={}", sonnet.input);
+        assert!(
+            opus.input > 1.0 && opus.input < 20.0,
+            "opus.input={}",
+            opus.input
+        );
+        assert!(
+            sonnet.input > 1.0 && sonnet.input < 10.0,
+            "sonnet.input={}",
+            sonnet.input
+        );
         // The newest haiku entry can be priced at exactly $0.10/MTok, and
         // `1e-7 * 1e6` is 0.09999999999999999 in f64, so the lower bound
         // must sit well below any real price instead of on one.
-        assert!(haiku.input > 0.01 && haiku.input < 5.0, "haiku.input={}", haiku.input);
+        assert!(
+            haiku.input > 0.01 && haiku.input < 5.0,
+            "haiku.input={}",
+            haiku.input
+        );
         eprintln!("opus={:?} sonnet={:?} haiku={:?}", opus, sonnet, haiku);
     }
 }

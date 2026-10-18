@@ -49,11 +49,14 @@ async fn handle(req: Value, no_live: bool) -> Option<Value> {
     let is_notification = id.is_none();
 
     match method {
-        "initialize" => Some(ok(id, json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "mewxi", "version": env!("CARGO_PKG_VERSION") }
-        }))),
+        "initialize" => Some(ok(
+            id,
+            json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "mewxi", "version": env!("CARGO_PKG_VERSION") }
+            }),
+        )),
         "notifications/initialized" | "notifications/cancelled" => None,
         "ping" => Some(ok(id, json!({}))),
         "tools/list" => Some(ok(id, json!({ "tools": tool_defs() }))),
@@ -164,9 +167,16 @@ fn tool_defs() -> Value {
 }
 
 async fn handle_tool_call(id: Option<Value>, params: Value, no_live: bool) -> Value {
-    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-    let account_arg = args.get("account").and_then(|v| v.as_str()).map(String::from);
+    let account_arg = args
+        .get("account")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let view = match accounts::load_accounts() {
         Ok(v) => v,
@@ -215,10 +225,14 @@ async fn handle_tool_call(id: Option<Value>, params: Value, no_live: bool) -> Va
             Ok(a) => a,
             Err(e) => return err(id, -32602, e),
         };
-        let live = tokio::task::spawn_blocking(move || live_usage::fetch_or_cached(&account, no_live)).await;
+        let live =
+            tokio::task::spawn_blocking(move || live_usage::fetch_or_cached(&account, no_live))
+                .await;
         let payload = match live {
             Ok(Some(l)) => serde_json::to_value(&l).unwrap_or(Value::Null),
-            Ok(None) => json!({ "unavailable": true, "hint": "no credential, network blocked, or rate limited" }),
+            Ok(None) => {
+                json!({ "unavailable": true, "hint": "no credential, network blocked, or rate limited" })
+            }
             Err(e) => return err(id, -32000, format!("join failed: {e}")),
         };
         return wrap_ok(id, payload);
@@ -233,10 +247,11 @@ async fn handle_tool_call(id: Option<Value>, params: Value, no_live: bool) -> Va
         None => view.accounts.clone(),
     };
 
-    let aggregated: Aggregated = match tokio::task::spawn_blocking(move || aggregate_scope(&scope)).await {
-        Ok(a) => a,
-        Err(e) => return err(id, -32000, format!("join failed: {e}")),
-    };
+    let aggregated: Aggregated =
+        match tokio::task::spawn_blocking(move || aggregate_scope(&scope)).await {
+            Ok(a) => a,
+            Err(e) => return err(id, -32000, format!("join failed: {e}")),
+        };
 
     let payload = match name.as_str() {
         "get_totals" => json!({
@@ -251,13 +266,24 @@ async fn handle_tool_call(id: Option<Value>, params: Value, no_live: bool) -> Va
         "get_today" => serde_json::to_value(&aggregated.today).unwrap_or(Value::Null),
         "get_by_model" => {
             let mut v: Vec<_> = aggregated.by_model.iter().collect();
-            v.sort_by(|a, b| b.1.cost_usd.partial_cmp(&a.1.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
-            json!(v.iter().map(|(m, t)| json!({ "model": m, "totals": t })).collect::<Vec<_>>())
+            v.sort_by(|a, b| {
+                b.1.cost_usd
+                    .partial_cmp(&a.1.cost_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            json!(v
+                .iter()
+                .map(|(m, t)| json!({ "model": m, "totals": t }))
+                .collect::<Vec<_>>())
         }
         "get_by_project" => {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
             let mut v: Vec<_> = aggregated.by_project.iter().collect();
-            v.sort_by(|a, b| b.1.cost_usd.partial_cmp(&a.1.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
+            v.sort_by(|a, b| {
+                b.1.cost_usd
+                    .partial_cmp(&a.1.cost_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             json!(v
                 .into_iter()
                 .take(limit)
@@ -342,7 +368,11 @@ fn aggregate_scope(scope: &[Account]) -> Aggregated {
             merge_totals(entry, v);
         }
         for (k, v) in &agg.by_project {
-            let key = if single { k.clone() } else { format!("{}/{}", account.name, k) };
+            let key = if single {
+                k.clone()
+            } else {
+                format!("{}/{}", account.name, k)
+            };
             let entry = out.by_project.entry(key).or_default();
             merge_totals(entry, v);
         }

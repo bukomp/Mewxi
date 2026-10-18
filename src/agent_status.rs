@@ -243,7 +243,9 @@ mod tests {
         );
         assert_eq!(feed.labels_by_id.get("a2"), None, "label == description");
         assert_eq!(
-            feed.labels_by_description.get("Reading files").map(String::as_str),
+            feed.labels_by_description
+                .get("Reading files")
+                .map(String::as_str),
             Some("Reading errorHandler.ts response mapping")
         );
         assert_eq!(feed.labels_by_description.get("Writing tests"), None);

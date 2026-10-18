@@ -12,11 +12,11 @@ use super::{PerAccount, SessionRef};
 use crate::live_session::{Activity, SessionState};
 use crate::live_usage::{refresh_interval, LiveUsage};
 use chrono::{Local, Utc};
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, TableState};
+use ratatui::Frame;
 
 /// Lines consumed by one account block: 1 header + 4 gauges + 1 spacer.
 const ROWS_PER_ACCOUNT: u16 = 6;
@@ -54,8 +54,8 @@ pub fn render(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(acct_height), // per-account gauges
-            Constraint::Min(5),               // live sessions table
-            Constraint::Length(1),            // footer
+            Constraint::Min(5),              // live sessions table
+            Constraint::Length(1),           // footer
         ])
         .split(area);
 
@@ -137,7 +137,9 @@ fn render_one_account_compact(f: &mut Frame, area: Rect, pa: &PerAccount) {
         match pct {
             Some(p) => v.push(Span::styled(
                 format!("{p:>5.1}%"),
-                Style::default().fg(gauge_color(p)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(gauge_color(p))
+                    .add_modifier(Modifier::BOLD),
             )),
             None => v.push(Span::styled("  n/a ", Style::default().fg(Color::DarkGray))),
         }
@@ -146,7 +148,9 @@ fn render_one_account_compact(f: &mut Frame, area: Rect, pa: &PerAccount) {
     let mut spans = vec![
         Span::styled(
             format!("{:8}", format!("[{}]", pa.account.name)),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{:>3} live", active_count),
@@ -162,11 +166,13 @@ fn render_one_account_compact(f: &mut Frame, area: Rect, pa: &PerAccount) {
     ];
     spans.extend(pct_span(
         "5h",
-        live.and_then(|l| l.five_hour.as_ref()).map(|w| w.utilization),
+        live.and_then(|l| l.five_hour.as_ref())
+            .map(|w| w.utilization),
     ));
     spans.extend(pct_span(
         "wk",
-        live.and_then(|l| l.seven_day.as_ref()).map(|w| w.utilization),
+        live.and_then(|l| l.seven_day.as_ref())
+            .map(|w| w.utilization),
     ));
     spans.extend(pct_span(
         "ex",
@@ -203,8 +209,12 @@ fn render_one_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
     render_account_header(f, rows[0], pa);
 
     let live = pa.live.as_ref();
-    let five_h_pct = live.and_then(|l| l.five_hour.as_ref()).map(|w| w.utilization);
-    let seven_d_pct = live.and_then(|l| l.seven_day.as_ref()).map(|w| w.utilization);
+    let five_h_pct = live
+        .and_then(|l| l.five_hour.as_ref())
+        .map(|w| w.utilization);
+    let seven_d_pct = live
+        .and_then(|l| l.seven_day.as_ref())
+        .map(|w| w.utilization);
     let extra_pct = live
         .and_then(|l| l.extra_usage.as_ref())
         .filter(|e| e.is_enabled)
@@ -251,10 +261,17 @@ fn render_one_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
         .unwrap_or(0)
         .min(28);
 
-    render_gauge_row(f, rows[1], "5h",     five_h_pct,  &five_h_meta,  meta_col_width);
-    render_gauge_row(f, rows[2], "weekly", seven_d_pct, &seven_d_meta, meta_col_width);
-    render_gauge_row(f, rows[3], "extra",  extra_pct,   &extra_meta,   meta_col_width);
-    render_gauge_row(f, rows[4], "fable",  fable_pct,   &fable_meta,   meta_col_width);
+    render_gauge_row(f, rows[1], "5h", five_h_pct, &five_h_meta, meta_col_width);
+    render_gauge_row(
+        f,
+        rows[2],
+        "weekly",
+        seven_d_pct,
+        &seven_d_meta,
+        meta_col_width,
+    );
+    render_gauge_row(f, rows[3], "extra", extra_pct, &extra_meta, meta_col_width);
+    render_gauge_row(f, rows[4], "fable", fable_pct, &fable_meta, meta_col_width);
 }
 
 fn render_account_header(f: &mut Frame, area: Rect, pa: &PerAccount) {
@@ -271,7 +288,9 @@ fn render_account_header(f: &mut Frame, area: Rect, pa: &PerAccount) {
     let mut spans = vec![
         Span::styled(
             format!("{:8}", format!("[{}]", pa.account.name)),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{:>3} live", active_count),
@@ -314,7 +333,10 @@ fn cache_age_span(live: Option<&LiveUsage>) -> Span<'static> {
     } else {
         format!("{}h ago", age / 3600)
     };
-    Span::styled(format!("{raw:>CACHE_AGE_WIDTH$}"), Style::default().fg(color))
+    Span::styled(
+        format!("{raw:>CACHE_AGE_WIDTH$}"),
+        Style::default().fg(color),
+    )
 }
 
 /// Lay out a single gauge row as:
@@ -329,9 +351,13 @@ fn render_gauge_row(
     meta: &str,
     meta_col_chars: u16,
 ) {
-    const LABEL_WIDTH: u16 = 10;   // "  weekly  " — fits longest label "weekly"
-    const PCT_WIDTH: u16 = 8;      //  "  100.0% "
-    let meta_width = if meta_col_chars == 0 { 1 } else { meta_col_chars + 2 };
+    const LABEL_WIDTH: u16 = 10; // "  weekly  " — fits longest label "weekly"
+    const PCT_WIDTH: u16 = 8; //  "  100.0% "
+    let meta_width = if meta_col_chars == 0 {
+        1
+    } else {
+        meta_col_chars + 2
+    };
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -454,19 +480,37 @@ fn render_sessions_table(
     // Compute column count up front so header rows pad correctly.
     // Base: account, age, tokens, model, state = 5.
     let mut col_count = 5;
-    if show_status { col_count += 1; }
-    if show_ctx { col_count += 1; }
-    if show_io { col_count += 1; }
-    if show_cache { col_count += 1; }
-    if show_price { col_count += 1; }
-    if show_limits { col_count += 2; }
+    if show_status {
+        col_count += 1;
+    }
+    if show_ctx {
+        col_count += 1;
+    }
+    if show_io {
+        col_count += 1;
+    }
+    if show_cache {
+        col_count += 1;
+    }
+    if show_price {
+        col_count += 1;
+    }
+    if show_limits {
+        col_count += 2;
+    }
 
     // Pad project names to the widest one so the "x/y active" count
     // lines up vertically across all group headers regardless of name
     // length or digit count.
     let max_project_len = ordered
         .iter()
-        .map(|s| if s.project.is_empty() { "(unknown)".len() } else { s.project.chars().count() })
+        .map(|s| {
+            if s.project.is_empty() {
+                "(unknown)".len()
+            } else {
+                s.project.chars().count()
+            }
+        })
         .max()
         .unwrap_or(0);
 
@@ -498,23 +542,35 @@ fn render_sessions_table(
             .filter(|s| s.subagent.is_none() && s.state == SessionState::Active)
             .count();
         let total_in_group = group.iter().filter(|s| s.subagent.is_none()).count();
-        let label = if project.is_empty() { "(unknown)" } else { project.as_str() };
+        let label = if project.is_empty() {
+            "(unknown)"
+        } else {
+            project.as_str()
+        };
         let label_pad = max_project_len.saturating_sub(label.chars().count());
         let count_text = format!("{active_in_group}/{total_in_group} active");
         let any_active = active_in_group > 0;
-        let project_color = if any_active { Color::Cyan } else { Color::DarkGray };
+        let project_color = if any_active {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
 
         // Blank spacer row before every group — separates groups from
         // each other and gives the first group breathing room under
         // the column-header row.
         let mut blank: Vec<Cell> = Vec::with_capacity(col_count);
-        for _ in 0..col_count { blank.push(Cell::from("")); }
+        for _ in 0..col_count {
+            blank.push(Cell::from(""));
+        }
         rows.push(Row::new(blank));
 
         let header_line = Line::from(vec![
             Span::styled(
                 format!("▾ {label}"),
-                Style::default().fg(project_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(project_color)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" ".repeat(label_pad + 2)),
             Span::styled(count_text, Style::default().fg(Color::DarkGray)),
@@ -545,7 +601,14 @@ fn render_sessions_table(
             if s.subagent.is_some() {
                 session_rows.push(rows.len());
                 rows.push(subagent_row(
-                    s, now, is_selected, show_status, show_ctx, show_io, show_cache, show_price,
+                    s,
+                    now,
+                    is_selected,
+                    show_status,
+                    show_ctx,
+                    show_io,
+                    show_cache,
+                    show_price,
                     show_limits,
                 ));
                 continue;
@@ -557,21 +620,26 @@ fn render_sessions_table(
             // flash.
             if s.killing {
                 let dash = || Cell::from(Span::styled("—", Style::default().fg(Color::DarkGray)));
-                let mut cells: Vec<Cell> = vec![
-                    Cell::from(format!("  {arrow}—")),
-                    dash(),
-                ];
+                let mut cells: Vec<Cell> = vec![Cell::from(format!("  {arrow}—")), dash()];
                 if show_status {
                     cells.push(Cell::from(Span::styled(
                         "killing",
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     )));
                 }
-                if show_ctx { cells.push(dash()); }
+                if show_ctx {
+                    cells.push(dash());
+                }
                 cells.push(dash()); // tokens
-                if show_io { cells.push(dash()); }
-                if show_cache { cells.push(dash()); }
-                if show_price { cells.push(dash()); } // price
+                if show_io {
+                    cells.push(dash());
+                }
+                if show_cache {
+                    cells.push(dash());
+                }
+                if show_price {
+                    cells.push(dash());
+                } // price
                 if show_limits {
                     cells.push(dash()); // 5h%
                     cells.push(dash()); // wk%
@@ -579,7 +647,9 @@ fn render_sessions_table(
                 cells.push(dash()); // model
                 cells.push(dash()); // state
                 let style = if is_selected {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
@@ -596,7 +666,9 @@ fn render_sessions_table(
                 SessionState::Idle => Color::DarkGray,
             };
             let base_style = if is_selected {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else if s.state == SessionState::Idle {
                 Style::default().fg(Color::DarkGray)
             } else {
@@ -647,7 +719,11 @@ fn render_sessions_table(
                     match v {
                         None => Cell::from(Span::styled("—", Style::default().fg(Color::DarkGray))),
                         Some(v) => {
-                            let text = if v >= 9.95 { format!("{v:.0}%") } else { format!("{v:.1}%") };
+                            let text = if v >= 9.95 {
+                                format!("{v:.0}%")
+                            } else {
+                                format!("{v:.1}%")
+                            };
                             if v < 0.05 {
                                 Cell::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
                             } else {
@@ -675,7 +751,10 @@ fn render_sessions_table(
                 None => Cell::from(model_label),
             };
             cells.push(model_cell);
-            cells.push(Cell::from(Span::styled(state_label, Style::default().fg(state_color))));
+            cells.push(Cell::from(Span::styled(
+                state_label,
+                Style::default().fg(state_color),
+            )));
             session_rows.push(rows.len());
             rows.push(Row::new(cells).style(base_style));
         }
@@ -686,10 +765,7 @@ fn render_sessions_table(
     // Account names are indented by 4 chars under project headers ("  ▶ "
     // or "    "), so the column label needs the same lead-in to line up.
     let mut header_labels: Vec<&'static str> = vec!["    account", "age"];
-    let mut constraints: Vec<Constraint> = vec![
-        Constraint::Min(14),
-        Constraint::Length(6),
-    ];
+    let mut constraints: Vec<Constraint> = vec![Constraint::Min(14), Constraint::Length(6)];
     if show_status {
         header_labels.push("status");
         // Longest label is "delegating" (10 chars); pad to 11 so the
@@ -784,8 +860,11 @@ fn render_sessions_table(
 
     let table = Table::new(rows, constraints)
         .header(
-            Row::new(header_labels)
-                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+            Row::new(header_labels).style(
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
         )
         // ratatui 0.28 defaults Table to Flex::Start, so Constraint::Min
         // no longer absorbs leftover width — the project column would sit
@@ -852,7 +931,9 @@ fn subagent_row(
     show_limits: bool,
 ) -> Row<'static> {
     let (dim, text) = if is_selected {
-        let sel = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let sel = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
         (sel, sel)
     } else {
         (
@@ -875,7 +956,11 @@ fn subagent_row(
     } else {
         format!("{indent}      ↳ ")
     };
-    let lead_style = if is_selected { text } else { Style::default().fg(Color::Cyan) };
+    let lead_style = if is_selected {
+        text
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
     let mut label = vec![Span::styled(lead, lead_style)];
     let tag = s.subagent.as_ref();
     if let Some(name) = tag.and_then(|t| t.workflow.as_ref()) {
@@ -910,7 +995,9 @@ fn subagent_row(
         Some(t) => {
             label.push(Span::styled(
                 t,
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ));
             label.push(Span::styled(format!(" · {description}"), text));
         }
@@ -971,7 +1058,10 @@ fn subagent_row(
     if show_price {
         let sym = super::widgets::currency_symbol(s.price_currency.as_deref());
         if s.price > 0.005 {
-            cells.push(Cell::from(Span::styled(format!("~{sym}{:.2}", s.price), text)));
+            cells.push(Cell::from(Span::styled(
+                format!("~{sym}{:.2}", s.price),
+                text,
+            )));
         } else {
             cells.push(Cell::from(Span::styled(format!("{sym}0.00"), dim)));
         }
@@ -995,7 +1085,10 @@ fn subagent_row(
         None => Cell::from(Span::styled(model_label, text)),
     };
     cells.push(model_cell);
-    cells.push(Cell::from(Span::styled("active", Style::default().fg(Color::Green))));
+    cells.push(Cell::from(Span::styled(
+        "active",
+        Style::default().fg(Color::Green),
+    )));
     Row::new(cells)
 }
 
@@ -1045,4 +1138,3 @@ fn fmt_age(secs: i64) -> String {
         format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
     }
 }
-

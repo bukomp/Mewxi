@@ -14,11 +14,11 @@
 //! popup by finding the prompt-marker row, then expanding up/down until
 //! we hit a box-corner or blank row.
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::Frame;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use vt100::Screen;
@@ -62,8 +62,8 @@ const PROMPT_MARKERS_SPECIFIC: &[&str] = &[
 const PROMPT_MARKERS_PROSE: &[&str] = &[
     "Continue?",
     "Press y ",
-    "Use this ",     // accept-edit prompt
-    "Do you trust",  // startup trust dialog for unrecognised folders
+    "Use this ",       // accept-edit prompt
+    "Do you trust",    // startup trust dialog for unrecognised folders
     "trust the files", // alternate phrasing the trust dialog uses
 ];
 
@@ -301,7 +301,12 @@ fn render_pty_crop(frame: &mut Frame, area: Rect, screen: &Screen) {
     let w = (popup_cols + 4).min(area.width);
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h + 1);
-    let outer = Rect { x, y, width: w, height: h };
+    let outer = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
 
     frame.render_widget(Clear, outer);
     let block = Block::default()
@@ -426,7 +431,12 @@ fn render_native_picker(
 
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let outer = Rect { x, y, width: w, height: h };
+    let outer = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
 
     frame.render_widget(Clear, outer);
     let block = Block::default()
@@ -583,7 +593,12 @@ fn parse_split_picker(screen: &Screen) -> Option<SplitPickerContent> {
     let first_opt_idx = option_lines[0].0;
     let header_full: Vec<String> = (top..top + first_opt_idx as u16)
         .map(|r| row_text(screen, r, cols))
-        .map(|l| l.trim().trim_matches(|c: char| is_box_char(c)).trim().to_string())
+        .map(|l| {
+            l.trim()
+                .trim_matches(|c: char| is_box_char(c))
+                .trim()
+                .to_string()
+        })
         .filter(|l| !l.is_empty())
         .collect();
     let (title, body) = match header_full.split_first() {
@@ -594,7 +609,11 @@ fn parse_split_picker(screen: &Screen) -> Option<SplitPickerContent> {
     let mut options = Vec::with_capacity(option_lines.len());
     let mut selected = 0;
     for (slot, (line_idx, is_selected)) in option_lines.iter().enumerate() {
-        options.push(extract_option_text(lefts[*line_idx], cursor_col, *is_selected));
+        options.push(extract_option_text(
+            lefts[*line_idx],
+            cursor_col,
+            *is_selected,
+        ));
         if *is_selected {
             selected = slot;
         }
@@ -749,7 +768,12 @@ fn render_native_split_picker(frame: &mut Frame, area: Rect, picker: &SplitPicke
 
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let outer = Rect { x, y, width: w, height: h };
+    let outer = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
 
     frame.render_widget(Clear, outer);
     let block = Block::default()
@@ -773,10 +797,7 @@ fn render_native_split_picker(frame: &mut Frame, area: Rect, picker: &SplitPicke
     let header_used = (header_h as u16).min(inner.height.saturating_sub(body_h));
     let vchunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(header_used),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(header_used), Constraint::Min(1)])
         .split(inner);
     frame.render_widget(
         Paragraph::new(content_lines).wrap(Wrap { trim: false }),
@@ -788,10 +809,7 @@ fn render_native_split_picker(frame: &mut Frame, area: Rect, picker: &SplitPicke
     let opt_pane_w = (options_w_hint + 2).min(vchunks[1].width.saturating_sub(2));
     let hchunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(opt_pane_w),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(opt_pane_w), Constraint::Min(1)])
         .split(vchunks[1]);
     frame.render_widget(Paragraph::new(option_lines), hchunks[0]);
     frame.render_widget(
@@ -873,7 +891,11 @@ fn parse_picker(screen: &Screen) -> Option<PickerContent> {
     let mut options = Vec::with_capacity(option_lines.len());
     let mut selected = 0;
     for (slot, (line_idx, is_selected)) in option_lines.iter().enumerate() {
-        options.push(extract_option_text(&lines[*line_idx], cursor_col, *is_selected));
+        options.push(extract_option_text(
+            &lines[*line_idx],
+            cursor_col,
+            *is_selected,
+        ));
         if *is_selected {
             selected = slot;
         }
@@ -1031,11 +1053,13 @@ fn scan_cursor_row_above(screen: &Screen, marker_row: u16, cols: u16) -> Option<
     let lo = marker_row.saturating_sub(MAX_POPUP_ROWS);
     for r in (lo..marker_row).rev() {
         let txt = row_text(screen, r, cols);
-        let Some((_, prefix)) = picker_cursor_info(&txt) else { continue };
-        let has_sib_above = r > 0
-            && is_picker_sibling_line(&row_text(screen, r - 1, cols), &prefix);
-        let has_sib_below = r + 1 < marker_row
-            && is_picker_sibling_line(&row_text(screen, r + 1, cols), &prefix);
+        let Some((_, prefix)) = picker_cursor_info(&txt) else {
+            continue;
+        };
+        let has_sib_above =
+            r > 0 && is_picker_sibling_line(&row_text(screen, r - 1, cols), &prefix);
+        let has_sib_below =
+            r + 1 < marker_row && is_picker_sibling_line(&row_text(screen, r + 1, cols), &prefix);
         if has_sib_above || has_sib_below {
             return Some(r);
         }
@@ -1313,7 +1337,10 @@ mod tests {
         let p = parse(bytes.as_bytes());
         assert!(prompt_visible(p.screen(), false));
         let picker = parse_picker(p.screen()).expect("picker parsed");
-        assert_eq!(picker.options, vec!["Quick fix", "Full refactor", "Skip for now"]);
+        assert_eq!(
+            picker.options,
+            vec!["Quick fix", "Full refactor", "Skip for now"]
+        );
         assert_eq!(picker.selected, 0);
         assert_eq!(picker.title.as_deref(), Some("What scope?"));
     }
@@ -1407,10 +1434,24 @@ mod tests {
         bytes.push_str("\r\nEsc to cancel\r\n");
         let p = parse(bytes.as_bytes());
         let (top, bot, _, _) = find_popup_region(p.screen()).expect("picker found");
-        let txt: Vec<String> = (top..=bot).map(|r| row_text(p.screen(), r, p.screen().size().1)).collect();
-        assert!(txt.iter().any(|l| l.contains("Switch model?")), "expected header in region: {:?}", txt);
-        assert!(txt.iter().any(|l| l.contains("❯ 1. Yes")), "expected option in region: {:?}", txt);
-        assert!(txt.iter().any(|l| l.contains("2. No")), "expected sibling option in region: {:?}", txt);
+        let txt: Vec<String> = (top..=bot)
+            .map(|r| row_text(p.screen(), r, p.screen().size().1))
+            .collect();
+        assert!(
+            txt.iter().any(|l| l.contains("Switch model?")),
+            "expected header in region: {:?}",
+            txt
+        );
+        assert!(
+            txt.iter().any(|l| l.contains("❯ 1. Yes")),
+            "expected option in region: {:?}",
+            txt
+        );
+        assert!(
+            txt.iter().any(|l| l.contains("2. No")),
+            "expected sibling option in region: {:?}",
+            txt
+        );
     }
 
     #[test]
@@ -1458,7 +1499,8 @@ mod tests {
         // border anywhere near) must NOT pop the overlay — otherwise
         // every keystroke goes to the PTY and the user has to find
         // F10 to recover.
-        let p = parse(b"chat line\r\nWould you like me to Continue? Probably yes.\r\nchat line\r\n");
+        let p =
+            parse(b"chat line\r\nWould you like me to Continue? Probably yes.\r\nchat line\r\n");
         assert!(!prompt_visible(p.screen(), false));
     }
 
@@ -1623,14 +1665,30 @@ mod tests {
         // focused, the right pane shows that option's ASCII preview.
         let mut bytes = String::new();
         bytes.push_str("\x1b[2J");
-        bytes.push_str("Which indicator?                                                              \r\n");
-        bytes.push_str("                                                                              \r\n");
-        bytes.push_str("  Cat ear                            │  ฅ^•ﻌ•^ฅ                              \r\n");
-        bytes.push_str("❯ Braille spinner                    │  ⠋ ⠙ ⠹ ⠸ ⠼ ⠴                          \r\n");
-        bytes.push_str("  Heartbeat                          │  (preview hidden — not focused)        \r\n");
-        bytes.push_str("  Yarn ball                          │                                        \r\n");
-        bytes.push_str("                                                                              \r\n");
-        bytes.push_str("↑/↓ navigate · Esc to cancel · Enter to select                                \r\n");
+        bytes.push_str(
+            "Which indicator?                                                              \r\n",
+        );
+        bytes.push_str(
+            "                                                                              \r\n",
+        );
+        bytes.push_str(
+            "  Cat ear                            │  ฅ^•ﻌ•^ฅ                              \r\n",
+        );
+        bytes.push_str(
+            "❯ Braille spinner                    │  ⠋ ⠙ ⠹ ⠸ ⠼ ⠴                          \r\n",
+        );
+        bytes.push_str(
+            "  Heartbeat                          │  (preview hidden — not focused)        \r\n",
+        );
+        bytes.push_str(
+            "  Yarn ball                          │                                        \r\n",
+        );
+        bytes.push_str(
+            "                                                                              \r\n",
+        );
+        bytes.push_str(
+            "↑/↓ navigate · Esc to cancel · Enter to select                                \r\n",
+        );
         let p = parse(bytes.as_bytes());
 
         let split = parse_split_picker(p.screen())

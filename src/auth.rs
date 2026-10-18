@@ -78,7 +78,8 @@ pub fn read_oauth_token_with_expiry(account: &Account) -> Result<(String, Option
             // multi-account discovery "just work" without any user config.
             #[cfg(target_os = "macos")]
             {
-                let canonical = std::fs::canonicalize(&account.dir).unwrap_or_else(|_| account.dir.clone());
+                let canonical =
+                    std::fs::canonicalize(&account.dir).unwrap_or_else(|_| account.dir.clone());
                 let hashed = accounts::hashed_keychain_service(&canonical);
                 match read_token_macos_keychain(&hashed) {
                     Ok(t) => return Ok(t),
@@ -144,7 +145,11 @@ fn read_token_credentials_file(path: &Path) -> Result<(String, Option<DateTime<U
             crate::debug_log::log_event(
                 crate::debug_log::LogOrigin::Auth,
                 crate::debug_log::LogKind::FileRead,
-                &format!("{} unreadable — {}", basename(path), first_line(&e.to_string())),
+                &format!(
+                    "{} unreadable — {}",
+                    basename(path),
+                    first_line(&e.to_string())
+                ),
             );
             return Err(anyhow!("{}: {e}", path.display()));
         }
@@ -184,8 +189,8 @@ fn read_token_macos_keychain(service: &str) -> Result<(String, Option<DateTime<U
         crate::debug_log::LogKind::Proc,
         "keychain token found",
     );
-    let raw = String::from_utf8(out.stdout)
-        .map_err(|e| anyhow!("credential is not valid UTF-8: {e}"))?;
+    let raw =
+        String::from_utf8(out.stdout).map_err(|e| anyhow!("credential is not valid UTF-8: {e}"))?;
     parse_credentials_from_json(&raw)
 }
 

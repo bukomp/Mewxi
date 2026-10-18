@@ -30,15 +30,19 @@ mod platform;
 mod pricing;
 mod setup;
 mod skills;
-mod statusline;
 mod stats;
+mod statusline;
 mod subagents;
 mod tui;
 mod update;
 mod watch;
 
 #[derive(Parser)]
-#[command(name = "mewxi", version, about = "MCP server + TUI for coding-agent usage stats")]
+#[command(
+    name = "mewxi",
+    version,
+    about = "MCP server + TUI for coding-agent usage stats"
+)]
 struct Cli {
     /// Disable live usage fetch from Claude Code's OAuth endpoint. Local JSONL only.
     /// Also honored via the MEWXI_NO_LIVE env var (any non-empty value).
@@ -264,7 +268,9 @@ fn main() -> Result<()> {
         Cmd::Setup { service, force } => setup::run(service, force, no_live),
         Cmd::Stop { disable } => setup::stop(disable),
         Cmd::Mcp => {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
             rt.block_on(mcp::run(no_live))
         }
         Cmd::Hook { action } => run_hook(action),
@@ -299,11 +305,10 @@ fn run_drive(
     // Snapshot the live-session set BEFORE spawning so we can identify
     // the new session marker by diffing it.
     let alive_before = live_session::alive_pids();
-    let before: std::collections::HashSet<String> =
-        live_session::scan(account, &alive_before, &[])
-            .into_iter()
-            .map(|s| s.session_id)
-            .collect();
+    let before: std::collections::HashSet<String> = live_session::scan(account, &alive_before, &[])
+        .into_iter()
+        .map(|s| s.session_id)
+        .collect();
 
     eprintln!(
         "→ spawning `{}` under PTY (account={}, cwd={})",
@@ -340,7 +345,11 @@ fn run_drive(
         let alive = live_session::alive_pids();
         for s in live_session::scan(account, &alive, &[]) {
             if !before.contains(&s.session_id) {
-                eprintln!("  session_id={} transcript={}", s.session_id, s.transcript_path.display());
+                eprintln!(
+                    "  session_id={} transcript={}",
+                    s.session_id,
+                    s.transcript_path.display()
+                );
                 new_session_id = Some(s.session_id);
                 break;
             }

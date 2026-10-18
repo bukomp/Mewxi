@@ -37,9 +37,15 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TokenSource {
-    Env { env: String },
-    Keychain { keychain: String },
-    File { file: PathBuf },
+    Env {
+        env: String,
+    },
+    Keychain {
+        keychain: String,
+    },
+    File {
+        file: PathBuf,
+    },
     /// Construct-only; never deserialized. Triggers the fallback chain
     /// above. Skipped during ser/deser so untagged matching is unambiguous.
     #[serde(skip)]
@@ -112,17 +118,21 @@ impl Account {
     pub fn default_permission_mode(&self) -> String {
         let mut opted_in = false;
         for path in self.settings_paths() {
-            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-            let Ok(v): serde_json::Result<serde_json::Value> =
-                serde_json::from_str(&raw) else { continue };
-            if let Some(b) = v
-                .get("skipAutoPermissionPrompt")
-                .and_then(|x| x.as_bool())
-            {
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_str(&raw) else {
+                continue;
+            };
+            if let Some(b) = v.get("skipAutoPermissionPrompt").and_then(|x| x.as_bool()) {
                 opted_in = b;
             }
         }
-        if opted_in { "auto".to_string() } else { "default".to_string() }
+        if opted_in {
+            "auto".to_string()
+        } else {
+            "default".to_string()
+        }
     }
 
     /// The default model this account uses when spawning a session
@@ -136,9 +146,12 @@ impl Account {
     pub fn default_model(&self) -> Option<String> {
         let mut out: Option<String> = None;
         for path in self.settings_paths() {
-            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-            let Ok(v): serde_json::Result<serde_json::Value> =
-                serde_json::from_str(&raw) else { continue };
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_str(&raw) else {
+                continue;
+            };
             if let Some(m) = v.get("model").and_then(|x| x.as_str()) {
                 if !m.is_empty() {
                     out = Some(m.to_string());
@@ -183,9 +196,12 @@ impl Account {
     pub fn default_effort(&self) -> Option<String> {
         let mut out: Option<String> = None;
         for path in self.settings_paths() {
-            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-            let Ok(v): serde_json::Result<serde_json::Value> =
-                serde_json::from_str(&raw) else { continue };
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_str(&raw) else {
+                continue;
+            };
             if let Some(e) = v.get("effortLevel").and_then(|x| x.as_str()) {
                 if !e.is_empty() {
                     out = Some(e.to_string());
@@ -205,9 +221,12 @@ impl Account {
     pub fn editor_command(&self) -> String {
         let mut configured: Option<String> = None;
         for path in self.settings_paths() {
-            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-            let Ok(v): serde_json::Result<serde_json::Value> =
-                serde_json::from_str(&raw) else { continue };
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_str(&raw) else {
+                continue;
+            };
             if let Some(e) = v.get("editor").and_then(|x| x.as_str()) {
                 if !e.trim().is_empty() {
                     configured = Some(e.to_string());
@@ -215,8 +234,16 @@ impl Account {
             }
         }
         configured
-            .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.trim().is_empty()))
-            .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+            .or_else(|| {
+                std::env::var("VISUAL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .or_else(|| {
+                std::env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
             .unwrap_or_else(|| default_editor().to_string())
     }
 }
@@ -244,17 +271,15 @@ fn default_editor() -> &'static str {
 pub fn set_default_effort(account: &Account, level: &str) -> Result<()> {
     let path = account.dir.join("settings.json");
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut root: serde_json::Value = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         if raw.trim().is_empty() {
             serde_json::Value::Object(serde_json::Map::new())
         } else {
-            serde_json::from_str(&raw)
-                .with_context(|| format!("parse {}", path.display()))?
+            serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?
         }
     } else {
         serde_json::Value::Object(serde_json::Map::new())
@@ -269,10 +294,8 @@ pub fn set_default_effort(account: &Account, level: &str) -> Result<()> {
     let out = serde_json::to_string_pretty(&root)
         .with_context(|| format!("serialize {}", path.display()))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, out)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename into {}", path.display()))?;
+    std::fs::write(&tmp, out).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
     crate::debug_log::log_event(
         LogOrigin::Accounts,
         LogKind::FileWrite,
@@ -292,17 +315,15 @@ pub fn set_default_effort(account: &Account, level: &str) -> Result<()> {
 pub fn set_default_model(account: &Account, slug: &str) -> Result<()> {
     let path = account.dir.join("settings.json");
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut root: serde_json::Value = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         if raw.trim().is_empty() {
             serde_json::Value::Object(serde_json::Map::new())
         } else {
-            serde_json::from_str(&raw)
-                .with_context(|| format!("parse {}", path.display()))?
+            serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?
         }
     } else {
         serde_json::Value::Object(serde_json::Map::new())
@@ -321,10 +342,8 @@ pub fn set_default_model(account: &Account, slug: &str) -> Result<()> {
     let out = serde_json::to_string_pretty(&root)
         .with_context(|| format!("serialize {}", path.display()))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, out)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename into {}", path.display()))?;
+    std::fs::write(&tmp, out).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
     crate::debug_log::log_event(
         LogOrigin::Accounts,
         LogKind::FileWrite,
@@ -561,7 +580,9 @@ impl AccountsView {
     /// Iterate active + ignored together in stable order. Used by the
     /// setup view so the user sees every account on disk.
     pub fn all_accounts(&self) -> impl Iterator<Item = (&Account, bool)> {
-        self.accounts.iter().map(|a| (a, false))
+        self.accounts
+            .iter()
+            .map(|a| (a, false))
             .chain(self.ignored.iter().map(|a| (a, true)))
     }
 
@@ -589,9 +610,15 @@ pub fn config_path() -> Option<PathBuf> {
 /// unparsable config yields `(None, None)` — polling must keep working
 /// on a broken config, not stop.
 pub fn live_tuning() -> (Option<u64>, Option<u64>) {
-    let Some(path) = config_path() else { return (None, None) };
-    let Ok(raw) = std::fs::read_to_string(&path) else { return (None, None) };
-    let Ok(cfg) = toml::from_str::<AccountsConfig>(&raw) else { return (None, None) };
+    let Some(path) = config_path() else {
+        return (None, None);
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return (None, None);
+    };
+    let Ok(cfg) = toml::from_str::<AccountsConfig>(&raw) else {
+        return (None, None);
+    };
     (cfg.live_refresh_interval_secs, cfg.live_backoff_secs)
 }
 
@@ -691,9 +718,9 @@ pub fn load_accounts() -> Result<AccountsView> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(expand_tilde);
-            status_blocks = cfg.status_blocks.map(|rows| {
-                rows.into_iter().map(|r| (r.id, r.enabled)).collect()
-            });
+            status_blocks = cfg
+                .status_blocks
+                .map(|rows| rows.into_iter().map(|r| (r.id, r.enabled)).collect());
             if let Some(v) = cfg.subagent_tool_action {
                 subagent_tool_action = v;
             }
@@ -722,10 +749,7 @@ pub fn load_accounts() -> Result<AccountsView> {
 
     if let Some(env_dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         let env_path = PathBuf::from(env_dir);
-        if !accounts
-            .iter()
-            .any(|a| same_path(&a.dir, &env_path))
-        {
+        if !accounts.iter().any(|a| same_path(&a.dir, &env_path)) {
             let name = name_from_dir(&env_path);
             accounts.push(Account {
                 name,
@@ -739,11 +763,7 @@ pub fn load_accounts() -> Result<AccountsView> {
     accounts.sort_by(|a, b| a.name.cmp(&b.name));
 
     if accounts.is_empty() {
-        crate::debug_log::log_event(
-            LogOrigin::Accounts,
-            LogKind::Error,
-            "no accounts found",
-        );
+        crate::debug_log::log_event(LogOrigin::Accounts, LogKind::Error, "no accounts found");
         return Err(anyhow!(
             "no Claude config directories discovered. \
              Either create ~/.config/mewxi/accounts.toml, \
@@ -822,7 +842,9 @@ pub fn recent_projects(account: &Account, limit: usize) -> Vec<RecentProject> {
         if !dir.is_dir() {
             continue;
         }
-        let Ok(files) = std::fs::read_dir(&dir) else { continue };
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
         let mut count = 0usize;
         for f in files.flatten() {
@@ -837,8 +859,12 @@ pub fn recent_projects(account: &Account, limit: usize) -> Vec<RecentProject> {
                 newest = Some((p, mt));
             }
         }
-        let Some((jsonl, mtime)) = newest else { continue };
-        let Some((cwd, _)) = read_cwd_and_preview(&jsonl) else { continue };
+        let Some((jsonl, mtime)) = newest else {
+            continue;
+        };
+        let Some((cwd, _)) = read_cwd_and_preview(&jsonl) else {
+            continue;
+        };
         found.push((cwd, mtime, count));
     }
     found.sort_by(|a, b| b.1.cmp(&a.1));
@@ -909,7 +935,9 @@ pub fn recent_project_sessions(account: &Account, limit: usize) -> Vec<RecentSes
         if !dir.is_dir() {
             continue;
         }
-        let Ok(files) = std::fs::read_dir(&dir) else { continue };
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for f in files.flatten() {
             let p = f.path();
             if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
@@ -923,12 +951,18 @@ pub fn recent_project_sessions(account: &Account, limit: usize) -> Vec<RecentSes
     found.sort_by(|a, b| b.1.cmp(&a.1));
     let mut out: Vec<RecentSession> = Vec::with_capacity(found.len().min(limit));
     for (jsonl, mtime) in found.into_iter().take(limit * 2) {
-        let Some(session_id) = jsonl.file_stem().and_then(|s| s.to_str()).map(String::from)
-        else {
+        let Some(session_id) = jsonl.file_stem().and_then(|s| s.to_str()).map(String::from) else {
             continue;
         };
-        let Some((cwd, preview)) = read_cwd_and_preview(&jsonl) else { continue };
-        out.push(RecentSession { session_id, cwd, mtime, preview });
+        let Some((cwd, preview)) = read_cwd_and_preview(&jsonl) else {
+            continue;
+        };
+        out.push(RecentSession {
+            session_id,
+            cwd,
+            mtime,
+            preview,
+        });
         if out.len() >= limit {
             break;
         }
@@ -945,8 +979,9 @@ fn read_cwd_and_preview(path: &Path) -> Option<(PathBuf, Option<String>)> {
     let mut cwd: Option<PathBuf> = None;
     let mut preview: Option<String> = None;
     for line in reader.lines().take(128).flatten() {
-        let Ok(v): serde_json::Result<serde_json::Value> =
-            serde_json::from_str(&line) else { continue };
+        let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_str(&line) else {
+            continue;
+        };
         if cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(|s| s.as_str()) {
                 if !c.is_empty() {
@@ -1036,13 +1071,12 @@ fn edit_config_table(mutate: impl FnOnce(&mut toml::value::Table)) -> Result<()>
         std::fs::create_dir_all(parent).ok();
     }
     let mut root: toml::Value = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         if raw.trim().is_empty() {
             toml::Value::Table(toml::value::Table::new())
         } else {
-            toml::from_str(&raw)
-                .with_context(|| format!("parse {}", path.display()))?
+            toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?
         }
     } else {
         toml::Value::Table(toml::value::Table::new())
@@ -1051,13 +1085,11 @@ fn edit_config_table(mutate: impl FnOnce(&mut toml::value::Table)) -> Result<()>
         return Err(anyhow!("{} is not a TOML table", path.display()));
     };
     mutate(t);
-    let out = toml::to_string_pretty(&root)
-        .with_context(|| format!("serialize {}", path.display()))?;
+    let out =
+        toml::to_string_pretty(&root).with_context(|| format!("serialize {}", path.display()))?;
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, out)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename into {}", path.display()))?;
+    std::fs::write(&tmp, out).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
     Ok(())
 }
 
@@ -1069,8 +1101,10 @@ pub fn set_ignored(names: &[String]) -> Result<()> {
         if names.is_empty() {
             t.remove("ignored");
         } else {
-            let arr: Vec<toml::Value> =
-                names.iter().map(|s| toml::Value::String(s.clone())).collect();
+            let arr: Vec<toml::Value> = names
+                .iter()
+                .map(|s| toml::Value::String(s.clone()))
+                .collect();
             t.insert("ignored".to_string(), toml::Value::Array(arr));
         }
     })?;
@@ -1099,7 +1133,11 @@ pub fn set_subagent_tool_action(enabled: bool) -> Result<()> {
             toml::Value::Boolean(enabled),
         );
     })?;
-    log_toml_write(if enabled { "subagent tool action on" } else { "subagent tool action off" });
+    log_toml_write(if enabled {
+        "subagent tool action on"
+    } else {
+        "subagent tool action off"
+    });
     Ok(())
 }
 
@@ -1111,19 +1149,24 @@ pub fn set_mewxi_visualizer(enabled: bool) -> Result<()> {
             toml::Value::Boolean(enabled),
         );
     })?;
-    log_toml_write(if enabled { "mewxi visualizer on" } else { "mewxi visualizer off" });
+    log_toml_write(if enabled {
+        "mewxi visualizer on"
+    } else {
+        "mewxi visualizer off"
+    });
     Ok(())
 }
 
 /// Persist whether the Mewxi view's streak effects are on.
 pub fn set_mewxi_streaks(enabled: bool) -> Result<()> {
     edit_config_table(|t| {
-        t.insert(
-            "mewxi_streaks".to_string(),
-            toml::Value::Boolean(enabled),
-        );
+        t.insert("mewxi_streaks".to_string(), toml::Value::Boolean(enabled));
     })?;
-    log_toml_write(if enabled { "mewxi streaks on" } else { "mewxi streaks off" });
+    log_toml_write(if enabled {
+        "mewxi streaks on"
+    } else {
+        "mewxi streaks off"
+    });
     Ok(())
 }
 
@@ -1195,7 +1238,11 @@ pub fn set_update_check(enabled: bool) -> Result<()> {
     edit_config_table(|t| {
         t.insert("update_check".to_string(), toml::Value::Boolean(enabled));
     })?;
-    log_toml_write(if enabled { "auto update check on" } else { "auto update check off" });
+    log_toml_write(if enabled {
+        "auto update check on"
+    } else {
+        "auto update check off"
+    });
     Ok(())
 }
 
@@ -1264,7 +1311,10 @@ pub fn set_live_refresh_interval_secs(secs: u64) -> Result<()> {
 /// it up at their next startup.
 pub fn set_log_max_lines(lines: u64) -> Result<()> {
     edit_config_table(move |t| {
-        t.insert("log_max_lines".to_string(), toml::Value::Integer(lines as i64));
+        t.insert(
+            "log_max_lines".to_string(),
+            toml::Value::Integer(lines as i64),
+        );
     })?;
     log_toml_write(&format!("log max lines {lines}"));
     Ok(())
@@ -1275,7 +1325,11 @@ pub fn set_update_prompt(enabled: bool) -> Result<()> {
     edit_config_table(|t| {
         t.insert("update_prompt".to_string(), toml::Value::Boolean(enabled));
     })?;
-    log_toml_write(if enabled { "update prompt on" } else { "update prompt off" });
+    log_toml_write(if enabled {
+        "update prompt on"
+    } else {
+        "update prompt off"
+    });
     Ok(())
 }
 
@@ -1292,10 +1346,7 @@ pub fn set_status_blocks(order: &[(String, bool)]) -> Result<()> {
                 .map(|(id, enabled)| {
                     let mut tbl = toml::value::Table::new();
                     tbl.insert("id".to_string(), toml::Value::String(id.clone()));
-                    tbl.insert(
-                        "enabled".to_string(),
-                        toml::Value::Boolean(*enabled),
-                    );
+                    tbl.insert("enabled".to_string(), toml::Value::Boolean(*enabled));
                     toml::Value::Table(tbl)
                 })
                 .collect();
@@ -1350,12 +1401,18 @@ pub fn account_for_transcript<'a>(
 }
 
 fn auto_discover() -> Vec<Account> {
-    let Some(home) = dirs::home_dir() else { return Vec::new() };
-    let Ok(entries) = std::fs::read_dir(&home) else { return Vec::new() };
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&home) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(fname) = path.file_name().and_then(|s| s.to_str()) else { continue };
+        let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
         if !fname.starts_with(".claude") {
             continue;
         }

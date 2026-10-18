@@ -46,14 +46,17 @@ fn main() {
     // runner's checkout happens to use); otherwise we read the checkout's
     // own `origin` — same fallback shape as MEWXI_SOURCE_REPO/BUILD_COMMIT,
     // empty when there's no git context.
-    let origin_url = std::env::var("MEWXI_ORIGIN_URL").ok().or_else(|| {
-        Command::new("git")
-            .args(["remote", "get-url", "origin"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    }).unwrap_or_default();
+    let origin_url = std::env::var("MEWXI_ORIGIN_URL")
+        .ok()
+        .or_else(|| {
+            Command::new("git")
+                .args(["remote", "get-url", "origin"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
+        .unwrap_or_default();
     println!("cargo:rustc-env=MEWXI_ORIGIN_URL={origin_url}");
 
     embed_default_blocks();

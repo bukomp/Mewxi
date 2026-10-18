@@ -17,18 +17,20 @@
 use crate::skills::{Skill, SkillOrigin};
 use crate::tui::text_input::{EditOutcome, TextInput};
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::Frame;
 use std::cell::RefCell;
 
 pub enum SkillOutcome {
     Stay,
     Cancel,
     /// User picked a skill. Caller sends `/<name>\r` to the PTY.
-    Confirm { name: String },
+    Confirm {
+        name: String,
+    },
 }
 
 pub struct SkillPickerModal {
@@ -152,9 +154,7 @@ impl SkillPickerModal {
         let mut spans = vec![Span::styled("/", Style::default().fg(Color::DarkGray))];
         for (i, ch) in buf.chars().enumerate() {
             let style = if i == cursor {
-                Style::default()
-                    .bg(Color::White)
-                    .fg(Color::Black)
+                Style::default().bg(Color::White).fg(Color::Black)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -174,7 +174,9 @@ impl SkillPickerModal {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "  no matches",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 ))),
                 area,
             );
@@ -188,7 +190,9 @@ impl SkillPickerModal {
                 let selected = row == self.selected;
                 let arrow = if selected { "▶ " } else { "  " };
                 let name_style = if selected {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -336,8 +340,14 @@ mod tests {
             skill("b", "", SkillOrigin::User),
             skill("c", "", SkillOrigin::User),
         ]);
-        assert!(matches!(m.handle_key(key(KeyCode::Down)), SkillOutcome::Stay));
-        assert!(matches!(m.handle_key(key(KeyCode::Down)), SkillOutcome::Stay));
+        assert!(matches!(
+            m.handle_key(key(KeyCode::Down)),
+            SkillOutcome::Stay
+        ));
+        assert!(matches!(
+            m.handle_key(key(KeyCode::Down)),
+            SkillOutcome::Stay
+        ));
         match m.handle_key(key(KeyCode::Enter)) {
             SkillOutcome::Confirm { name } => assert_eq!(name, "c"),
             _ => panic!("expected Confirm"),
@@ -347,13 +357,19 @@ mod tests {
     #[test]
     fn esc_cancels() {
         let mut m = SkillPickerModal::new(vec![skill("a", "", SkillOrigin::User)]);
-        assert!(matches!(m.handle_key(key(KeyCode::Esc)), SkillOutcome::Cancel));
+        assert!(matches!(
+            m.handle_key(key(KeyCode::Esc)),
+            SkillOutcome::Cancel
+        ));
     }
 
     #[test]
     fn empty_list_enter_is_noop() {
         let mut m = SkillPickerModal::new(vec![]);
-        assert!(matches!(m.handle_key(key(KeyCode::Enter)), SkillOutcome::Stay));
+        assert!(matches!(
+            m.handle_key(key(KeyCode::Enter)),
+            SkillOutcome::Stay
+        ));
     }
 
     #[test]

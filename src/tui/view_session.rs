@@ -8,16 +8,16 @@ use super::markdown;
 use super::widgets::{self, fmt_tokens_compact};
 use super::{PerAccount, SessionRef};
 use crate::chat_log::{self, ChatEntry, EntryKind, Task, TaskStatus};
-use serde_json::Value;
-use std::path::{Path, PathBuf};
 use crate::live_session::{Activity, SessionState};
 use crate::stats::fmt_num;
 use chrono::Utc;
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 /// Mouse-drag text selection within a pane. Coordinates are
 /// terminal-screen cells (the same frame crossterm's mouse events use)
@@ -171,11 +171,17 @@ pub fn render(
             "no session selected — switch to view 1 (press 1) and pick one with ↑/↓ then Enter",
             Style::default().fg(Color::DarkGray),
         )))
-        .block(Block::default().borders(Borders::ALL).title("Session detail"));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Session detail"),
+        );
         f.render_widget(p, area);
         return;
     };
-    let parent = accounts.iter().find(|a| a.account.name == session.account_name);
+    let parent = accounts
+        .iter()
+        .find(|a| a.account.name == session.account_name);
 
     // On short terminals the fixed panels above the chat (header 3 +
     // gauges 4 + totals 3 + meta 3) would crush it. Drop panels in
@@ -197,9 +203,7 @@ pub fn render(
                 + driver_h
                 + 1 // footer
         };
-        let fits = |g: bool, t: bool, m: bool, b: bool| {
-            fixed(g, t, m, b) + CHAT_MIN <= area.height
-        };
+        let fits = |g: bool, t: bool, m: bool, b: bool| fixed(g, t, m, b) + CHAT_MIN <= area.height;
         if !fits(show_gauges, show_totals, show_meta, show_blank) {
             show_gauges = false;
         }
@@ -340,15 +344,23 @@ fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &Pendi
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             format!("[{}]", p.account_name),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
             "starting claude…",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
     ]))
-    .block(Block::default().borders(Borders::ALL).title("Session detail"));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Session detail"),
+    );
     f.render_widget(header, chunks[0]);
 
     let mut idx = 1;
@@ -455,10 +467,18 @@ fn render_pending(f: &mut Frame, area: Rect, accounts: &[&PerAccount], p: &Pendi
 }
 
 fn render_driver_input(f: &mut Frame, area: Rect, d: &mut DriverPane<'_>) {
-    let border_color = if d.focused { Color::Green } else { Color::DarkGray };
+    let border_color = if d.focused {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
     let mut spans: Vec<Span> = vec![Span::styled(
         "> ",
-        Style::default().fg(if d.focused { Color::Green } else { Color::DarkGray }),
+        Style::default().fg(if d.focused {
+            Color::Green
+        } else {
+            Color::DarkGray
+        }),
     )];
     // Multi-line buffers (from Alt-e editor) don't fit a single-line
     // composer. Render the first line + a "+N more" badge so the user
@@ -469,13 +489,21 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &mut DriverPane<'_>) {
         let first_line = d.input.split('\n').next().unwrap_or("");
         spans.push(Span::raw(first_line.to_string()));
         spans.push(Span::styled(
-            format!("  +{} more line{}", extra, if extra == 1 { "" } else { "s" }),
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            format!(
+                "  +{} more line{}",
+                extra,
+                if extra == 1 { "" } else { "s" }
+            ),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
         ));
         if d.focused {
             spans.push(Span::styled(
                 " █",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         f.render_widget(
@@ -492,7 +520,9 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &mut DriverPane<'_>) {
         if d.focused {
             spans.push(Span::styled(
                 "█",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ));
         } else {
             spans.push(Span::styled(
@@ -523,7 +553,12 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &mut DriverPane<'_>) {
         let cursor_char = d.input[..cursor].chars().count();
         let total_chars = chars.len();
         let cursor_at_end = cursor >= d.input.len();
-        let budget = if cursor_at_end { inner.saturating_sub(1) } else { inner }.max(1);
+        let budget = if cursor_at_end {
+            inner.saturating_sub(1)
+        } else {
+            inner
+        }
+        .max(1);
 
         let mut start = *d.scroll;
         // Clamp first: if the buffer shrank (e.g. Ctrl-U), the previous
@@ -547,8 +582,14 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &mut DriverPane<'_>) {
 
         let start_char = start;
         let end_char = (start_char + budget).min(total_chars);
-        let start_byte = chars.get(start_char).map(|(b, _)| *b).unwrap_or(d.input.len());
-        let end_byte = chars.get(end_char).map(|(b, _)| *b).unwrap_or(d.input.len());
+        let start_byte = chars
+            .get(start_char)
+            .map(|(b, _)| *b)
+            .unwrap_or(d.input.len());
+        let end_byte = chars
+            .get(end_char)
+            .map(|(b, _)| *b)
+            .unwrap_or(d.input.len());
 
         let pre = &d.input[start_byte..cursor.min(end_byte).max(start_byte)];
         if !pre.is_empty() {
@@ -577,7 +618,9 @@ fn render_driver_input(f: &mut Frame, area: Rect, d: &mut DriverPane<'_>) {
             // can't happen because the scroll window keeps it in view.)
             spans.push(Span::styled(
                 "█",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
     } else {
@@ -802,7 +845,9 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
     let mut spans = vec![
         Span::styled(
             format!("[{}]", s.account_name),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(s.project.clone(), Style::default().fg(Color::Cyan)),
@@ -819,7 +864,9 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
             ));
             spans.push(Span::styled(
                 format!("  ↳ {}", tag.agent_type.as_deref().unwrap_or("sub-agent")),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 format!(
@@ -838,8 +885,11 @@ fn render_header(f: &mut Frame, area: Rect, s: &SessionRef) {
         }
     }
     f.render_widget(
-        Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::ALL).title("Session detail")),
+        Paragraph::new(Line::from(spans)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Session detail"),
+        ),
         area,
     );
 }
@@ -884,7 +934,9 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
         push_sep(&mut spans);
         spans.push(Span::styled(
             format!("[{}]", trim_model(&s.model)),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     if let Some(mode_raw) = s.permission_mode.as_deref() {
@@ -909,9 +961,7 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
     // record (sub-agent or plan-mode helper) is a different model
     // than the user's pick. Snaps back to invisible on the next
     // main-agent response in the user's chosen model.
-    if !s.active_model.is_empty()
-        && !s.model.is_empty()
-        && !models_match(&s.model, &s.active_model)
+    if !s.active_model.is_empty() && !s.model.is_empty() && !models_match(&s.model, &s.active_model)
     {
         push_sep(&mut spans);
         spans.push(Span::styled(
@@ -925,7 +975,9 @@ fn build_status_spans(s: &SessionRef) -> Vec<Span<'static>> {
         push_sep(&mut spans);
         spans.push(Span::styled(
             "[idle]",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     spans
@@ -977,9 +1029,7 @@ fn build_status_reserve_width(s: &SessionRef) -> usize {
         };
         w += 2 + label_w;
     }
-    if !s.active_model.is_empty()
-        && !s.model.is_empty()
-        && !models_match(&s.model, &s.active_model)
+    if !s.active_model.is_empty() && !s.model.is_empty() && !models_match(&s.model, &s.active_model)
     {
         push_sep(&mut w);
         w += 4 + trim_model(&s.active_model).chars().count(); // "via <model>"
@@ -997,7 +1047,9 @@ fn render_session_table(f: &mut Frame, area: Rect, s: &SessionRef) {
     let val = |v: String| {
         Span::styled(
             v,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         )
     };
     let sep = || Span::styled("  ·  ", Style::default().fg(Color::DarkGray));
@@ -1027,15 +1079,24 @@ fn render_session_table(f: &mut Frame, area: Rect, s: &SessionRef) {
     let sym = widgets::currency_symbol(s.price_currency.as_deref());
     if s.price > 0.005 {
         line_spans.push(val(format!("~{sym}{:.2}", s.price)));
-        line_spans.push(Span::styled(" · extra", Style::default().fg(Color::DarkGray)));
+        line_spans.push(Span::styled(
+            " · extra",
+            Style::default().fg(Color::DarkGray),
+        ));
     } else {
         line_spans.push(val(format!("{sym}0.00")));
-        line_spans.push(Span::styled(" · plan", Style::default().fg(Color::DarkGray)));
+        line_spans.push(Span::styled(
+            " · plan",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
     let line = Line::from(line_spans);
     f.render_widget(
-        Paragraph::new(line)
-            .block(Block::default().borders(Borders::ALL).title("Tokens this session")),
+        Paragraph::new(line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Tokens this session"),
+        ),
         area,
     );
 }
@@ -1079,8 +1140,14 @@ fn render_meta_panel(f: &mut Frame, area: Rect, s: &SessionRef) {
         Span::raw("    "),
         Span::styled("limit ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("5h {} · wk {}", fmt_share(s.limit_5h_pct), fmt_share(s.limit_wk_pct)),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            format!(
+                "5h {} · wk {}",
+                fmt_share(s.limit_5h_pct),
+                fmt_share(s.limit_wk_pct)
+            ),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
         Span::styled("folder ", Style::default().fg(Color::DarkGray)),
@@ -1091,10 +1158,15 @@ fn render_meta_panel(f: &mut Frame, area: Rect, s: &SessionRef) {
     ];
     if let Some(branch) = git_branch(&s.cwd) {
         spans.push(Span::raw("    "));
-        spans.push(Span::styled("branch ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "branch ",
+            Style::default().fg(Color::DarkGray),
+        ));
         spans.push(Span::styled(
             branch,
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     let line = Line::from(spans);
@@ -1145,27 +1217,20 @@ fn collect_change_rows(entries: &[ChatEntry]) -> Vec<ChangeRow> {
 /// math uses `chars().count()` — accurate for ASCII / Latin text and
 /// only slightly off for wide-character runs, which the chat log
 /// rarely contains.
-fn apply_selection_highlight(
-    visible: &mut Vec<Line<'static>>,
-    inner: Rect,
-    sel: ChatSelection,
-) {
+fn apply_selection_highlight(visible: &mut Vec<Line<'static>>, inner: Rect, sel: ChatSelection) {
     // Clamp the selection to the inner area; nothing outside it can
     // be highlighted (or copied) by design.
     let inner_x_end = inner.x.saturating_add(inner.width);
     let (row_start, row_end) = sel.rows();
     let rs = row_start.max(inner.y);
-    let re = row_end.min(
-        inner
-            .y
-            .saturating_add(inner.height)
-            .saturating_sub(1),
-    );
+    let re = row_end.min(inner.y.saturating_add(inner.height).saturating_sub(1));
     if re < rs {
         return;
     }
     for row in rs..=re {
-        let Some((lo, hi)) = sel.row_span(row) else { continue };
+        let Some((lo, hi)) = sel.row_span(row) else {
+            continue;
+        };
         let lo = lo.max(inner.x).min(inner_x_end);
         let hi = hi.max(inner.x).min(inner_x_end);
         if hi <= lo {
@@ -1327,7 +1392,11 @@ fn render_chat_log(
         .filter(|e| matches!(e.kind, EntryKind::ToolUse { .. }))
         .count();
     if let Some(sel) = *changes_selection {
-        let resolved = if row_count == 0 { 0 } else { sel.min(row_count - 1) };
+        let resolved = if row_count == 0 {
+            0
+        } else {
+            sel.min(row_count - 1)
+        };
         if let Some(&(rs, re)) = action_line_ranges.get(resolved) {
             for line in &mut all[rs..re] {
                 for span in &mut line.spans {
@@ -1420,15 +1489,15 @@ fn render_chat_log(
         .saturating_add(reserve_w as u16)
         .saturating_add(CAT_GAP);
     let cat_offset_shifted = cat_offset_base.saturating_sub(CAT_SHIFT_LEFT);
-    let cat_offset_min = 1u16
-        .saturating_add(actual_w as u16)
-        .saturating_add(CAT_GAP);
+    let cat_offset_min = 1u16.saturating_add(actual_w as u16).saturating_add(CAT_GAP);
     let cat_offset = cat_offset_shifted.max(cat_offset_min);
     let cat_x = chat_area.x.saturating_add(cat_offset);
     let cat_y = chat_area
         .y
         .saturating_add(chat_area.height.saturating_sub(1));
-    let right_corner = chat_area.x.saturating_add(chat_area.width.saturating_sub(1));
+    let right_corner = chat_area
+        .x
+        .saturating_add(chat_area.width.saturating_sub(1));
     if cat_x.saturating_add(cat_w) < right_corner {
         let cat_rect = Rect {
             x: cat_x,
@@ -1466,9 +1535,8 @@ fn render_chat_log(
         let start = end.saturating_sub(target_h);
         // Is the cursor hovering inside the chat pane's horizontal band?
         // (Used to decide whether a code block should light up.)
-        let hover_in_band = mouse_pos.is_some_and(|(c, _)| {
-            c >= inner.x && c < inner.x.saturating_add(inner.width)
-        });
+        let hover_in_band =
+            mouse_pos.is_some_and(|(c, _)| c >= inner.x && c < inner.x.saturating_add(inner.width));
         // Visible-row range (relative to `visible`, end exclusive) of the
         // code block under the cursor, if any — gets a subtle highlight.
         let mut hover_rows: Option<(usize, usize)> = None;
@@ -1484,9 +1552,7 @@ fn render_chat_log(
                 continue;
             }
             let top = inner.y.saturating_add((vis_start - start) as u16);
-            let bottom = inner
-                .y
-                .saturating_add((vis_end - start - 1) as u16);
+            let bottom = inner.y.saturating_add((vis_end - start - 1) as u16);
             if hover_in_band {
                 if let Some((_, r)) = mouse_pos {
                     if r >= top && r <= bottom {
@@ -1590,9 +1656,7 @@ fn render_tasks_panel(f: &mut Frame, area: Rect, tasks: &[Task]) {
         .iter()
         .filter(|t| t.status == TaskStatus::Completed)
         .count();
-    let active = tasks
-        .iter()
-        .find(|t| t.status == TaskStatus::InProgress);
+    let active = tasks.iter().find(|t| t.status == TaskStatus::InProgress);
     let title = if tasks.is_empty() {
         "Tasks".to_string()
     } else {
@@ -1606,10 +1670,17 @@ fn render_tasks_panel(f: &mut Frame, area: Rect, tasks: &[Task]) {
         // an interior row.
         let af = t.active_form.as_deref().unwrap_or(&t.subject);
         block = block.title_bottom(Line::from(vec![
-            Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ▶ ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 truncate_chars(af, area.width.saturating_sub(6) as usize),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ]));
     }
@@ -1661,7 +1732,12 @@ fn render_tasks_panel(f: &mut Frame, area: Rect, tasks: &[Task]) {
             let body_w = width.saturating_sub(prefix_w).max(4);
             let subj = truncate_chars(&t.subject, body_w);
             Line::from(vec![
-                Span::styled(format!("{glyph} "), Style::default().fg(glyph_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{glyph} "),
+                    Style::default()
+                        .fg(glyph_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!("#{} ", t.id), Style::default().fg(Color::DarkGray)),
                 Span::styled(subj, subj_style),
             ])
@@ -1732,10 +1808,8 @@ fn render_changes_list(
                 None => ("·", Style::default().fg(Color::DarkGray)),
             };
             let name_style = tool_name_style(&r.name);
-            let summary = shorten_summary_paths(
-                &chat_log::tool_input_summary(&r.name, Some(&r.input)),
-                cwd,
-            );
+            let summary =
+                shorten_summary_paths(&chat_log::tool_input_summary(&r.name, Some(&r.input)), cwd);
             let prefix_w = 2 + r.name.chars().count() + 1;
             let body_w = width.saturating_sub(prefix_w).max(4);
             let summary = truncate_chars(&summary, body_w);
@@ -1749,8 +1823,12 @@ fn render_changes_list(
                 // bash one-liner so commands like `grep ...` or
                 // `find ... | xargs ...` are scannable at a glance.
                 let normal = Style::default().fg(Color::Gray);
-                let exec_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-                let sep_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+                let exec_style = Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD);
+                let sep_style = Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD);
                 spans.extend(bash_spans(&summary, exec_style, sep_style, normal));
             } else {
                 spans.push(Span::styled(summary, Style::default().fg(Color::Gray)));
@@ -1804,7 +1882,9 @@ fn render_changes_detail(
     // Bash row this is stdout/stderr; for Read it's the file content
     // claude saw; for Edit it's the success / error message.
     let separator_style = Style::default().fg(Color::DarkGray);
-    let header_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let header_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
     let body_style = match row.ok {
         Some(false) => Style::default().fg(Color::Red),
         _ => Style::default().fg(Color::Gray),
@@ -1863,13 +1943,22 @@ fn render_changes_detail(
     // always available, mirroring the chat-log pane.
     let mut hint_spans = vec![Span::raw(" ")];
     hint_spans.push(Span::styled("drag", Style::default().fg(Color::Yellow)));
-    hint_spans.push(Span::styled(" select · ", Style::default().fg(Color::DarkGray)));
+    hint_spans.push(Span::styled(
+        " select · ",
+        Style::default().fg(Color::DarkGray),
+    ));
     if !parts.is_empty() {
         hint_spans.push(Span::styled("click", Style::default().fg(Color::Yellow)));
-        hint_spans.push(Span::styled(" copy · ", Style::default().fg(Color::DarkGray)));
+        hint_spans.push(Span::styled(
+            " copy · ",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
     hint_spans.push(Span::styled("J/K", Style::default().fg(Color::Yellow)));
-    hint_spans.push(Span::styled(" scroll ", Style::default().fg(Color::DarkGray)));
+    hint_spans.push(Span::styled(
+        " scroll ",
+        Style::default().fg(Color::DarkGray),
+    ));
     let hint = Line::from(hint_spans).alignment(Alignment::Right);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1885,8 +1974,8 @@ fn render_changes_detail(
     // any visible row still copies the whole (unwrapped) part. Parts that
     // scrolled fully out of view (e.g. into the output section) emit no
     // region this frame.
-    let hover_in_band = mouse_pos
-        .is_some_and(|(c, _)| c >= inner.x && c < inner.x.saturating_add(inner.width));
+    let hover_in_band =
+        mouse_pos.is_some_and(|(c, _)| c >= inner.x && c < inner.x.saturating_add(inner.width));
     let mut hover_rows: Option<(usize, usize)> = None;
     for (ps, pe, source) in &parts {
         let vis_start = (*ps).max(start);
@@ -1960,7 +2049,9 @@ fn format_tool_detail(
                 for w in wrap_text(&desc, body_w) {
                     out.push(Line::from(Span::styled(
                         w,
-                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
                     )));
                 }
                 out.push(Line::raw(""));
@@ -2003,7 +2094,12 @@ fn format_tool_detail(
                 out.push(Line::raw(""));
             }
             let content = str_field(input, "content").unwrap_or_default();
-            push_plain(&mut out, &content, body_w, Style::default().fg(Color::White));
+            push_plain(
+                &mut out,
+                &content,
+                body_w,
+                Style::default().fg(Color::White),
+            );
         }
         "notebookedit" => {
             for key in ["notebook_path", "cell_id", "edit_mode", "cell_type"] {
@@ -2014,10 +2110,7 @@ fn format_tool_detail(
                 };
                 if let Some(v) = val {
                     out.push(Line::from(vec![
-                        Span::styled(
-                            format!("{key}: "),
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled(format!("{key}: "), Style::default().fg(Color::DarkGray)),
                         Span::styled(v, Style::default().fg(Color::Cyan)),
                     ]));
                 }
@@ -2046,7 +2139,11 @@ fn shorten_path(p: &str, cwd: &Path) -> String {
     match path.strip_prefix(cwd) {
         Ok(rel) => {
             let s = rel.display().to_string();
-            if s.is_empty() { ".".to_string() } else { s }
+            if s.is_empty() {
+                ".".to_string()
+            } else {
+                s
+            }
         }
         Err(_) => p.to_string(),
     }
@@ -2066,7 +2163,9 @@ fn shorten_summary_paths(summary: &str, cwd: &Path) -> String {
 fn file_header(path: &str) -> Line<'static> {
     Line::from(Span::styled(
         path.to_string(),
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -2104,8 +2203,12 @@ fn push_bash_command(
     cmd: &str,
     width: usize,
 ) -> Vec<(usize, usize, String)> {
-    let exec_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    let sep_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    let exec_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let sep_style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
     let normal = Style::default().fg(Color::White);
 
     let mut parts: Vec<(usize, usize, String)> = Vec::new();
@@ -2137,7 +2240,12 @@ fn push_bash_command(
             // shell separators. Subsequent sub-lines render plain so
             // the highlight stays anchored to the real start of
             // commands.
-            out.push(Line::from(bash_spans(&wrapped[0], exec_style, sep_style, normal)));
+            out.push(Line::from(bash_spans(
+                &wrapped[0],
+                exec_style,
+                sep_style,
+                normal,
+            )));
             for cont in &wrapped[1..] {
                 out.push(Line::from(Span::styled(cont.clone(), normal)));
             }
@@ -2265,7 +2373,11 @@ fn wrap_or_empty(s: &str, width: usize) -> Vec<String> {
         return vec![String::new()];
     }
     let w = wrap_text(s, width);
-    if w.is_empty() { vec![String::new()] } else { w }
+    if w.is_empty() {
+        vec![String::new()]
+    } else {
+        w
+    }
 }
 
 fn push_pretty_json(out: &mut Vec<Line<'static>>, v: &Value, width: usize) {
@@ -2338,14 +2450,13 @@ fn entry_to_lines(
             (lines, blocks)
         }
         EntryKind::Assistant => {
-            let (md, blocks) = markdown::render_with_blocks(
-                &e.text,
-                body_w,
-                Style::default().fg(Color::White),
-            );
+            let (md, blocks) =
+                markdown::render_with_blocks(&e.text, body_w, Style::default().fg(Color::White));
             let lines = build_lines_md(
                 "claude   ",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
                 md,
             );
             (lines, blocks)
@@ -2354,13 +2465,11 @@ fn entry_to_lines(
             let (md, blocks) = markdown::render_with_blocks(
                 &e.text,
                 body_w,
-                Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::ITALIC),
             );
-            let lines = build_lines_md(
-                "thinking ",
-                Style::default().fg(Color::Magenta),
-                md,
-            );
+            let lines = build_lines_md("thinking ", Style::default().fg(Color::Magenta), md);
             (lines, blocks)
         }
         EntryKind::ToolUse { name, .. } => {
@@ -2425,21 +2534,13 @@ fn shift_blocks(blocks: Vec<markdown::CodeSpan>, by: usize) -> Vec<markdown::Cod
 /// Wrap user-message lines in a light background highlight, padding
 /// each line out to `row_w` so the bg color fills the full chat row,
 /// and bookending the block with blank highlighted spacer lines.
-fn highlight_user_lines(
-    lines: Vec<Line<'static>>,
-    row_w: usize,
-    bg: Color,
-) -> Vec<Line<'static>> {
+fn highlight_user_lines(lines: Vec<Line<'static>>, row_w: usize, bg: Color) -> Vec<Line<'static>> {
     let pad_style = Style::default().bg(bg);
     let blank = || Line::from(Span::styled(" ".repeat(row_w), pad_style));
     let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len() + 2);
     out.push(blank());
     for line in lines {
-        let used: usize = line
-            .spans
-            .iter()
-            .map(|s| s.content.chars().count())
-            .sum();
+        let used: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
         let mut spans: Vec<Span<'static>> = line
             .spans
             .into_iter()
@@ -2577,12 +2678,12 @@ fn git_branch(cwd: &Path) -> Option<String> {
         let dot_git = dir.join(".git");
         let head_path: Option<PathBuf> = match std::fs::metadata(&dot_git) {
             Ok(m) if m.is_dir() => Some(dot_git.join("HEAD")),
-            Ok(_) => std::fs::read_to_string(&dot_git)
-                .ok()
-                .and_then(|s| {
-                    s.lines()
-                        .find_map(|l| l.strip_prefix("gitdir: ").map(|p| PathBuf::from(p.trim()).join("HEAD")))
-                }),
+            Ok(_) => std::fs::read_to_string(&dot_git).ok().and_then(|s| {
+                s.lines().find_map(|l| {
+                    l.strip_prefix("gitdir: ")
+                        .map(|p| PathBuf::from(p.trim()).join("HEAD"))
+                })
+            }),
             Err(_) => None,
         };
         if let Some(p) = head_path {
@@ -2617,10 +2718,7 @@ const MASCOT_TINY: &str = include_str!("../../images/mewxi-tiny.ascii");
 /// fits.
 fn pick_mascot(area_w: u16, area_h: u16, caption_h: u16) -> (&'static str, u16, u16) {
     let avail_h = area_h.saturating_sub(caption_h);
-    let candidates: [(&str, u16, u16); 2] = [
-        (MASCOT_SMALL, 22, 44),
-        (MASCOT_TINY, 16, 32),
-    ];
+    let candidates: [(&str, u16, u16); 2] = [(MASCOT_SMALL, 22, 44), (MASCOT_TINY, 16, 32)];
     for (art, h, w) in candidates {
         if h <= avail_h && w <= area_w {
             return (art, h, w);
@@ -2718,7 +2816,10 @@ mod tests {
         let parts = super::push_bash_command(&mut out, cmd, 10);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].2, cmd);
-        assert!(parts[0].1 - parts[0].0 > 1, "wrapped part should span >1 line");
+        assert!(
+            parts[0].1 - parts[0].0 > 1,
+            "wrapped part should span >1 line"
+        );
         assert_eq!(parts[0].1, out.len());
     }
 }

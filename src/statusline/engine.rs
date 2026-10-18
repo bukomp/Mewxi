@@ -71,7 +71,14 @@ impl Ctx {
     ) -> Ctx {
         let agg = stats::load_and_aggregate_for(account).unwrap_or_default();
         let live = live_usage::fetch_or_cached(account, no_live);
-        Ctx::from_data(account, multi_account, transcript, meta, &agg, live.as_ref())
+        Ctx::from_data(
+            account,
+            multi_account,
+            transcript,
+            meta,
+            &agg,
+            live.as_ref(),
+        )
     }
 
     /// Compute every field + flag from already-loaded data, mirroring the
@@ -151,22 +158,17 @@ impl Ctx {
 
         // --- extra-usage pieces (only when actually billing) --------------
         let extra = if billing_extra {
-            live
-                .and_then(|l| l.extra_usage.as_ref())
-                .map(|e| {
-                    let used = e.used_credits.unwrap_or(0.0) / 100.0;
-                    let limit = e.monthly_limit.unwrap_or(0.0) / 100.0;
-                    let pct = e.utilization.unwrap_or(0.0);
-                    let color = watch::pct_color(pct);
-                    let sym = watch::currency_symbol(e.currency.as_deref());
-                    (
-                        format!("\x1b[{c}m{p:.1}%\x1b[0m", c = color, p = pct),
-                        format!(
-                            "\x1b[90m({sym}{:.2}/{sym}{:.2})\x1b[0m",
-                            used, limit
-                        ),
-                    )
-                })
+            live.and_then(|l| l.extra_usage.as_ref()).map(|e| {
+                let used = e.used_credits.unwrap_or(0.0) / 100.0;
+                let limit = e.monthly_limit.unwrap_or(0.0) / 100.0;
+                let pct = e.utilization.unwrap_or(0.0);
+                let color = watch::pct_color(pct);
+                let sym = watch::currency_symbol(e.currency.as_deref());
+                (
+                    format!("\x1b[{c}m{p:.1}%\x1b[0m", c = color, p = pct),
+                    format!("\x1b[90m({sym}{:.2}/{sym}{:.2})\x1b[0m", used, limit),
+                )
+            })
         } else {
             None
         };
@@ -367,7 +369,10 @@ fn render_template(ctx: &Ctx, template: &str) -> String {
 }
 
 fn find_from(chars: &[char], start: usize, needle: char) -> Option<usize> {
-    chars[start..].iter().position(|&c| c == needle).map(|p| start + p)
+    chars[start..]
+        .iter()
+        .position(|&c| c == needle)
+        .map(|p| start + p)
 }
 
 #[cfg(test)]

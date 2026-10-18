@@ -26,15 +26,15 @@ mod table;
 mod visualizer;
 
 use super::{
-    LOGO_LARGE, LOGO_LARGE_DIMS, LOGO_MEDIUM, LOGO_MEDIUM_DIMS, LOGO_SMALL, LOGO_SMALL_DIMS,
-    LOGO_TINY, LOGO_TINY_DIMS, PerAccount, SessionRef,
+    PerAccount, SessionRef, LOGO_LARGE, LOGO_LARGE_DIMS, LOGO_MEDIUM, LOGO_MEDIUM_DIMS, LOGO_SMALL,
+    LOGO_SMALL_DIMS, LOGO_TINY, LOGO_TINY_DIMS,
 };
 use crate::live_session::{Activity, SessionState};
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, TableState};
+use ratatui::Frame;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -173,7 +173,9 @@ pub fn render(
         .border_style(Style::default().fg(palette::P_MID))
         .title(Span::styled(
             font::deco_bracket(" MEWXI "),
-            Style::default().fg(palette::P_HOT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette::P_HOT)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(block_area);
     f.render_widget(block, block_area);
@@ -202,8 +204,7 @@ pub fn render(
     // now, sub-agents included — a session fanning out to N sub-agents
     // counts as 1 + N. Sub-agent rows only exist while their delegation
     // runs, so their presence *is* their activity.
-    let workers =
-        active_top + sessions.iter().filter(|s| s.subagent.is_some()).count();
+    let workers = active_top + sessions.iter().filter(|s| s.subagent.is_some()).count();
 
     let hud = if cfg.streaks {
         Some(streaks::tick(workers))
@@ -318,7 +319,13 @@ pub fn render(
     // Screen-shake post-pass — mutates already-rendered cells within
     // the block, so it must run last. The footer below the block is
     // deliberately left steady.
-    fx::apply_shake(f.buffer_mut(), block_area, cfg.shake, cfg.intensity, workers > 0);
+    fx::apply_shake(
+        f.buffer_mut(),
+        block_area,
+        cfg.shake,
+        cfg.intensity,
+        workers > 0,
+    );
 }
 
 /// Flush the arcade score state to the local status file — called by
@@ -418,7 +425,9 @@ fn render_chrome_column(
     } else {
         let line = Line::from(Span::styled(
             font::deco_bracket("MEWXI RAVE"),
-            Style::default().fg(palette::P_HOT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette::P_HOT)
+                .add_modifier(Modifier::BOLD),
         ));
         f.render_widget(Paragraph::new(line).alignment(Alignment::Center), chunks[0]);
     }
@@ -534,11 +543,8 @@ fn tick_anim(active: usize) -> (f64, f64, f64) {
 /// banded. Stored as raw 256-colour indices so they can be RGB-cube
 /// blended with `REST_INDEX` per frame.
 const WAVE: &[u8] = &[
-    53, 54, 55, 56, 91, 92, 97, 98, 99,
-    134, 135, 140, 141, 170, 171, 176, 177,
-    206, 207, 213, 219,
-    213, 207, 206, 177, 176, 171, 170,
-    141, 140, 135, 134, 99, 98, 97, 92, 91, 56, 55, 54,
+    53, 54, 55, 56, 91, 92, 97, 98, 99, 134, 135, 140, 141, 170, 171, 176, 177, 206, 207, 213, 219,
+    213, 207, 206, 177, 176, 171, 170, 141, 140, 135, 134, 99, 98, 97, 92, 91, 56, 55, 54,
 ];
 
 /// Solid colour the logo settles on when no agents are working.
@@ -565,9 +571,7 @@ fn blend_cube(a: u8, b: u8, t: f64) -> u8 {
     let t = t.clamp(0.0, 1.0);
     let (ar, ag, ab) = cube_decompose(a);
     let (br, bg, bb) = cube_decompose(b);
-    let lerp = |x: u8, y: u8| -> u8 {
-        (x as f64 * (1.0 - t) + y as f64 * t).round() as u8
-    };
+    let lerp = |x: u8, y: u8| -> u8 { (x as f64 * (1.0 - t) + y as f64 * t).round() as u8 };
     cube_compose(lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
 }
 
@@ -643,8 +647,7 @@ fn render_logo(f: &mut Frame, area: Rect, active_agents: usize) {
         0
     };
     let max_pad = area.height.saturating_sub(logo_h);
-    let top_pad = (base_pad as i32 + bob_offset_rows)
-        .clamp(0, max_pad as i32) as u16;
+    let top_pad = (base_pad as i32 + bob_offset_rows).clamp(0, max_pad as i32) as u16;
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -690,8 +693,14 @@ mod tests {
     fn fx_intensity_from_config() {
         assert_eq!(FxIntensity::from_config(Some("chill")), FxIntensity::Chill);
         assert_eq!(FxIntensity::from_config(Some("rave")), FxIntensity::Rave);
-        assert_eq!(FxIntensity::from_config(Some("insane")), FxIntensity::Insane);
-        assert_eq!(FxIntensity::from_config(Some("  Insane ")), FxIntensity::Insane);
+        assert_eq!(
+            FxIntensity::from_config(Some("insane")),
+            FxIntensity::Insane
+        );
+        assert_eq!(
+            FxIntensity::from_config(Some("  Insane ")),
+            FxIntensity::Insane
+        );
         assert_eq!(FxIntensity::from_config(Some("CHILL")), FxIntensity::Chill);
         assert_eq!(FxIntensity::from_config(None), FxIntensity::Rave);
         assert_eq!(FxIntensity::from_config(Some("garbage")), FxIntensity::Rave);
@@ -700,8 +709,14 @@ mod tests {
     #[test]
     fn ascii_style_from_config() {
         assert_eq!(AsciiStyle::from_config(Some("y2k")), AsciiStyle::Y2k);
-        assert_eq!(AsciiStyle::from_config(Some("classic")), AsciiStyle::Classic);
-        assert_eq!(AsciiStyle::from_config(Some("  Classic ")), AsciiStyle::Classic);
+        assert_eq!(
+            AsciiStyle::from_config(Some("classic")),
+            AsciiStyle::Classic
+        );
+        assert_eq!(
+            AsciiStyle::from_config(Some("  Classic ")),
+            AsciiStyle::Classic
+        );
         assert_eq!(AsciiStyle::from_config(Some("Y2K")), AsciiStyle::Y2k);
         assert_eq!(AsciiStyle::from_config(None), AsciiStyle::Y2k);
         assert_eq!(AsciiStyle::from_config(Some("garbage")), AsciiStyle::Y2k);

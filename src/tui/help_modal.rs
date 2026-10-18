@@ -105,7 +105,10 @@ pub fn sections_for(ctx: &HelpCtx) -> Vec<HelpSection> {
             // Nothing selectable and nothing killable — omit the section
             // rather than show an empty titled box.
             if !entries.is_empty() {
-                sections.push(HelpSection { title: "Sessions".into(), entries });
+                sections.push(HelpSection {
+                    title: "Sessions".into(),
+                    entries,
+                });
             }
         }
         ViewKind::SessionDetail => {
@@ -182,7 +185,10 @@ pub fn sections_for(ctx: &HelpCtx) -> Vec<HelpSection> {
                 entries.push(("Del".into(), "kill selected session".into()));
             }
             if !entries.is_empty() {
-                sections.push(HelpSection { title: "Sessions".into(), entries });
+                sections.push(HelpSection {
+                    title: "Sessions".into(),
+                    entries,
+                });
             }
 
             sections.push(HelpSection {
@@ -214,7 +220,10 @@ pub fn sections_for(ctx: &HelpCtx) -> Vec<HelpSection> {
     if ctx.view != ViewKind::AllSessions {
         global.push(("Esc".into(), "back to all sessions".into()));
     }
-    sections.push(HelpSection { title: "Global".into(), entries: global });
+    sections.push(HelpSection {
+        title: "Global".into(),
+        entries: global,
+    });
 
     sections
 }
@@ -226,7 +235,10 @@ pub struct HelpModal {
 
 impl HelpModal {
     pub fn new(sections: Vec<HelpSection>) -> Self {
-        Self { sections, scroll: 0 }
+        Self {
+            sections,
+            scroll: 0,
+        }
     }
 
     /// `Esc`, `?` and `q` close; `↑/↓`/`PgUp/PgDn` scroll; everything
@@ -258,8 +270,14 @@ impl HelpModal {
         let max_w = ((area.width as u32 * 8) / 10) as u16;
         let max_h = ((area.height as u32 * 8) / 10) as u16;
 
-        let w = ((content_width as u16).saturating_add(4)).min(max_w).min(area.width).max(1);
-        let h = ((content_height as u16).saturating_add(2)).min(max_h).min(area.height).max(1);
+        let w = ((content_width as u16).saturating_add(4))
+            .min(max_w)
+            .min(area.width)
+            .max(1);
+        let h = ((content_height as u16).saturating_add(2))
+            .min(max_h)
+            .min(area.height)
+            .max(1);
 
         let modal_area = center_rect(area, w, h);
         f.render_widget(Clear, modal_area);
@@ -289,20 +307,47 @@ impl HelpModal {
 
         if overflow {
             let text = if offset > 0 { "↑ more" } else { "" };
-            let p = Paragraph::new(Line::from(Span::styled(text, Style::default().fg(Color::DarkGray))));
-            f.render_widget(p, Rect { x: inner.x, y, width: inner.width, height: 1 });
+            let p = Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::default().fg(Color::DarkGray),
+            )));
+            f.render_widget(
+                p,
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                },
+            );
             y = y.saturating_add(1);
         }
 
         let visible: Vec<Line> = lines.iter().skip(offset).take(visible_h).cloned().collect();
-        let visible_rect = Rect { x: inner.x, y, width: inner.width, height: visible_h as u16 };
+        let visible_rect = Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: visible_h as u16,
+        };
         f.render_widget(Paragraph::new(visible), visible_rect);
         y = y.saturating_add(visible_h as u16);
 
         if overflow {
             let text = if offset < max_offset { "↓ more" } else { "" };
-            let p = Paragraph::new(Line::from(Span::styled(text, Style::default().fg(Color::DarkGray))));
-            f.render_widget(p, Rect { x: inner.x, y, width: inner.width, height: 1 });
+            let p = Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::default().fg(Color::DarkGray),
+            )));
+            f.render_widget(
+                p,
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                },
+            );
             y = y.saturating_add(1);
         }
 
@@ -310,7 +355,15 @@ impl HelpModal {
             "↑/↓ scroll · Esc close",
             Style::default().fg(Color::DarkGray),
         )));
-        f.render_widget(help, Rect { x: inner.x, y, width: inner.width, height: 1 });
+        f.render_widget(
+            help,
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+        );
     }
 }
 
@@ -334,7 +387,9 @@ fn flatten(sections: &[HelpSection]) -> Vec<Line<'static>> {
         }
         lines.push(Line::from(Span::styled(
             section.title.clone(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         for (key, action) in &section.entries {
             let padded = format!("{key:<key_width$}");
@@ -369,7 +424,10 @@ mod tests {
     use super::*;
 
     fn all_pairs(ctx: &HelpCtx) -> Vec<(String, String)> {
-        sections_for(ctx).into_iter().flat_map(|s| s.entries).collect()
+        sections_for(ctx)
+            .into_iter()
+            .flat_map(|s| s.entries)
+            .collect()
     }
 
     fn all_keys(ctx: &HelpCtx) -> Vec<String> {
@@ -389,10 +447,16 @@ mod tests {
 
     #[test]
     fn observed_session_has_no_management_keys() {
-        let ctx = session_detail_ctx(Some(SessionFlags { driven: false, ..Default::default() }));
+        let ctx = session_detail_ctx(Some(SessionFlags {
+            driven: false,
+            ..Default::default()
+        }));
         let keys = all_keys(&ctx);
         for forbidden in MANAGEMENT_KEYS {
-            assert!(!keys.iter().any(|k| k == forbidden), "unexpected `{forbidden}` for observed session");
+            assert!(
+                !keys.iter().any(|k| k == forbidden),
+                "unexpected `{forbidden}` for observed session"
+            );
         }
     }
 
@@ -401,7 +465,10 @@ mod tests {
         let ctx = session_detail_ctx(None);
         let keys = all_keys(&ctx);
         for forbidden in MANAGEMENT_KEYS {
-            assert!(!keys.iter().any(|k| k == forbidden), "unexpected `{forbidden}` for unpinned session");
+            assert!(
+                !keys.iter().any(|k| k == forbidden),
+                "unexpected `{forbidden}` for unpinned session"
+            );
         }
     }
 
@@ -414,7 +481,10 @@ mod tests {
         }));
         let keys = all_keys(&ctx);
         for required in MANAGEMENT_KEYS {
-            assert!(keys.iter().any(|k| k == required), "missing `{required}` for driven session");
+            assert!(
+                keys.iter().any(|k| k == required),
+                "missing `{required}` for driven session"
+            );
         }
     }
 
@@ -471,12 +541,18 @@ mod tests {
                 view,
                 has_sessions: true,
                 selected_driven: true,
-                session: Some(SessionFlags { driven: true, ..Default::default() }),
+                session: Some(SessionFlags {
+                    driven: true,
+                    ..Default::default()
+                }),
             };
             let sections = sections_for(&ctx);
             assert!(!sections.is_empty(), "{view:?} produced no sections");
             let total_entries: usize = sections.iter().map(|s| s.entries.len()).sum();
-            assert!(total_entries > 0, "{view:?} produced sections with no entries");
+            assert!(
+                total_entries > 0,
+                "{view:?} produced sections with no entries"
+            );
         }
     }
 
@@ -489,16 +565,23 @@ mod tests {
             session: None,
         };
         assert!(
-            all_pairs(&ctx).iter().any(|(k, a)| k == "s" && a == "score board"),
+            all_pairs(&ctx)
+                .iter()
+                .any(|(k, a)| k == "s" && a == "score board"),
             "Mewxi view must advertise the `s` score-board key even with no sessions"
         );
     }
 
     #[test]
     fn mewxi_splash_hint_absent_in_session_detail_present_elsewhere() {
-        let session_ctx = session_detail_ctx(Some(SessionFlags { driven: true, ..Default::default() }));
+        let session_ctx = session_detail_ctx(Some(SessionFlags {
+            driven: true,
+            ..Default::default()
+        }));
         assert!(
-            !all_pairs(&session_ctx).iter().any(|(k, a)| k == "m" && a == "open mewxi splash"),
+            !all_pairs(&session_ctx)
+                .iter()
+                .any(|(k, a)| k == "m" && a == "open mewxi splash"),
             "SessionDetail must not advertise the mewxi-splash `m`"
         );
 
@@ -509,7 +592,9 @@ mod tests {
             session: None,
         };
         assert!(
-            all_pairs(&all_sessions_ctx).iter().any(|(k, a)| k == "m" && a == "open mewxi splash"),
+            all_pairs(&all_sessions_ctx)
+                .iter()
+                .any(|(k, a)| k == "m" && a == "open mewxi splash"),
             "AllSessions should advertise the mewxi-splash `m`"
         );
     }

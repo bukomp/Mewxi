@@ -15,15 +15,15 @@
 
 use crate::live_session::{Activity, SessionState};
 use crate::tui::SessionRef;
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use super::palette::{BARS, P_LABEL, heat_color};
+use super::palette::{heat_color, BARS, P_LABEL};
 
 /// Per-frame dt is clamped to this many seconds so a backgrounded
 /// terminal that gets redrawn after a long stall doesn't spring-snap
@@ -147,7 +147,11 @@ fn tick_visualizer(cols: &[&SessionRef], now: Instant) -> Vec<f64> {
             session.state
         };
         let target = target_height(state, &session.activity);
-        let tau = if target >= col.current { RISE_TAU } else { FALL_TAU };
+        let tau = if target >= col.current {
+            RISE_TAU
+        } else {
+            FALL_TAU
+        };
         col.current = ease(col.current, target, dt, tau).clamp(0.0, 1.0);
 
         let hz = BOUNCE_BASE_HZ + BOUNCE_PER_COL_HZ * i as f64;
@@ -189,7 +193,9 @@ pub fn render(f: &mut Frame, area: Rect, sessions: &[&SessionRef]) {
             let overflow_n = total - cols_to_show;
             let candidate = format!("»{overflow_n}");
             let candidate_w = candidate.chars().count();
-            let bars_w = cols_to_show.saturating_mul(2).saturating_sub(if cols_to_show > 0 { 1 } else { 0 });
+            let bars_w = cols_to_show
+                .saturating_mul(2)
+                .saturating_sub(if cols_to_show > 0 { 1 } else { 0 });
             let gap = if cols_to_show > 0 { 1 } else { 0 };
             let needed = bars_w + gap + candidate_w;
             if needed <= avail || cols_to_show == 0 {
@@ -249,7 +255,10 @@ pub fn render(f: &mut Frame, area: Rect, sessions: &[&SessionRef]) {
             if !heights.is_empty() {
                 spans.push(Span::raw(" "));
             }
-            spans.push(Span::styled(indicator.clone(), Style::default().fg(P_LABEL)));
+            spans.push(Span::styled(
+                indicator.clone(),
+                Style::default().fg(P_LABEL),
+            ));
         }
         lines.push(Line::from(spans));
     }
@@ -284,7 +293,10 @@ mod tests {
 
         // Idle overrides any stale activity.
         let h2 = target_height(SessionState::Idle, &Activity::Writing);
-        assert!(h2 > 0.0 && h2 <= 0.1, "idle must override activity, got {h2}");
+        assert!(
+            h2 > 0.0 && h2 <= 0.1,
+            "idle must override activity, got {h2}"
+        );
     }
 
     #[test]
@@ -323,7 +335,10 @@ mod tests {
         for state in [SessionState::Active, SessionState::Idle] {
             for a in &activities {
                 let h = target_height(state, a);
-                assert!((0.0..=1.0).contains(&h), "{state:?}/{a:?} -> {h} out of range");
+                assert!(
+                    (0.0..=1.0).contains(&h),
+                    "{state:?}/{a:?} -> {h} out of range"
+                );
             }
         }
     }
@@ -345,7 +360,10 @@ mod tests {
         let up = ease(0.2, 0.9, 1_000.0, 0.12);
         assert!((0.19999..=0.9 + 1e-9).contains(&up), "up overshoot: {up}");
         let down = ease(0.9, 0.2, 1_000.0, 0.12);
-        assert!((0.2 - 1e-9..=0.90001).contains(&down), "down overshoot: {down}");
+        assert!(
+            (0.2 - 1e-9..=0.90001).contains(&down),
+            "down overshoot: {down}"
+        );
     }
 
     #[test]
@@ -358,7 +376,10 @@ mod tests {
             let bars: Vec<usize> = slots.iter().map(|(b, _)| *b).collect();
             let min = bars.iter().min().unwrap();
             let max = bars.iter().max().unwrap();
-            assert!(max - min <= 2, "bars should stay near-equal ({w}, {n}): {bars:?}");
+            assert!(
+                max - min <= 2,
+                "bars should stay near-equal ({w}, {n}): {bars:?}"
+            );
             // No trailing gap — the last slot ends flush at the edge.
             assert_eq!(slots.last().unwrap().1, 0);
         }

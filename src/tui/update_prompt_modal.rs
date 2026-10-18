@@ -6,11 +6,11 @@
 
 use crate::update::UpdateStatus;
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
 
 pub struct UpdatePromptModal {
     pub status: UpdateStatus,
@@ -39,9 +39,7 @@ impl UpdatePromptModal {
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
                 UpdatePromptOutcome::NotNow
             }
-            KeyCode::Char('d') | KeyCode::Char('D') => {
-                UpdatePromptOutcome::DisableStartupPrompt
-            }
+            KeyCode::Char('d') | KeyCode::Char('D') => UpdatePromptOutcome::DisableStartupPrompt,
             _ => UpdatePromptOutcome::Stay,
         }
     }
@@ -50,7 +48,11 @@ impl UpdatePromptModal {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" Update available ")
-            .border_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD));
+            .border_style(
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            );
 
         let s = &self.status;
         let body = vec![
@@ -61,19 +63,26 @@ impl UpdatePromptModal {
                 Span::raw(" → "),
                 Span::styled(
                     &s.latest,
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
                 Span::raw("  "),
                 Span::styled(s.channel.label(), Style::default().fg(Color::Cyan)),
-                Span::styled(format!(" · {}", s.detail), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(" · {}", s.detail),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled(
                     "  [Enter/y]",
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" update now   "),
                 Span::styled("[Esc/n]", Style::default().fg(Color::DarkGray)),
@@ -93,11 +102,7 @@ impl UpdatePromptModal {
         // detail text varies in length).
         let title_width = " Update available ".len() as u16 + 2;
         let content_width = body.iter().map(|l| l.width() as u16 + 4).max().unwrap_or(0);
-        let modal_area = center_rect(
-            area,
-            content_width.max(title_width),
-            body.len() as u16 + 3,
-        );
+        let modal_area = center_rect(area, content_width.max(title_width), body.len() as u16 + 3);
         f.render_widget(Clear, modal_area);
         f.render_widget(Paragraph::new(body).block(block), modal_area);
     }

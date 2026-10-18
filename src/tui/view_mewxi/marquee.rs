@@ -88,8 +88,10 @@ fn render_segment(item: &TickerItem) -> String {
 /// `SessionRef`.
 fn compose(items: &[TickerItem]) -> String {
     let mut needs_input: Vec<&TickerItem> = items.iter().filter(|i| i.needs_input).collect();
-    let mut working: Vec<&TickerItem> =
-        items.iter().filter(|i| !i.needs_input && i.working).collect();
+    let mut working: Vec<&TickerItem> = items
+        .iter()
+        .filter(|i| !i.needs_input && i.working)
+        .collect();
     // Both filters already preserve slice order; nothing left to sort —
     // just concatenate needs-input ahead of working.
     needs_input.append(&mut working);
@@ -221,10 +223,7 @@ mod tests {
         item.subagents = 2;
         item.caption = Some("checking rendering code".into());
         let out = compose(&[item]);
-        assert_eq!(
-            out,
-            "mewxi » delegating +2⚡ · checking rendering code"
-        );
+        assert_eq!(out, "mewxi » delegating +2⚡ · checking rendering code");
     }
 
     #[test]
@@ -267,8 +266,9 @@ mod tests {
 
     #[test]
     fn six_segment_cap_emits_more_count() {
-        let items: Vec<TickerItem> =
-            (0..9).map(|i| working(&format!("proj{i}"), "thinking")).collect();
+        let items: Vec<TickerItem> = (0..9)
+            .map(|i| working(&format!("proj{i}"), "thinking"))
+            .collect();
         let out = compose(&items);
         let segment_count = out.split(" ░ ").count();
         assert_eq!(segment_count, MAX_SEGMENTS + 1); // 6 shown + "+3 more"

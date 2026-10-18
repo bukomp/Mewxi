@@ -240,7 +240,9 @@ impl ComposerModal {
         let preview_line = if rendered.trim().is_empty() {
             Line::from(Span::styled(
                 "(all blocks disabled)",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ))
         } else {
             Line::from(ansi_to_spans(&rendered))
@@ -248,7 +250,10 @@ impl ComposerModal {
         let preview_block = RBlock::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled(" preview ", Style::default().fg(Color::DarkGray)));
+            .title(Span::styled(
+                " preview ",
+                Style::default().fg(Color::DarkGray),
+            ));
         f.render_widget(
             Paragraph::new(preview_line)
                 .wrap(Wrap { trim: false })
@@ -262,7 +267,10 @@ impl ComposerModal {
                 Span::styled("new block id: ", Style::default().fg(Color::Yellow)),
                 Span::raw(input.as_str().to_string()),
                 Span::styled("▏", Style::default().fg(Color::Yellow)),
-                Span::styled("  Enter create · Esc cancel", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "  Enter create · Esc cancel",
+                    Style::default().fg(Color::DarkGray),
+                ),
             ])
         } else if let Some(msg) = self.status.as_ref() {
             Line::from(Span::styled(msg.clone(), Style::default().fg(Color::Cyan)))
@@ -293,7 +301,9 @@ impl ComposerModal {
         let mut spans = vec![
             Span::styled(
                 arrow.to_string(),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("{check} "), Style::default().fg(check_color)),
             Span::styled(format!("{:<14}", r.block.id), id_style),
@@ -387,11 +397,7 @@ mod tests {
             ComposerOutcome::Save(order) => {
                 assert_eq!(
                     order,
-                    vec![
-                        ("a".into(), true),
-                        ("b".into(), true),
-                        ("c".into(), false),
-                    ]
+                    vec![("a".into(), true), ("b".into(), true), ("c".into(), false),]
                 );
             }
             _ => panic!("expected save"),
@@ -443,7 +449,10 @@ mod tests {
     #[test]
     fn renders_without_panic() {
         let text = render_text(&modal(), 90, 20);
-        assert!(text.contains("Status line composer"), "missing title:\n{text}");
+        assert!(
+            text.contains("Status line composer"),
+            "missing title:\n{text}"
+        );
         assert!(text.contains("preview"), "missing preview:\n{text}");
     }
 

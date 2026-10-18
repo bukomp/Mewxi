@@ -87,10 +87,7 @@ fn run_git_status(cwd: &Path) -> Option<u64> {
         return None;
     }
 
-    let count = buf
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count() as u64;
+    let count = buf.lines().filter(|line| !line.trim().is_empty()).count() as u64;
     Some(count)
 }
 

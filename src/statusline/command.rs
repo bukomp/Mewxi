@@ -163,7 +163,9 @@ fn cached(command: &str) -> Option<String> {
 
 /// Persist `value` (atomically) as the cached output for `command`.
 fn store_cache(command: &str, value: &str) {
-    let Some(path) = cache_path(command) else { return };
+    let Some(path) = cache_path(command) else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -208,8 +210,15 @@ mod tests {
     fn hung_command_times_out_empty() {
         let start = std::time::Instant::now();
         // Unique command text so the TTL cache from other tests can't hit.
-        let out = run_command_block("sleep 5; echo nope-unique-xyz", Duration::from_millis(120), None);
+        let out = run_command_block(
+            "sleep 5; echo nope-unique-xyz",
+            Duration::from_millis(120),
+            None,
+        );
         assert_eq!(out, "");
-        assert!(start.elapsed() < Duration::from_secs(2), "should not block on the sleep");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "should not block on the sleep"
+        );
     }
 }

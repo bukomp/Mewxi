@@ -86,29 +86,26 @@ impl SkillOrigin {
 /// `claude_bin`, when `Some`, points at the `claude` executable to
 /// scan for built-in skills. Pass `None` to skip the binary scan
 /// entirely (filesystem skills only).
-pub fn discover(
-    config_dir: &Path,
-    project_cwd: &Path,
-    claude_bin: Option<&Path>,
-) -> Vec<Skill> {
+pub fn discover(config_dir: &Path, project_cwd: &Path, claude_bin: Option<&Path>) -> Vec<Skill> {
     let overrides = load_skill_overrides(config_dir);
     let mut out: Vec<Skill> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    let push = |skill: Skill, seen: &mut HashSet<String>, out: &mut Vec<Skill>| {
-        match overrides.get(skill.name.as_str()).map(String::as_str) {
-            Some("off") => return,
-            Some("name-only") => {
-                let mut s = skill;
-                s.description.clear();
-                if seen.insert(s.name.clone()) {
-                    out.push(s);
-                }
+    let push = |skill: Skill, seen: &mut HashSet<String>, out: &mut Vec<Skill>| match overrides
+        .get(skill.name.as_str())
+        .map(String::as_str)
+    {
+        Some("off") => return,
+        Some("name-only") => {
+            let mut s = skill;
+            s.description.clear();
+            if seen.insert(s.name.clone()) {
+                out.push(s);
             }
-            _ => {
-                if seen.insert(skill.name.clone()) {
-                    out.push(skill);
-                }
+        }
+        _ => {
+            if seen.insert(skill.name.clone()) {
+                out.push(skill);
             }
         }
     };
@@ -173,7 +170,9 @@ fn extract_builtin_skills(bytes: &[u8], source: &Path) -> Vec<Skill> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut i = 0;
     while i + NAME_PREFIX.len() < bytes.len() {
-        let Some(rel) = find_subslice(&bytes[i..], NAME_PREFIX) else { break };
+        let Some(rel) = find_subslice(&bytes[i..], NAME_PREFIX) else {
+            break;
+        };
         let start = i + rel + NAME_PREFIX.len();
         let Some(end_quote) = find_closing_quote(&bytes[start..]) else {
             i = start;
@@ -228,9 +227,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Index of the closing unescaped `"` in a JS string literal that
@@ -336,8 +333,14 @@ fn scan_plugin_scope(config_dir: &Path) -> Vec<Skill> {
         // `plugins` is a map of `<plugin>@<marketplace>` to an array of
         // install records (one per scope). Each record has an
         // `installPath` that points at the on-disk copy.
-        let plugin_name = plugin_key.split('@').next().unwrap_or(plugin_key).to_string();
-        let Some(arr) = entries.as_array() else { continue };
+        let plugin_name = plugin_key
+            .split('@')
+            .next()
+            .unwrap_or(plugin_key)
+            .to_string();
+        let Some(arr) = entries.as_array() else {
+            continue;
+        };
         for entry in arr {
             let Some(install_path) = entry.get("installPath").and_then(Value::as_str) else {
                 continue;
@@ -468,7 +471,9 @@ pub fn read_description(path: &Path) -> Option<String> {
     if let Some(cont) = continuation {
         value = Some(cont);
     }
-    value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn strip_quotes(s: &str) -> &str {
@@ -490,9 +495,15 @@ fn load_skill_overrides(config_dir: &Path) -> std::collections::HashMap<String, 
     let mut out = std::collections::HashMap::new();
     for fname in ["settings.json", "settings.local.json"] {
         let p = config_dir.join(fname);
-        let Ok(raw) = fs::read_to_string(&p) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&raw) else { continue };
-        let Some(obj) = v.get("skillOverrides").and_then(Value::as_object) else { continue };
+        let Ok(raw) = fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(obj) = v.get("skillOverrides").and_then(Value::as_object) else {
+            continue;
+        };
         for (k, val) in obj {
             if let Some(s) = val.as_str() {
                 out.insert(k.clone(), s.to_string());
@@ -518,7 +529,10 @@ mod tests {
     fn reads_inline_description() {
         let dir = tempdir().unwrap();
         let skill = dir.path().join("SKILL.md");
-        write(&skill, "---\nname: foo\ndescription: A short one-liner.\n---\n\nBody.\n");
+        write(
+            &skill,
+            "---\nname: foo\ndescription: A short one-liner.\n---\n\nBody.\n",
+        );
         assert_eq!(
             read_description(&skill).as_deref(),
             Some("A short one-liner.")
@@ -604,14 +618,20 @@ mod tests {
                 }]
             }
         });
-        write(&installed, &serde_json::to_string_pretty(&manifest).unwrap());
+        write(
+            &installed,
+            &serde_json::to_string_pretty(&manifest).unwrap(),
+        );
 
         let skills = discover(cfg.path(), project.path(), None);
         let review = skills
             .iter()
             .find(|s| s.name == "pr-review-toolkit:review")
             .expect("plugin skill should appear with prefix");
-        assert_eq!(review.origin, SkillOrigin::Plugin("pr-review-toolkit".into()));
+        assert_eq!(
+            review.origin,
+            SkillOrigin::Plugin("pr-review-toolkit".into())
+        );
         assert_eq!(review.description, "Review a PR.");
     }
 
