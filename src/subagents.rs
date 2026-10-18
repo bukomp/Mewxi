@@ -405,7 +405,8 @@ fn scan_flat_running(
             || finished
                 .notified
                 .get(agent_id)
-                .is_some_and(|ts| notification_stands(*ts, cand.modified));
+                .is_some_and(|ts| notification_stands(*ts, cand.modified))
+            || handed_back(&cand.path);
         if resolved {
             resolved_ids.insert(agent_id.clone());
         }
@@ -797,6 +798,56 @@ fn finished_delegations(path: &Path) -> Finished {
         }
     }
     out
+}
+
+/// Bytes of an agent transcript's tail inspected by [`handed_back`].
+const HANDBACK_TAIL_BYTES: u64 = 64 * 1024;
+
+/// Whether the agent's own transcript ends in a `SubagentHandback` tool
+/// call: its last `tool_use` block is the final report to its caller, so
+/// the agent is done even when the parent never records a resolution.
+/// A later `tool_use` (the agent resumed via `SendMessage`) clears it.
+fn handed_back(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(HANDBACK_TAIL_BYTES);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next(); // possibly a partial line
+    }
+    let mut last_tool: Option<String> = None;
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|x| x.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(items) = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for it in items {
+            if it.get("type").and_then(|x| x.as_str()) == Some("tool_use") {
+                last_tool = it.get("name").and_then(|x| x.as_str()).map(str::to_string);
+            }
+        }
+    }
+    last_tool.as_deref() == Some("SubagentHandback")
 }
 
 /// Whether a `tool_result` block is the "Async agent launched
@@ -1283,6 +1334,40 @@ mod tests {
         // Depth-1, un-nested delegation: no parent, sidecar-default depth.
         assert_eq!(a.parent_agent_id, None);
         assert_eq!(a.depth, 1);
+    }
+
+    #[test]
+    fn scan_running_hides_agent_whose_last_tool_is_subagent_handback() {
+        let proj = tempfile::tempdir().unwrap();
+        let sid = "sess1";
+        let parent_path = proj.path().join(format!("{sid}.jsonl"));
+        fs::write(&parent_path, "").unwrap();
+        let subdir = proj.path().join(sid).join("subagents");
+        fs::create_dir_all(&subdir).unwrap();
+        let write_agent = |id: &str, tools: &[&str]| {
+            let mut body = String::from(
+                "{\"type\":\"user\",\"timestamp\":\"2026-06-19T00:00:00Z\",\"message\":{\"content\":\"go\"}}\n",
+            );
+            for t in tools {
+                body.push_str(&format!(
+                    "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"x\",\"name\":\"{t}\",\"input\":{{}}}}]}}}}\n"
+                ));
+            }
+            body.push_str(
+                "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"x\"}]}}\n",
+            );
+            fs::write(subdir.join(format!("agent-{id}.jsonl")), body).unwrap();
+            fs::write(
+                subdir.join(format!("agent-{id}.meta.json")),
+                format!(r#"{{"description":"{id}","toolUseId":"t{id}"}}"#),
+            )
+            .unwrap();
+        };
+        write_agent("done", &["Read", "SubagentHandback"]);
+        write_agent("busy", &["SubagentHandback", "Read"]); // resumed afterwards
+        let subs = scan_running(&parent_path, sid, None);
+        let ids: Vec<_> = subs.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(ids, vec!["busy"]);
     }
 
     #[test]
