@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 /// `Claude Code-credentials` entry, then to `<dir>/.credentials.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
+#[derive(Default)]
 pub enum TokenSource {
     Env {
         env: String,
@@ -49,13 +50,8 @@ pub enum TokenSource {
     /// Construct-only; never deserialized. Triggers the fallback chain
     /// above. Skipped during ser/deser so untagged matching is unambiguous.
     #[serde(skip)]
+    #[default]
     Auto,
-}
-
-impl Default for TokenSource {
-    fn default() -> Self {
-        TokenSource::Auto
-    }
 }
 
 /// `Claude Code-credentials-{first 8 hex of sha256(abs_dir_path)}` —
@@ -867,7 +863,7 @@ pub fn recent_projects(account: &Account, limit: usize) -> Vec<RecentProject> {
         };
         found.push((cwd, mtime, count));
     }
-    found.sort_by(|a, b| b.1.cmp(&a.1));
+    found.sort_by_key(|x| std::cmp::Reverse(x.1));
     let mut out: Vec<RecentProject> = Vec::with_capacity(found.len().min(limit));
     let mut seen: Vec<PathBuf> = Vec::new();
     for (cwd, mtime, count) in found {
@@ -948,7 +944,7 @@ pub fn recent_project_sessions(account: &Account, limit: usize) -> Vec<RecentSes
             found.push((p, mt));
         }
     }
-    found.sort_by(|a, b| b.1.cmp(&a.1));
+    found.sort_by_key(|x| std::cmp::Reverse(x.1));
     let mut out: Vec<RecentSession> = Vec::with_capacity(found.len().min(limit));
     for (jsonl, mtime) in found.into_iter().take(limit * 2) {
         let Some(session_id) = jsonl.file_stem().and_then(|s| s.to_str()).map(String::from) else {

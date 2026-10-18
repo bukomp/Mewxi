@@ -95,7 +95,7 @@ pub fn discover(config_dir: &Path, project_cwd: &Path, claude_bin: Option<&Path>
         .get(skill.name.as_str())
         .map(String::as_str)
     {
-        Some("off") => return,
+        Some("off") => (),
         Some("name-only") => {
             let mut s = skill;
             s.description.clear();

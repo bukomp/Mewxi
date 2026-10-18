@@ -468,6 +468,7 @@ pub fn render(
 /// precedence rules for the live caption (status_label → narration →
 /// description), same truncation and depth-based indent, restyled onto
 /// the rave palette.
+#[allow(clippy::too_many_arguments)]
 fn subagent_row(
     s: &SessionRef,
     now: chrono::DateTime<chrono::Utc>,

@@ -1790,10 +1790,7 @@ fn run_loop<B: ratatui::backend::Backend>(
         // session ended). Drop the entry so the input row disappears.
         let exited: Vec<(String, String)> = drivers
             .iter_mut()
-            .filter_map(|(k, pty)| match pty.try_wait().ok().flatten() {
-                Some(_) => Some(k.clone()),
-                None => None,
-            })
+            .filter_map(|(k, pty)| pty.try_wait().ok().flatten().map(|_| k.clone()))
             .collect();
         for k in &exited {
             crate::debug_log::log(&format!("driver.reap key={k:?} reason=child-exit"));
@@ -2470,25 +2467,23 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     }
                                 }
                             }
-                            MouseEventKind::Up(MouseButton::Left) => {
-                                if chat_selection_dragging {
-                                    chat_selection_dragging = false;
-                                    if let Some(sel) = chat_selection {
-                                        let text =
-                                            extract_chat_selection_text(&chat_visible, inner, sel);
-                                        if !text.is_empty() {
-                                            match arboard::Clipboard::new()
-                                                .and_then(|mut c| c.set_text(text.clone()))
-                                            {
-                                                Ok(()) => {
-                                                    toasts.success(format!(
-                                                        "copied {} chars",
-                                                        text.chars().count()
-                                                    ));
-                                                }
-                                                Err(e) => {
-                                                    toasts.error(format!("clipboard error: {e}"));
-                                                }
+                            MouseEventKind::Up(MouseButton::Left) if chat_selection_dragging => {
+                                chat_selection_dragging = false;
+                                if let Some(sel) = chat_selection {
+                                    let text =
+                                        extract_chat_selection_text(&chat_visible, inner, sel);
+                                    if !text.is_empty() {
+                                        match arboard::Clipboard::new()
+                                            .and_then(|mut c| c.set_text(text.clone()))
+                                        {
+                                            Ok(()) => {
+                                                toasts.success(format!(
+                                                    "copied {} chars",
+                                                    text.chars().count()
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                toasts.error(format!("clipboard error: {e}"));
                                             }
                                         }
                                     }
@@ -2538,62 +2533,55 @@ fn run_loop<B: ratatui::backend::Backend>(
                                     }
                                 }
                             }
-                            MouseEventKind::Up(MouseButton::Left) => {
-                                if detail_selection_dragging {
-                                    detail_selection_dragging = false;
-                                    if let Some(sel) = detail_selection {
-                                        if sel.anchor != sel.cursor {
-                                            // Real drag → copy highlighted text.
-                                            let text = extract_chat_selection_text(
-                                                &detail_visible,
-                                                inner,
-                                                sel,
-                                            );
-                                            if !text.is_empty() {
-                                                match arboard::Clipboard::new()
-                                                    .and_then(|mut c| c.set_text(text.clone()))
-                                                {
-                                                    Ok(()) => {
-                                                        toasts.success(format!(
-                                                            "copied {} chars",
-                                                            text.chars().count()
-                                                        ));
-                                                    }
-                                                    Err(e) => {
-                                                        toasts
-                                                            .error(format!("clipboard error: {e}"));
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            // Zero-extent = plain click → copy
-                                            // the command part under the cursor.
-                                            if let Some(region) =
-                                                detail_copy_blocks.iter().find(|b| {
-                                                    sel.cursor.1 >= b.top
-                                                        && sel.cursor.1 <= b.bottom
-                                                })
+                            MouseEventKind::Up(MouseButton::Left) if detail_selection_dragging => {
+                                detail_selection_dragging = false;
+                                if let Some(sel) = detail_selection {
+                                    if sel.anchor != sel.cursor {
+                                        // Real drag → copy highlighted text.
+                                        let text = extract_chat_selection_text(
+                                            &detail_visible,
+                                            inner,
+                                            sel,
+                                        );
+                                        if !text.is_empty() {
+                                            match arboard::Clipboard::new()
+                                                .and_then(|mut c| c.set_text(text.clone()))
                                             {
-                                                let src = region.source.clone();
-                                                let chars = src.chars().count();
-                                                match arboard::Clipboard::new()
-                                                    .and_then(|mut c| c.set_text(src))
-                                                {
-                                                    Ok(()) => {
-                                                        toasts.success(format!(
-                                                            "copied command part ({chars} chars)"
-                                                        ));
-                                                    }
-                                                    Err(e) => {
-                                                        toasts
-                                                            .error(format!("clipboard error: {e}"));
-                                                    }
+                                                Ok(()) => {
+                                                    toasts.success(format!(
+                                                        "copied {} chars",
+                                                        text.chars().count()
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    toasts.error(format!("clipboard error: {e}"));
                                                 }
                                             }
-                                            // A zero-extent selection must not
-                                            // linger as a stray highlight.
-                                            detail_selection = None;
                                         }
+                                    } else {
+                                        // Zero-extent = plain click → copy
+                                        // the command part under the cursor.
+                                        if let Some(region) = detail_copy_blocks.iter().find(|b| {
+                                            sel.cursor.1 >= b.top && sel.cursor.1 <= b.bottom
+                                        }) {
+                                            let src = region.source.clone();
+                                            let chars = src.chars().count();
+                                            match arboard::Clipboard::new()
+                                                .and_then(|mut c| c.set_text(src))
+                                            {
+                                                Ok(()) => {
+                                                    toasts.success(format!(
+                                                        "copied command part ({chars} chars)"
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    toasts.error(format!("clipboard error: {e}"));
+                                                }
+                                            }
+                                        }
+                                        // A zero-extent selection must not
+                                        // linger as a stray highlight.
+                                        detail_selection = None;
                                     }
                                 }
                             }
@@ -3980,14 +3968,10 @@ fn run_loop<B: ratatui::backend::Backend>(
                                 }
                             }
                             ViewMode::AccountDetail => {
-                                if selected_account > 0 {
-                                    selected_account -= 1;
-                                }
+                                selected_account = selected_account.saturating_sub(1);
                             }
                             ViewMode::Setup => {
-                                if selected_setup > 0 {
-                                    selected_setup -= 1;
-                                }
+                                selected_setup = selected_setup.saturating_sub(1);
                             }
                         },
                         KeyCode::Enter => {

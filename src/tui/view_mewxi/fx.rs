@@ -128,7 +128,7 @@ pub fn apply_shake(
     let mut s = cell.lock().expect("fx state poisoned");
 
     let now = Instant::now();
-    let dt = (now - s.last_tick).as_secs_f64().min(0.1).max(0.0);
+    let dt = (now - s.last_tick).as_secs_f64().clamp(0.0, 0.1);
     s.last_tick = now;
 
     s.envelope = envelope_decay(s.envelope, dt, DECAY_TAU);

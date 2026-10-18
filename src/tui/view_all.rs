@@ -919,6 +919,7 @@ fn render_sessions_table(
 /// action (e.g. `Read(view_all.rs)`) is appended — the caption is truncated
 /// in that case to keep the action visible on typical widths; with no
 /// action it renders in full.
+#[allow(clippy::too_many_arguments)]
 fn subagent_row(
     s: &SessionRef,
     now: chrono::DateTime<chrono::Utc>,

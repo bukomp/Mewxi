@@ -1329,6 +1329,7 @@ mod tests {
         let subdir = proj.path().join(sid).join("subagents");
         fs::create_dir_all(&subdir).unwrap();
         let write_agent = |id: &str, tool_use_id: &str, desc: &str, launched: &str| {
+            #[allow(clippy::format_in_format_args)]
             let body = format!(
                 "{}\n{}\n{}\n{}\n",
                 format!(
@@ -1423,6 +1424,7 @@ mod tests {
         let subdir = proj.path().join(sid).join("subagents");
         fs::create_dir_all(&subdir).unwrap();
         let write_agent = |id: &str, desc: &str, launched: &str| {
+            #[allow(clippy::format_in_format_args)]
             let body = format!(
                 "{}\n{}\n",
                 format!(
@@ -1485,6 +1487,7 @@ mod tests {
                 .join("workflows")
                 .join(run_id);
             fs::create_dir_all(&dir).unwrap();
+            #[allow(clippy::format_in_format_args)]
             let body = format!(
                 "{}\n{}\n",
                 format!(
@@ -1586,6 +1589,7 @@ mod tests {
         launched: &str,
         extra_lines: &str,
     ) {
+        #[allow(clippy::format_in_format_args)]
         let body = format!(
             "{}\n{}\n{}",
             format!(

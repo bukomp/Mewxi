@@ -223,6 +223,32 @@ fn num(entry: &Value, field: &str) -> Option<f64> {
     entry.get(field)?.as_f64()
 }
 
+fn fallback(family: &str) -> ModelPrice {
+    match family {
+        "opus" => ModelPrice {
+            input: 5.0,
+            output: 25.0,
+            cache_write_5m: 6.25,
+            cache_write_1h: 10.0,
+            cache_read: 0.5,
+        },
+        "haiku" => ModelPrice {
+            input: 1.0,
+            output: 5.0,
+            cache_write_5m: 1.25,
+            cache_write_1h: 2.0,
+            cache_read: 0.1,
+        },
+        _ => ModelPrice {
+            input: 3.0,
+            output: 15.0,
+            cache_write_5m: 3.75,
+            cache_write_1h: 6.0,
+            cache_read: 0.3,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,31 +282,5 @@ mod tests {
             haiku.input
         );
         eprintln!("opus={:?} sonnet={:?} haiku={:?}", opus, sonnet, haiku);
-    }
-}
-
-fn fallback(family: &str) -> ModelPrice {
-    match family {
-        "opus" => ModelPrice {
-            input: 5.0,
-            output: 25.0,
-            cache_write_5m: 6.25,
-            cache_write_1h: 10.0,
-            cache_read: 0.5,
-        },
-        "haiku" => ModelPrice {
-            input: 1.0,
-            output: 5.0,
-            cache_write_5m: 1.25,
-            cache_write_1h: 2.0,
-            cache_read: 0.1,
-        },
-        _ => ModelPrice {
-            input: 3.0,
-            output: 15.0,
-            cache_write_5m: 3.75,
-            cache_write_1h: 6.0,
-            cache_read: 0.3,
-        },
     }
 }

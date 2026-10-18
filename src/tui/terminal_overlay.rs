@@ -137,9 +137,9 @@ pub fn matched_marker(screen: &Screen) -> Option<(u16, &'static str, String)> {
 /// bullet-marker scrollback.
 ///
 /// claude's pickers come in two flavours handled uniformly:
-///   - numbered: `❯ 1. Yes` / `  2. No`               (the model picker)
-///   - unnumbered: `❯ Auto-accept edits` / `  Manual` (the AskUserQuestion picker)
-
+/// - numbered: `❯ 1. Yes` / `  2. No`               (the model picker)
+/// - unnumbered: `❯ Auto-accept edits` / `  Manual` (the AskUserQuestion picker)
+///
 /// Returns `(cursor_col, prefix)` when `line` is a picker's selected
 /// row: `<prefix><cursor><space><text>`, where `prefix` is the leading
 /// run of whitespace + box-drawing chars. The cursor glyph must be a
@@ -576,8 +576,8 @@ fn parse_split_picker(screen: &Screen) -> Option<SplitPickerContent> {
         }
     }
     option_lines.push((cursor_idx, true));
-    for j in (cursor_idx + 1)..lefts.len() {
-        if is_picker_sibling_line(lefts[j], &cursor_prefix) {
+    for (j, left) in lefts.iter().enumerate().skip(cursor_idx + 1) {
+        if is_picker_sibling_line(left, &cursor_prefix) {
             option_lines.push((j, false));
         } else {
             break;
@@ -865,8 +865,8 @@ fn parse_picker(screen: &Screen) -> Option<PickerContent> {
         }
     }
     option_lines.push((cursor_idx, true));
-    for j in (cursor_idx + 1)..lines.len() {
-        if is_picker_sibling_line(&lines[j], &cursor_prefix) {
+    for (j, line) in lines.iter().enumerate().skip(cursor_idx + 1) {
+        if is_picker_sibling_line(line, &cursor_prefix) {
             option_lines.push((j, false));
         } else {
             break;
@@ -1630,7 +1630,7 @@ mod tests {
         bytes.push_str("│ [y/N]    │\r\n");
         let p = parse(bytes.as_bytes());
         let (top, bot, _, _) = find_popup_region(p.screen()).expect("popup found");
-        assert!(bot - top + 1 <= MAX_POPUP_ROWS, "rows {top}..={bot}");
+        assert!(bot - top < MAX_POPUP_ROWS, "rows {top}..={bot}");
     }
 
     #[test]

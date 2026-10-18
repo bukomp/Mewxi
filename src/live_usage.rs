@@ -1047,6 +1047,20 @@ fn logged_once_set() -> &'static Mutex<std::collections::HashSet<String>> {
     S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
+fn log_once(account: &str, msg: String) {
+    record_error(account, &msg);
+    // In TUI mode, never write to stderr — it bleeds onto the alternate
+    // screen and corrupts the UI. The TUI reads the registry instead.
+    if TUI_MODE.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Ok(mut s) = logged_once_set().lock() {
+        if s.insert(msg.clone()) {
+            eprintln!("{msg}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1158,19 +1172,5 @@ mod tests {
         let s = summarize_body(&long);
         assert!(s.ends_with('…'));
         assert_eq!(s.chars().count(), 201);
-    }
-}
-
-fn log_once(account: &str, msg: String) {
-    record_error(account, &msg);
-    // In TUI mode, never write to stderr — it bleeds onto the alternate
-    // screen and corrupts the UI. The TUI reads the registry instead.
-    if TUI_MODE.load(Ordering::Relaxed) {
-        return;
-    }
-    if let Ok(mut s) = logged_once_set().lock() {
-        if s.insert(msg.clone()) {
-            eprintln!("{msg}");
-        }
     }
 }

@@ -209,7 +209,7 @@ async fn handle_tool_call(id: Option<Value>, params: Value, no_live: bool) -> Va
                 for a in &accounts_to_scan {
                     out.extend(live_session::scan(a, &alive, &[]));
                 }
-                out.sort_by(|x, y| y.last_activity.cmp(&x.last_activity));
+                out.sort_by_key(|x| std::cmp::Reverse(x.last_activity));
                 out
             })
             .await

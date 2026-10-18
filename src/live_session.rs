@@ -348,10 +348,9 @@ fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
     let mut buf = Vec::with_capacity((len - start) as usize);
     f.read_to_end(&mut buf).ok()?;
     if start > 0 {
-        if let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+        {
+            let nl = buf.iter().position(|&b| b == b'\n')?;
             buf.drain(..=nl);
-        } else {
-            return None;
         }
     }
     Some(String::from_utf8_lossy(&buf).into_owned())

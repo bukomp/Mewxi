@@ -720,10 +720,10 @@ fn cat_indicator(activity: &Activity) -> (Span<'static>, u16) {
     // poll cadence so beats land evenly.
     let beat = (millis / 400) % 24;
     let (paw_left, paw_right, eyes) = match beat {
-        1 | 3 | 5 => (false, false, '-'),   // blink
-        11 | 12 | 13 => (true, false, '•'), // left paw
-        17 | 18 | 19 => (false, true, '•'), // right paw
-        _ => (false, false, '•'),           // rest
+        1 | 3 | 5 => (false, false, '-'), // blink
+        11..=13 => (true, false, '•'),    // left paw
+        17..=19 => (false, true, '•'),    // right paw
+        _ => (false, false, '•'),         // rest
     };
     // All busy frames render as a fixed 9-cell slot: outer breathing
     // cell + left-paw slot + 5-cell body + right-paw slot + outer
@@ -751,7 +751,7 @@ fn cat_indicator(activity: &Activity) -> (Span<'static>, u16) {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
-        w as u16,
+        w,
     )
 }
 
@@ -1217,7 +1217,7 @@ fn collect_change_rows(entries: &[ChatEntry]) -> Vec<ChangeRow> {
 /// math uses `chars().count()` — accurate for ASCII / Latin text and
 /// only slightly off for wide-character runs, which the chat log
 /// rarely contains.
-fn apply_selection_highlight(visible: &mut Vec<Line<'static>>, inner: Rect, sel: ChatSelection) {
+fn apply_selection_highlight(visible: &mut [Line<'static>], inner: Rect, sel: ChatSelection) {
     // Clamp the selection to the inner area; nothing outside it can
     // be highlighted (or copied) by design.
     let inner_x_end = inner.x.saturating_add(inner.width);

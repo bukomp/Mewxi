@@ -181,9 +181,9 @@ pub fn render(f: &mut Frame, area: Rect, sessions: &[&SessionRef]) {
     let avail = area.width as usize;
     // Columns are drawn as `col gap col gap … col` (no trailing gap), so
     // `cols` fit in `cols*2 - 1` cells.
-    let max_cols_fit = (avail + 1) / 2;
+    let max_cols_fit = avail.div_ceil(2);
 
-    let mut cols_to_show = total.min(max_cols_fit).max(0);
+    let mut cols_to_show = total.min(max_cols_fit);
     let mut indicator = String::new();
     if total > cols_to_show {
         // Shrink the column count until the trailing overflow indicator

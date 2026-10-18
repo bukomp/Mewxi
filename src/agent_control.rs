@@ -313,60 +313,6 @@ pub fn key_event_to_bytes(key: KeyEvent) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn k(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-    fn ck(code: KeyCode, m: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, m)
-    }
-
-    #[test]
-    fn plain_char_is_utf8() {
-        assert_eq!(key_event_to_bytes(k(KeyCode::Char('y'))), b"y".to_vec());
-    }
-
-    #[test]
-    fn enter_is_carriage_return() {
-        assert_eq!(key_event_to_bytes(k(KeyCode::Enter)), b"\r".to_vec());
-    }
-
-    #[test]
-    fn back_tab_is_csi_z() {
-        assert_eq!(key_event_to_bytes(k(KeyCode::BackTab)), b"\x1b[Z".to_vec());
-    }
-
-    #[test]
-    fn arrows_are_csi_letters() {
-        assert_eq!(key_event_to_bytes(k(KeyCode::Up)), b"\x1b[A".to_vec());
-        assert_eq!(key_event_to_bytes(k(KeyCode::Down)), b"\x1b[B".to_vec());
-        assert_eq!(key_event_to_bytes(k(KeyCode::Right)), b"\x1b[C".to_vec());
-        assert_eq!(key_event_to_bytes(k(KeyCode::Left)), b"\x1b[D".to_vec());
-    }
-
-    #[test]
-    fn ctrl_letter_is_control_byte() {
-        assert_eq!(
-            key_event_to_bytes(ck(KeyCode::Char('a'), KeyModifiers::CONTROL)),
-            vec![0x01]
-        );
-        // Ctrl-] = 0x1d. No longer reserved by mewxi (overlay dismiss
-        // is F10 now); kept here to lock in the byte-encoding contract.
-        assert_eq!(
-            key_event_to_bytes(ck(KeyCode::Char(']'), KeyModifiers::CONTROL)),
-            vec![0x1d]
-        );
-    }
-
-    #[test]
-    fn backspace_is_del_byte() {
-        assert_eq!(key_event_to_bytes(k(KeyCode::Backspace)), vec![0x7f]);
-    }
-}
-
 /// Resolve the `claude` binary to spawn. Honours `MEWXI_CLAUDE_BIN`
 /// override, then the per-account directory's sibling launcher (e.g.
 /// `claude-priv` for `~/.claude-priv`), then plain `claude` on PATH.
@@ -429,4 +375,58 @@ fn build_claude_command(bin: &std::path::Path) -> CommandBuilder {
         }
     }
     CommandBuilder::new(bin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn k(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    fn ck(code: KeyCode, m: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, m)
+    }
+
+    #[test]
+    fn plain_char_is_utf8() {
+        assert_eq!(key_event_to_bytes(k(KeyCode::Char('y'))), b"y".to_vec());
+    }
+
+    #[test]
+    fn enter_is_carriage_return() {
+        assert_eq!(key_event_to_bytes(k(KeyCode::Enter)), b"\r".to_vec());
+    }
+
+    #[test]
+    fn back_tab_is_csi_z() {
+        assert_eq!(key_event_to_bytes(k(KeyCode::BackTab)), b"\x1b[Z".to_vec());
+    }
+
+    #[test]
+    fn arrows_are_csi_letters() {
+        assert_eq!(key_event_to_bytes(k(KeyCode::Up)), b"\x1b[A".to_vec());
+        assert_eq!(key_event_to_bytes(k(KeyCode::Down)), b"\x1b[B".to_vec());
+        assert_eq!(key_event_to_bytes(k(KeyCode::Right)), b"\x1b[C".to_vec());
+        assert_eq!(key_event_to_bytes(k(KeyCode::Left)), b"\x1b[D".to_vec());
+    }
+
+    #[test]
+    fn ctrl_letter_is_control_byte() {
+        assert_eq!(
+            key_event_to_bytes(ck(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            vec![0x01]
+        );
+        // Ctrl-] = 0x1d. No longer reserved by mewxi (overlay dismiss
+        // is F10 now); kept here to lock in the byte-encoding contract.
+        assert_eq!(
+            key_event_to_bytes(ck(KeyCode::Char(']'), KeyModifiers::CONTROL)),
+            vec![0x1d]
+        );
+    }
+
+    #[test]
+    fn backspace_is_del_byte() {
+        assert_eq!(key_event_to_bytes(k(KeyCode::Backspace)), vec![0x7f]);
+    }
 }
