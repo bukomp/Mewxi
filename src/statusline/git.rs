@@ -46,13 +46,22 @@ pub(crate) fn dirty_count(cwd: &Path) -> Option<u64> {
     result
 }
 
+/// Build the `git status` probe. `--no-optional-locks` keeps git from taking
+/// `.git/index.lock` to refresh the index, so killing the probe on timeout can
+/// never leave a stale lock that breaks index-writing git commands.
+fn status_command(cwd: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(["--no-optional-locks", "status", "--porcelain"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .current_dir(cwd);
+    cmd
+}
+
 /// Spawn `git status --porcelain` in `cwd` and count non-empty output
 /// lines, bounded by [`RUN_TIMEOUT`]. Returns `None` on spawn error,
 /// timeout, or non-zero exit (e.g. exit 128 outside a work tree).
 fn run_git_status(cwd: &Path) -> Option<u64> {
-    let mut child = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(cwd)
+    let mut child = status_command(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -190,6 +199,45 @@ mod tests {
         }
 
         assert_eq!(dirty_count(dir.path()), Some(3));
+    }
+
+    #[test]
+    fn status_command_takes_no_optional_locks() {
+        let cmd = status_command(Path::new("."));
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args[0], "--no-optional-locks");
+        assert!(cmd
+            .get_envs()
+            .any(|(k, v)| k == "GIT_OPTIONAL_LOCKS" && v == Some("0".as_ref())));
+    }
+
+    #[test]
+    fn probe_leaves_no_index_lock_and_keeps_index() {
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init"]);
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        git(&["add", "a.txt"]);
+        let index = dir.path().join(".git").join("index");
+        let before = std::fs::read(&index).unwrap();
+
+        assert_eq!(run_git_status(dir.path()), Some(1));
+
+        assert!(!dir.path().join(".git").join("index.lock").exists());
+        assert_eq!(std::fs::read(&index).unwrap(), before);
     }
 
     #[test]
