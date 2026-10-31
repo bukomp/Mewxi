@@ -332,6 +332,15 @@ fn basename(p: &Path) -> std::borrow::Cow<'_, str> {
 
 /// First line of a possibly multi-line OS/stderr message — the rest is
 /// rarely useful in a one-line log entry.
+/// First non-empty stderr line, or the exit status when git printed
+/// nothing (e.g. `--quiet` swallowing the reason).
+fn failure_reason(stderr: &str, status: std::process::ExitStatus) -> String {
+    match stderr.lines().map(str::trim).find(|l| !l.is_empty()) {
+        Some(l) => l.to_string(),
+        None => format!("no output ({status})"),
+    }
+}
+
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("").trim()
 }
@@ -382,17 +391,13 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     };
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        let reason = first_line(&stderr);
+        let reason = failure_reason(&stderr, out.status);
         crate::debug_log::log_event(
             crate::debug_log::LogOrigin::Update,
             crate::debug_log::LogKind::Proc,
             &format!("{label} failed — {reason}"),
         );
-        return Err(anyhow!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(anyhow!("git {} failed: {}", args.join(" "), reason));
     }
     crate::debug_log::log_event(
         crate::debug_log::LogOrigin::Update,
@@ -423,17 +428,13 @@ fn git_norepo(args: &[&str]) -> Result<String> {
     };
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        let reason = first_line(&stderr);
+        let reason = failure_reason(&stderr, out.status);
         crate::debug_log::log_event(
             crate::debug_log::LogOrigin::Update,
             crate::debug_log::LogKind::Proc,
             &format!("{label} failed — {reason}"),
         );
-        return Err(anyhow!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(anyhow!("git {} failed: {}", args.join(" "), reason));
     }
     crate::debug_log::log_event(
         crate::debug_log::LogOrigin::Update,
@@ -641,7 +642,10 @@ fn check_now_inner() -> Result<UpdateStatus> {
 /// [`check_now`]'s local-checkout path: fetch, then compare against
 /// origin's tags (release) or default branch (dev).
 fn check_local(repo: &Path, channel: UpdateChannel) -> Result<UpdateStatus> {
-    git(repo, &["fetch", "--quiet", "--tags", "origin"]).context("fetching origin")?;
+    // `--force`: origin's tags are authoritative here. Without it, a local
+    // tag that diverged from origin (e.g. after a history rewrite) makes
+    // git exit 1 with "would clobber existing tag" — hidden by --quiet.
+    git(repo, &["fetch", "--quiet", "--tags", "--force", "origin"]).context("fetching origin")?;
 
     Ok(match channel {
         UpdateChannel::Release => {
@@ -878,7 +882,7 @@ pub fn apply_now() -> Result<String> {
     {
         RepoSource::Local(repo) => {
             println!("  fetching origin …");
-            git(&repo, &["fetch", "--quiet", "--tags", "origin"]).context("fetching origin")?;
+            git(&repo, &["fetch", "--quiet", "--tags", "--force", "origin"]).context("fetching origin")?;
             let origin =
                 git(&repo, &["remote", "get-url", "origin"]).context("reading origin URL")?;
             let git_ref = match channel {
