@@ -60,16 +60,16 @@ pub fn session_limit_share(
 ) -> LimitShare {
     let five_h_pct = (|| {
         let u = live?.five_hour.as_ref()?.utilization;
-        let sess: f64 = agg
+        // Fold from +0.0 rather than `.sum()`: an empty f64 sum is -0.0
+        // (std's float additive identity), which renders as "-0.0%", and
+        // `.max(0.0)` won't fix it — `f64::max` may return either zero.
+        let sess = agg
             .five_h_records
             .iter()
             .filter(|r| r.session_id == session_id)
-            .map(|r| r.cost_usd)
-            .sum();
+            .fold(0.0_f64, |acc, r| acc + r.cost_usd);
         let acct = agg.rolling_5h.cost_usd;
         if acct > 1e-6 {
-            // An empty f64 sum is -0.0 (std's float additive identity),
-            // which would render as "-0.0%"; clamp keeps the share ≥ +0.0.
             Some((u * sess / acct).max(0.0))
         } else {
             None
