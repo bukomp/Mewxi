@@ -126,11 +126,12 @@ fn render_one_account_compact(f: &mut Frame, area: Rect, pa: &PerAccount) {
             Style::default().fg(P_TEXT),
         ),
     ];
-    spans.extend(pct_span(
-        "5h",
-        live.and_then(|l| l.five_hour.as_ref())
-            .map(|w| w.utilization),
-    ));
+    if !live.is_some_and(|l| l.has_no_five_hour_window()) {
+        spans.extend(pct_span(
+            "5h",
+            live.and_then(|l| l.five_hour.as_ref()).map(|w| w.utilization),
+        ));
+    }
     spans.extend(pct_span(
         "wk",
         live.and_then(|l| l.seven_day.as_ref())
@@ -191,7 +192,13 @@ fn render_one_account(f: &mut Frame, area: Rect, pa: &PerAccount) {
             let mins = (t - Utc::now()).num_minutes().max(0);
             format!("reset {} ({:>3}m)", local.format("%H:%M"), mins)
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            if live.is_some_and(|l| l.has_no_five_hour_window()) {
+                "none on plan".to_string()
+            } else {
+                String::new()
+            }
+        });
     let seven_d_meta = live
         .and_then(|l| l.seven_day.as_ref())
         .and_then(|w| w.resets_at)

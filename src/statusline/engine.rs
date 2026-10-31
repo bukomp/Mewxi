@@ -99,8 +99,8 @@ impl Ctx {
         // --- extra-usage promotion (identical to watch.rs) ----------------
         let five_h_at_cap = live
             .as_ref()
-            .and_then(|l| l.five_hour.as_ref())
-            .is_some_and(|w| w.utilization >= 100.0);
+            .and_then(|l| l.primary_window())
+            .is_some_and(|(_, w)| w.utilization >= 100.0);
         let billing_extra = five_h_at_cap
             && live
                 .as_ref()

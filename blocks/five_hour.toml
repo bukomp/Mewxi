@@ -2,7 +2,9 @@
 # (est)". {five_h_segment} is the whole meter (label + percent + live/
 # stale/est tag + any overage) as one self-colored ANSI run, because the
 # live and local-estimate forms differ structurally. Hidden while extra
-# usage is being billed (the `extra` block leads instead).
+# usage is being billed (the `extra` block leads instead). On plans with
+# no 5h window (Ultra) the live meter shows the weekly window instead,
+# e.g. "week 3.0% (live)", and {reset_segment} shows the weekly reset.
 id = "five_hour"
 label = "5-hour window"
 when = "five_h_visible"
