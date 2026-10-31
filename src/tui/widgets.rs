@@ -218,6 +218,18 @@ pub fn render_header(
 }
 
 pub fn render_5h_gauge(f: &mut Frame, area: Rect, agg: &Aggregate, live: Option<&LiveUsage>) {
+    // Plans without a 5h window (Ultra): say so instead of falling back to
+    // the local estimate, which would invent a limit that doesn't exist.
+    if live.is_some_and(|l| l.has_no_five_hour_window()) {
+        let p = Paragraph::new(Line::from(Span::styled(
+            "no 5h limit on this plan",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL).title("5h"));
+        f.render_widget(p, area);
+        return;
+    }
     let (pct, suffix, source_tag) = match live.and_then(|l| l.five_hour.as_ref()) {
         Some(w) => {
             let reset = w

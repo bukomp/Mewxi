@@ -270,6 +270,21 @@ impl LiveUsage {
     pub fn fable_limit(&self) -> Option<&LimitEntry> {
         self.model_weekly_limit("Fable")
     }
+
+    /// The window that actually gates this account, with its short label.
+    /// Normally the rolling 5h window; plans without one (Ultra, since
+    /// 2026-10-30, sends `five_hour: null`) are gated by the weekly window
+    /// instead, so that takes its place.
+    pub fn has_no_five_hour_window(&self) -> bool {
+        self.five_hour.is_none() && self.seven_day.is_some()
+    }
+
+    pub fn primary_window(&self) -> Option<(&'static str, &WindowUsage)> {
+        self.five_hour
+            .as_ref()
+            .map(|w| ("5h", w))
+            .or_else(|| self.seven_day.as_ref().map(|w| ("week", w)))
+    }
 }
 
 #[derive(Debug)]

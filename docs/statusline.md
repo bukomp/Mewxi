@@ -96,7 +96,7 @@ template = " <grey>|</grey> <cyan>ctx</cyan> {ctx_pct} ({ctx_cur}/{ctx_cap})"
 | `{account}` | account name (plain) |
 | `{model}` | compacted model name, e.g. `Opus 4.8` |
 | `{think}` | ` · think:LVL` when extended thinking is on, else empty |
-| `{five_h_segment}` | the whole 5h meter (label + % + live/stale/est tag) |
+| `{five_h_segment}` | the whole 5h meter (label + % + live/stale/est tag); on plans with no 5h window (Ultra) it shows the weekly window instead, labelled `week` |
 | `{reset_segment}` | the whole ` → reset HH:MM (Nm)` run |
 | `{ctx_pct}` `{ctx_cur}` `{ctx_cap}` | context %, used tokens, cap |
 | `{extra_pct}` `{extra_amounts}` | extra-usage % and `($used/$limit)` |

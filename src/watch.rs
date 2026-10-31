@@ -4,7 +4,8 @@
 //! Claude Code's `statusLine`, scoped to whichever account owns the
 //! active transcript. It composes up to three segments:
 //!
-//! - 5h window (live if available, local estimate otherwise) + reset time.
+//! - 5h window (live if available, local estimate otherwise) + reset time;
+//!   the weekly window when the plan has no 5h window (Ultra).
 //! - Active-extra-usage segment (promotes itself to leading position
 //!   and hides the 5h % once the current 5h window is at its cap).
 //! - Per-session context (`ctx N%`) when a transcript is in scope.
@@ -162,8 +163,8 @@ pub(crate) fn render_status_legacy(
     live: Option<&live_usage::LiveUsage>,
 ) -> String {
     let five_h_at_cap = live
-        .and_then(|l| l.five_hour.as_ref())
-        .is_some_and(|w| w.utilization >= 100.0);
+        .and_then(|l| l.primary_window())
+        .is_some_and(|(_, w)| w.utilization >= 100.0);
 
     let billing_extra = five_h_at_cap
         && live
@@ -291,7 +292,7 @@ pub(crate) fn pct_color(pct: f64) -> &'static str {
 
 pub(crate) fn five_h_from_live(live: Option<&live_usage::LiveUsage>) -> Option<(String, String)> {
     let l = live?;
-    let w = l.five_hour.as_ref()?;
+    let (label, w) = l.primary_window()?;
     let pct = w.utilization;
     let color = pct_color(pct);
     let tag = if l.is_stale() {
@@ -300,7 +301,7 @@ pub(crate) fn five_h_from_live(live: Option<&live_usage::LiveUsage>) -> Option<(
         " \x1b[90m(live)\x1b[0m".to_string()
     };
     let seg = format!(
-        "\x1b[36m5h\x1b[0m \x1b[{c}m{p:.1}%\x1b[0m{tag}",
+        "\x1b[36m{label}\x1b[0m \x1b[{c}m{p:.1}%\x1b[0m{tag}",
         c = color,
         p = pct,
         tag = tag,
@@ -309,8 +310,8 @@ pub(crate) fn five_h_from_live(live: Option<&live_usage::LiveUsage>) -> Option<(
 }
 
 pub(crate) fn five_h_reset_from_live(live: Option<&live_usage::LiveUsage>) -> String {
-    live.and_then(|l| l.five_hour.as_ref())
-        .map(|w| format_reset(w.resets_at))
+    live.and_then(|l| l.primary_window())
+        .map(|(_, w)| format_reset(w.resets_at))
         .unwrap_or_default()
 }
 
@@ -319,11 +320,16 @@ pub(crate) fn format_reset(resets_at: Option<DateTime<Utc>>) -> String {
         .map(|t| {
             let local = t.with_timezone(&Local);
             let remaining = (t - Utc::now()).num_minutes().max(0);
-            format!(
-                " \x1b[90m→\x1b[0m reset \x1b[33m{}\x1b[0m \x1b[90m({}m)\x1b[0m",
-                local.format("%H:%M"),
-                remaining
-            )
+            // Weekly resets are days out: show the weekday and d/h left.
+            let (when, left) = if remaining >= 24 * 60 {
+                (
+                    local.format("%a %H:%M").to_string(),
+                    format!("{}d {}h", remaining / 1440, remaining % 1440 / 60),
+                )
+            } else {
+                (local.format("%H:%M").to_string(), format!("{remaining}m"))
+            };
+            format!(" \x1b[90m→\x1b[0m reset \x1b[33m{when}\x1b[0m \x1b[90m({left})\x1b[0m")
         })
         .unwrap_or_default()
 }
@@ -618,6 +624,25 @@ mod golden_tests {
             cwd: None,
         };
         assert_identical(&account, true, None, meta, &agg, Some(&live));
+    }
+
+    #[test]
+    fn no_five_hour_window_shows_weekly() {
+        // Ultra: the endpoint sends `five_hour: null`, only `seven_day`.
+        let (_tmp, account) = account();
+        let agg = stats::Aggregate::default();
+        let mut live = live_with(None, None);
+        live.seven_day = Some(WindowUsage {
+            utilization: 3.0,
+            resets_at: Some(Utc::now() + ChronoDuration::hours(5 * 24 + 2)),
+        });
+        assert_identical(&account, false, None, SessionMeta::default(), &agg, Some(&live));
+        let out = crate::statusline::compose_default_from_data(
+            &account, false, None, SessionMeta::default(), &agg, Some(&live),
+        );
+        assert!(out.contains("week\x1b[0m \x1b[32m3.0%"), "{out:?}");
+        assert!(out.contains("(5d 1h)") || out.contains("(5d 2h)"), "{out:?}");
+        assert!(!out.contains("5h") && !out.contains("(est)"), "{out:?}");
     }
 
     #[test]
